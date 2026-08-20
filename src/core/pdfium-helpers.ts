@@ -735,3 +735,389 @@ export function removeTextObjectsInRects(
   return true;
 }
 
+/**
+ * Finds a text object within the given bounding box and updates its text string.
+ * This is used for in-place text editing to preserve the original embedded font.
+ * 
+ * @param engine The PdfiumEngine instance.
+ * @param mod The WASM module.
+ * @param pageHandle The handle to the page.
+ * @param targetLeft The left coordinate of the bounding box.
+ * @param targetBottom The bottom coordinate of the bounding box.
+ * @param targetWidth The width of the bounding box.
+ * @param targetFontSize The font size (used as vertical tolerance).
+ * @param newText The new text string to set.
+ * @returns boolean true if an object was found and modified, false otherwise.
+ */
+export function setTextObjectInBounds(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  pageHandle: number,
+  spanLeft: number,
+  spanBaselineY: number,
+  spanWidth: number,
+  spanFontSize: number,
+  newText: string,
+  matrix?: PdfMatrix
+): boolean {
+  const objectCount = mod.FPDFPage_CountObjects(pageHandle);
+  if (objectCount === 0) return false;
+
+  const hasBoundsApi = typeof mod.FPDFPageObj_GetBounds === 'function';
+  if (!hasBoundsApi) return false;
+
+  // Match the exact bounding region used by removeTextObjectsInBounds
+  const targetLeft = spanLeft - 2;
+  const targetRight = spanLeft + spanWidth + 2;
+  const targetBottom = spanBaselineY - spanFontSize * 0.4;
+  const targetTop = spanBaselineY + spanFontSize * 1.1;
+
+  const leftPtr = safeAllocate(engine, 4);
+  const bottomPtr = safeAllocate(engine, 4);
+  const rightPtr = safeAllocate(engine, 4);
+  const topPtr = safeAllocate(engine, 4);
+
+  let modified = false;
+  let isFirst = true;
+
+  try {
+    for (let i = 0; i < objectCount; i++) {
+      const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
+      if (!objHandle) continue;
+
+      if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
+
+      const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
+      if (!ok) continue;
+
+      const heapF32 = mod.pdfium.HEAPF32;
+      const objLeft = heapF32[leftPtr >> 2];
+      const objBottom = heapF32[bottomPtr >> 2];
+      const objRight = heapF32[rightPtr >> 2];
+      const objTop = heapF32[topPtr >> 2];
+
+      const overlaps =
+        objLeft < targetRight && objRight > targetLeft &&
+        objBottom < targetTop && objTop > targetBottom;
+
+      if (overlaps) {
+        // Set the first object to the actual new text,
+        // set all subsequent objects to a space to hide them
+        const textToSet = isFirst ? newText : ' ';
+        const textBuf = encodeUtf16Le(engine, textToSet);
+        try {
+          mod.FPDFText_SetText(objHandle, textBuf.ptr);
+          if (isFirst && matrix) {
+            setPageObjectMatrix(engine, mod, objHandle, matrix);
+          }
+        } finally {
+          textBuf.dispose();
+        }
+        modified = true;
+        isFirst = false;
+      }
+    }
+  } finally {
+    engine.freeMemory(leftPtr);
+    engine.freeMemory(bottomPtr);
+    engine.freeMemory(rightPtr);
+    engine.freeMemory(topPtr);
+  }
+
+  return modified;
+}
+
+/**
+ * Identify the exact page object indices that back a text span using
+ * center-containment matching. An object is considered part of the span
+ * only if the object's geometric center falls within the span's tight
+ * bounding region. This avoids catching neighboring text objects that
+ * merely overlap at the edges.
+ *
+ * @param engine The PDFium engine instance.
+ * @param mod The extended WASM module instance.
+ * @param pageHandle Handle to the loaded page.
+ * @param spanLeft Left coordinate of the text span.
+ * @param spanBaselineY Baseline Y coordinate of the text span (PDF coords).
+ * @param spanWidth Width of the text span.
+ * @param spanFontSize Font size of the text span.
+ * @return Array of page object indices whose centers fall inside the span region.
+ */
+export function findTextObjectIndicesForSpan(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  pageHandle: number,
+  spanLeft: number,
+  spanBaselineY: number,
+  spanWidth: number,
+  spanFontSize: number,
+): number[] {
+  const objectCount = mod.FPDFPage_CountObjects(pageHandle);
+  if (objectCount === 0) return [];
+
+  const hasBoundsApi = typeof mod.FPDFPageObj_GetBounds === 'function';
+  if (!hasBoundsApi) return [];
+
+  // Tight bounding region with minimal tolerance (1pt horizontal)
+  const targetLeft = spanLeft - 1;
+  const targetRight = spanLeft + spanWidth + 1;
+  const targetBottom = spanBaselineY - spanFontSize * 0.3;
+  const targetTop = spanBaselineY + spanFontSize * 0.9;
+
+  const matchedObjects: Array<{ index: number; left: number; top: number }> = [];
+
+  const leftPtr = safeAllocate(engine, 4);
+  const bottomPtr = safeAllocate(engine, 4);
+  const rightPtr = safeAllocate(engine, 4);
+  const topPtr = safeAllocate(engine, 4);
+
+  try {
+    for (let i = 0; i < objectCount; i++) {
+      const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
+      if (!objHandle) continue;
+
+      if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
+
+      const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
+      if (!ok) continue;
+
+      const heapF32 = mod.pdfium.HEAPF32;
+      const objLeft = heapF32[leftPtr >> 2];
+      const objBottom = heapF32[bottomPtr >> 2];
+      const objRight = heapF32[rightPtr >> 2];
+      const objTop = heapF32[topPtr >> 2];
+
+      const objCenterX = (objLeft + objRight) / 2;
+      const objCenterY = (objBottom + objTop) / 2;
+
+      // Require the object's center to be inside the span's tight region
+      const centerInTarget =
+        objCenterX >= targetLeft && objCenterX <= targetRight &&
+        objCenterY >= targetBottom && objCenterY <= targetTop;
+
+      if (centerInTarget) {
+        matchedObjects.push({ index: i, left: objLeft, top: objTop });
+      }
+    }
+  } finally {
+    engine.freeMemory(leftPtr);
+    engine.freeMemory(bottomPtr);
+    engine.freeMemory(rightPtr);
+    engine.freeMemory(topPtr);
+  }
+
+  // Sort matched objects geometrically: PDF top-to-bottom, then left-to-right
+  matchedObjects.sort((a, b) => {
+    if (Math.abs(a.top - b.top) > 3.0) {
+      return b.top - a.top;
+    }
+    return a.left - b.left;
+  });
+
+  return matchedObjects.map((m) => m.index);
+}
+
+/**
+ * Remove specific page objects by their indices. Sorts indices in
+ * descending order before removal so that earlier indices remain valid
+ * as later objects are removed.
+ *
+ * @param mod The extended WASM module instance.
+ * @param pageHandle Handle to the loaded page.
+ * @param indices Array of zero-based page object indices to remove.
+ * @return True if at least one object was removed.
+ */
+export function removeTextObjectsByIndex(
+  mod: ExtendedWrappedPdfiumModule,
+  pageHandle: number,
+  indices: number[],
+): boolean {
+  if (indices.length === 0) return false;
+
+  const hasRemoveApi =
+    typeof mod.FPDFPage_GetObject === 'function' &&
+    typeof mod.FPDFPage_RemoveObject === 'function';
+  if (!hasRemoveApi) return false;
+
+  // Descending order keeps lower indices stable during removal
+  const sorted = [...indices].sort((a, b) => b - a);
+  const hasDestroy = typeof mod.FPDFPageObj_Destroy === 'function';
+  let removed = false;
+
+  for (const idx of sorted) {
+    const objHandle = mod.FPDFPage_GetObject(pageHandle, idx);
+    if (!objHandle) continue;
+
+    mod.FPDFPage_RemoveObject(pageHandle, objHandle);
+    if (hasDestroy) {
+      mod.FPDFPageObj_Destroy(objHandle);
+    }
+    removed = true;
+  }
+
+  return removed;
+}
+
+/**
+ * Set the text content of a specific page object identified by index.
+ * Optionally applies a transformation matrix. Only operates on text-type
+ * page objects.
+ *
+ * @param engine The PDFium engine instance.
+ * @param mod The extended WASM module instance.
+ * @param pageHandle Handle to the loaded page.
+ * @param objectIndex Zero-based index of the target page object.
+ * @param newText The replacement text string.
+ * @param matrix Optional transformation matrix to apply.
+ * @return True if the object was found and modified.
+ */
+export function setTextObjectByIndex(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  pageHandle: number,
+  objectIndex: number,
+  newText: string,
+  matrix?: PdfMatrix,
+): boolean {
+  const objHandle = mod.FPDFPage_GetObject(pageHandle, objectIndex);
+  if (!objHandle) return false;
+
+  if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) return false;
+
+  const textBuf = encodeUtf16Le(engine, newText);
+  try {
+    mod.FPDFText_SetText(objHandle, textBuf.ptr);
+    if (matrix) {
+      setPageObjectMatrix(engine, mod, objHandle, matrix);
+    }
+  } finally {
+    textBuf.dispose();
+  }
+
+  return true;
+}
+
+/**
+ * Draws a white cover rectangle over a text span region.
+ *
+ * Used as a fallback when object removal API is unavailable.
+ *
+ * @param mod The extended WASM module instance.
+ * @param pageHandle Handle to the loaded page.
+ * @param spanLeft Left coordinate of text span.
+ * @param spanBaselineY Baseline Y coordinate of text span.
+ * @param spanWidth Width of text span.
+ * @param spanFontSize Font size of text span.
+ */
+export function drawCoverRect(
+  mod: ExtendedWrappedPdfiumModule,
+  pageHandle: number,
+  spanLeft: number,
+  spanBaselineY: number,
+  spanWidth: number,
+  spanFontSize: number,
+): void {
+  const rectLeft = Math.max(0, spanLeft - 1.5);
+  const rectBottom = Math.max(0, spanBaselineY - spanFontSize * 0.3);
+  const rectWidth = spanWidth + 4.0;
+  const rectHeight = spanFontSize * 1.45;
+
+  const rectObj = mod.FPDFPageObj_CreateNewRect(rectLeft, rectBottom, rectWidth, rectHeight);
+  if (!rectObj) return;
+
+  // Fill mode = 1 (alternate), stroke = false
+  mod.FPDFPageObj_SetFillColor(rectObj, 255, 255, 255, 255);
+  mod.FPDFPath_SetDrawMode(rectObj, 1, false);
+  mod.FPDFPage_InsertObject(pageHandle, rectObj);
+}
+
+// Font info extraction
+
+/**
+ * Reads the font name of a specific character in a text page.
+ *
+ * @param engine The PDFium engine instance.
+ * @param mod The extended WASM module instance.
+ * @param textPageHandle Handle to the loaded text page.
+ * @param charIndex Zero-based index of the target character.
+ * @return The extracted font name string, or 'Helvetica' as fallback.
+ */
+export function readCharFontName(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  textPageHandle: number,
+  charIndex: number,
+): string {
+  if (typeof mod.FPDFText_GetFontInfo !== 'function') {
+    return 'Helvetica';
+  }
+
+  const fontBufPtr = safeAllocate(engine, 128);
+  const flagsPtr = safeAllocate(engine, 4);
+
+  try {
+    const len = mod.FPDFText_GetFontInfo(textPageHandle, charIndex, fontBufPtr, 128, flagsPtr);
+    if (len <= 0) return 'Helvetica';
+
+    const heapU8 = mod.pdfium.HEAPU8;
+    let fontStr = '';
+    for (let k = 0; k < len; k++) {
+      const b = heapU8[fontBufPtr + k];
+      if (b === 0) break;
+      fontStr += String.fromCharCode(b);
+    }
+    return fontStr.trim() || 'Helvetica';
+  } catch {
+    return 'Helvetica';
+  } finally {
+    engine.freeMemory(fontBufPtr);
+    engine.freeMemory(flagsPtr);
+  }
+}
+
+/**
+ * Reads the fill color of a specific character in a text page.
+ *
+ * @param engine The PDFium engine instance.
+ * @param mod The extended WASM module instance.
+ * @param textPageHandle Handle to the loaded text page.
+ * @param charIndex Zero-based index of the target character.
+ * @return Object containing red, green, blue, and alpha color components (0-255).
+ */
+export function readCharFillColor(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  textPageHandle: number,
+  charIndex: number,
+): { r: number; g: number; b: number; a: number } {
+  const defaultColor = { r: 0, g: 0, b: 0, a: 255 };
+
+  if (typeof mod.FPDFText_GetFillColor !== 'function') {
+    return defaultColor;
+  }
+
+  const rPtr = safeAllocate(engine, 4);
+  const gPtr = safeAllocate(engine, 4);
+  const bPtr = safeAllocate(engine, 4);
+  const aPtr = safeAllocate(engine, 4);
+
+  try {
+    const ok = mod.FPDFText_GetFillColor(textPageHandle, charIndex, rPtr, gPtr, bPtr, aPtr);
+    if (!ok) return defaultColor;
+
+    const heap32 = mod.pdfium.HEAP32;
+    return {
+      r: heap32[rPtr >> 2] & 0xff,
+      g: heap32[gPtr >> 2] & 0xff,
+      b: heap32[bPtr >> 2] & 0xff,
+      a: heap32[aPtr >> 2] & 0xff,
+    };
+  } catch {
+    return defaultColor;
+  } finally {
+    engine.freeMemory(rPtr);
+    engine.freeMemory(gPtr);
+    engine.freeMemory(bPtr);
+    engine.freeMemory(aPtr);
+  }
+}
