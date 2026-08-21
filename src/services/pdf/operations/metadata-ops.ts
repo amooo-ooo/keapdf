@@ -378,3 +378,390 @@ export function readPdfiumMetaText(engine: PdfiumEngine, docHandle: number, tagN
   const requiredBytes = mod.FPDF_GetMetaText(docHandle, tagName, 0, 0);
   if (requiredBytes <= 2) return '';
 
+  const bufPtr = engine.allocateMemory(requiredBytes);
+  try {
+    mod.FPDF_GetMetaText(docHandle, tagName, bufPtr, requiredBytes);
+    const uint8 = new Uint8Array(mod.pdfium.HEAPU8.buffer, bufPtr, requiredBytes - 2);
+    let textStr = '';
+    for (let i = 0; i < uint8.length; i += 2) {
+      const charCode = uint8[i] | (uint8[i + 1] << 8);
+      if (charCode !== 0) textStr += String.fromCharCode(charCode);
+    }
+    return textStr;
+  } finally {
+    engine.freeMemory(bufPtr);
+  }
+}
+
+/**
+ * Dynamically extracts all standard and custom PDF metadata tags, XMP packets,
+ * and technical document properties.
+ *
+ * @param engine The PDFium engine instance.
+ * @param docHandle The active document handle.
+ * @param rawBuffer Optional binary buffer of the active PDF.
+ * @param fileName Optional file name.
+ * @param sizeBytes Optional physical size in bytes.
+ * @return A fully populated DocumentMetadata object.
+ */
+export async function extractAllMetadata(
+  engine: PdfiumEngine,
+  docHandle: number,
+  rawBuffer?: ArrayBuffer | Uint8Array,
+  _fileName?: string,
+  sizeBytes?: number
+): Promise<DocumentMetadata> {
+  const mod = engine.getModule();
+
+  // 1. Read standard PDFium metadata
+  const title = readPdfiumMetaText(engine, docHandle, 'Title');
+  const author = readPdfiumMetaText(engine, docHandle, 'Author');
+  const subject = readPdfiumMetaText(engine, docHandle, 'Subject');
+  const keywords = readPdfiumMetaText(engine, docHandle, 'Keywords');
+  const creator = readPdfiumMetaText(engine, docHandle, 'Creator');
+  const producer = readPdfiumMetaText(engine, docHandle, 'Producer');
+  const creationDate = readPdfiumMetaText(engine, docHandle, 'CreationDate');
+  const modDate = readPdfiumMetaText(engine, docHandle, 'ModDate');
+  const rawTrapped = mod.EPDF_GetMetaTrapped(docHandle);
+
+  const pageCount = mod.FPDF_GetPageCount(docHandle);
+  const isEncrypted = mod.EPDF_IsEncrypted(docHandle);
+  const permissions = mod.FPDF_GetDocPermissions(docHandle);
+  const signaturesCount = mod.FPDF_GetSignatureCount(docHandle);
+  const attachmentsCount = mod.FPDFDoc_GetAttachmentCount(docHandle);
+
+  let versionStr = '1.4';
+  const versionPtr = engine.allocateMemory(4);
+  try {
+    const hasVersion = mod.FPDF_GetFileVersion(docHandle, versionPtr);
+    if (hasVersion) {
+      const view = new Int32Array(mod.pdfium.HEAPU8.buffer, versionPtr, 1);
+      const rawVersion = view[0];
+      versionStr = `${Math.floor(rawVersion / 10)}.${rawVersion % 10}`;
+    }
+  } finally {
+    engine.freeMemory(versionPtr);
+  }
+
+  // Trapped status translation
+  let trappedStr = 'Unknown';
+  if (rawTrapped === 1) trappedStr = 'True';
+  else if (rawTrapped === 2) trappedStr = 'False';
+
+  // 2. Prepare dynamic key collections
+  const customMetadata: Record<string, string> = {};
+  const allEntries: MetadataEntry[] = [];
+  const standardDict: Record<string, string> = {
+    Title: title,
+    Author: author,
+    Subject: subject,
+    Keywords: keywords,
+    Creator: creator,
+    Producer: producer,
+    CreationDate: creationDate,
+    ModDate: modDate,
+    Trapped: trappedStr !== 'Unknown' ? trappedStr : '',
+  };
+
+  let hasXmp = false;
+  let xmpString = '';
+
+  // 3. Inspect full buffer using pdf-lib if buffer is available
+  if (rawBuffer && rawBuffer.byteLength > 0) {
+    try {
+      const bytes = rawBuffer instanceof Uint8Array ? rawBuffer : new Uint8Array(rawBuffer);
+      const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+
+      // Inspect Info Dictionary
+      const infoRef = pdfDoc.context.trailerInfo.Info;
+      if (infoRef) {
+        const infoDict = pdfDoc.context.lookup(infoRef);
+        if (infoDict instanceof PDFDict) {
+          for (const [keyName, val] of infoDict.entries()) {
+            const rawKeyStr = keyName.asString();
+            const cleanKey = rawKeyStr.replace(/^\//, '').trim();
+            const decodedVal = decodePdfObjectValue(val);
+
+            if (!decodedVal || decodedVal === '()' || decodedVal === '<>') continue;
+
+            const isStandard = STANDARD_INFO_KEYS.has(cleanKey);
+            let formattedVal = decodedVal;
+
+            if (cleanKey === 'CreationDate' || cleanKey === 'ModDate' || cleanKey === 'SourceModified') {
+              formattedVal = parsePdfDate(decodedVal).formatted;
+            }
+
+            if (isStandard) {
+              if (!standardDict[cleanKey]) {
+                standardDict[cleanKey] = decodedVal;
+              }
+            } else {
+              customMetadata[cleanKey] = decodedVal;
+            }
+
+            // Avoid duplicate entries
+            const existingIdx = allEntries.findIndex((e) => e.key === cleanKey);
+            if (existingIdx >= 0) {
+              allEntries[existingIdx] = {
+                key: cleanKey,
+                rawKey: rawKeyStr,
+                value: decodedVal,
+                isStandard,
+                formattedValue: formattedVal !== decodedVal ? formattedVal : undefined,
+              };
+            } else {
+              allEntries.push({
+                key: cleanKey,
+                rawKey: rawKeyStr,
+                value: decodedVal,
+                isStandard,
+                formattedValue: formattedVal !== decodedVal ? formattedVal : undefined,
+              });
+            }
+          }
+        }
+      }
+
+      // Inspect XMP stream in catalog
+      if (pdfDoc.catalog.has(PDFName.of('Metadata'))) {
+        const metaRef = pdfDoc.catalog.get(PDFName.of('Metadata'));
+        if (metaRef) {
+          const stream = pdfDoc.context.lookup(metaRef);
+          if (stream instanceof PDFStream) {
+            const rawContents = stream.getContents();
+            hasXmp = true;
+            xmpString = new TextDecoder('utf-8', { fatal: false }).decode(rawContents);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to parse extended PDF metadata via pdf-lib:', err);
+    }
+  }
+
+  // Ensure standard entries are present in allEntries list if they have values
+  for (const [k, v] of Object.entries(standardDict)) {
+    if (v && !allEntries.some((e) => e.key === k)) {
+      let formattedVal = v;
+      if (k === 'CreationDate' || k === 'ModDate') {
+        formattedVal = parsePdfDate(v).formatted;
+      }
+      allEntries.push({
+        key: k,
+        rawKey: `/${k}`,
+        value: v,
+        isStandard: true,
+        formattedValue: formattedVal !== v ? formattedVal : undefined,
+      });
+    }
+  }
+
+  // Parse keywords into array
+  const keywordsVal = standardDict.Keywords || keywords;
+  const keywordsArray = keywordsVal
+    ? keywordsVal
+        .split(/[,;]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+
+  const bytesCount = sizeBytes ?? (rawBuffer ? rawBuffer.byteLength : 0);
+
+  return {
+    title: standardDict.Title || title || '',
+    author: standardDict.Author || author || '',
+    subject: standardDict.Subject || subject || '',
+    keywords: keywordsVal || '',
+    creator: standardDict.Creator || creator || '',
+    producer: standardDict.Producer || producer || '',
+    creationDate: standardDict.CreationDate || creationDate || '',
+    modDate: standardDict.ModDate || modDate || '',
+    trappedStatus: rawTrapped,
+    trapped: trappedStr,
+    keywordsArray,
+    creationDateFormatted: parsePdfDate(standardDict.CreationDate || creationDate).formatted,
+    modDateFormatted: parsePdfDate(standardDict.ModDate || modDate).formatted,
+    customMetadata,
+    allEntries,
+    pdfVersion: versionStr,
+    pageCount,
+    sizeBytes: bytesCount,
+    sizeFormatted: formatByteSize(bytesCount),
+    isEncrypted,
+    permissions,
+    signaturesCount,
+    attachmentsCount,
+    hasXmp,
+    xmpString: xmpString || undefined,
+  };
+}
+
+/**
+ * Synchronously retrieves baseline metadata from PDFium handles.
+ *
+ * @param engine The PDFium engine instance.
+ * @param docHandle The active document handle.
+ * @return A DocumentMetadata object with basic tags.
+ */
+export function getMetadata(engine: PdfiumEngine, docHandle: number): DocumentMetadata {
+  const mod = engine.getModule();
+
+  const title = readPdfiumMetaText(engine, docHandle, 'Title');
+  const author = readPdfiumMetaText(engine, docHandle, 'Author');
+  const subject = readPdfiumMetaText(engine, docHandle, 'Subject');
+  const keywords = readPdfiumMetaText(engine, docHandle, 'Keywords');
+  const creator = readPdfiumMetaText(engine, docHandle, 'Creator');
+  const producer = readPdfiumMetaText(engine, docHandle, 'Producer');
+  const creationDate = readPdfiumMetaText(engine, docHandle, 'CreationDate');
+  const modDate = readPdfiumMetaText(engine, docHandle, 'ModDate');
+  const rawTrapped = mod.EPDF_GetMetaTrapped(docHandle);
+
+  let trappedStr = 'Unknown';
+  if (rawTrapped === 1) trappedStr = 'True';
+  else if (rawTrapped === 2) trappedStr = 'False';
+
+  const allEntries: MetadataEntry[] = [];
+  const pushIf = (key: string, val: string) => {
+    if (val) {
+      let formatted = val;
+      if (key === 'CreationDate' || key === 'ModDate') {
+        formatted = parsePdfDate(val).formatted;
+      }
+      allEntries.push({
+        key,
+        rawKey: `/${key}`,
+        value: val,
+        isStandard: true,
+        formattedValue: formatted !== val ? formatted : undefined,
+      });
+    }
+  };
+
+  pushIf('Title', title);
+  pushIf('Author', author);
+  pushIf('Subject', subject);
+  pushIf('Keywords', keywords);
+  pushIf('Creator', creator);
+  pushIf('Producer', producer);
+  pushIf('CreationDate', creationDate);
+  pushIf('ModDate', modDate);
+
+  const keywordsArray = keywords
+    ? keywords
+        .split(/[,;]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+
+  return {
+    title,
+    author,
+    subject,
+    keywords,
+    creator,
+    producer,
+    creationDate,
+    modDate,
+    trappedStatus: rawTrapped,
+    trapped: trappedStr,
+    keywordsArray,
+    creationDateFormatted: parsePdfDate(creationDate).formatted,
+    modDateFormatted: parsePdfDate(modDate).formatted,
+    customMetadata: {},
+    allEntries,
+  };
+}
+
+/**
+ * Updates PDF document metadata and custom dictionary tags.
+ *
+ * @param pdfBytes The binary buffer of the active PDF document.
+ * @param updates The metadata fields and custom tags to update.
+ * @return A promise resolving to the modified PDF byte array.
+ */
+export async function updateDocumentMetadata(
+  pdfBytes: Uint8Array | ArrayBuffer,
+  updates: DocumentMetadataUpdate
+): Promise<Uint8Array> {
+  const bytes = pdfBytes instanceof Uint8Array ? pdfBytes : new Uint8Array(pdfBytes);
+  const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+
+  if (updates.title !== undefined) pdfDoc.setTitle(updates.title);
+  if (updates.author !== undefined) pdfDoc.setAuthor(updates.author);
+  if (updates.subject !== undefined) pdfDoc.setSubject(updates.subject);
+  if (updates.keywords !== undefined) {
+    const kw = Array.isArray(updates.keywords)
+      ? updates.keywords
+      : updates.keywords
+          .split(/[,;]+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+    pdfDoc.setKeywords(kw);
+  }
+  if (updates.creator !== undefined) pdfDoc.setCreator(updates.creator);
+  if (updates.producer !== undefined) pdfDoc.setProducer(updates.producer);
+  if (updates.creationDate !== undefined) {
+    const parsed = parsePdfDate(updates.creationDate);
+    if (parsed.date) pdfDoc.setCreationDate(parsed.date);
+  }
+  if (updates.modDate !== undefined) {
+    const parsed = parsePdfDate(updates.modDate);
+    if (parsed.date) pdfDoc.setModificationDate(parsed.date);
+  }
+
+  // Handle custom metadata dictionary entries
+  let infoDict: PDFDict | undefined;
+  const infoRef = pdfDoc.context.trailerInfo.Info;
+  if (infoRef) {
+    const existing = pdfDoc.context.lookup(infoRef);
+    if (existing instanceof PDFDict) {
+      infoDict = existing;
+    }
+  }
+
+  if (!infoDict && updates.customMetadata && Object.keys(updates.customMetadata).length > 0) {
+    infoDict = pdfDoc.context.obj({});
+    pdfDoc.context.trailerInfo.Info = pdfDoc.context.register(infoDict);
+  }
+
+  if (infoDict && updates.customMetadata) {
+    for (const [k, v] of Object.entries(updates.customMetadata)) {
+      const cleanKey = k.replace(/^\//, '').trim();
+      if (cleanKey) {
+        infoDict.set(PDFName.of(cleanKey), PDFString.of(v));
+      }
+    }
+  }
+
+  // Handle removal of specified keys
+  if (infoDict && updates.removeKeys && updates.removeKeys.length > 0) {
+    for (const k of updates.removeKeys) {
+      const cleanKey = k.replace(/^\//, '').trim();
+      infoDict.delete(PDFName.of(cleanKey));
+    }
+  }
+
+  return pdfDoc.save();
+}
+
+/**
+ * Counts the number of digital signatures present in the document.
+ *
+ * @param engine The PDFium engine instance.
+ * @param docHandle The active document handle.
+ * @return The total signature count.
+ */
+export function getSignatureCount(engine: PdfiumEngine, docHandle: number): number {
+  return engine.getModule().FPDF_GetSignatureCount(docHandle);
+}
+
+/**
+ * Counts the number of embedded file attachments.
+ *
+ * @param engine The PDFium engine instance.
+ * @param docHandle The active document handle.
+ * @return The total attachment count.
+ */
+export function getAttachmentCount(engine: PdfiumEngine, docHandle: number): number {
+  return engine.getModule().FPDFDoc_GetAttachmentCount(docHandle);
+}
