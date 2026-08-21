@@ -842,3 +842,425 @@ function assembleVerticalLines(words: TextWord[], rotation: number): TextLine[] 
       let bulletWord: TextWord | undefined;
       let textWords = subGroup;
 
+      if (subGroup.length > 0 && isBulletWord(subGroup[0])) {
+        hasBullet = true;
+        bulletWord = subGroup[0];
+        if (subGroup.length > 1) {
+          textWords = subGroup.slice(1);
+        } else {
+          continue;
+        }
+      }
+
+      let minLeft = Infinity;
+      let maxRight = -Infinity;
+      let minTop = Infinity;
+      let maxBottom = -Infinity;
+      let sumBaseline = 0;
+      let fullLineText = '';
+
+      for (let wIdx = 0; wIdx < textWords.length; wIdx++) {
+        const w = textWords[wIdx];
+        if (wIdx > 0) {
+          const prev = textWords[wIdx - 1];
+          const gap = w.top - prev.bottom;
+          if (gap >= Math.min(prev.fontSize, w.fontSize) * 0.18) {
+            fullLineText += ' ';
+          }
+        }
+        fullLineText += w.text;
+
+        if (w.left < minLeft) minLeft = w.left;
+        if (w.right > maxRight) maxRight = w.right;
+        if (w.top < minTop) minTop = w.top;
+        if (w.bottom > maxBottom) maxBottom = w.bottom;
+        sumBaseline += w.baselineY;
+      }
+
+      if (fullLineText.trim().length === 0) continue;
+
+      const typo = getDominantTypography(textWords);
+      const dominantLineFontSize = getDominantFontSize(textWords);
+      const avgBaseline = sumBaseline / textWords.length;
+      const lineHeight = dominantLineFontSize * 1.25;
+
+      lines.push({
+        text: fullLineText,
+        left: minLeft,
+        top: minTop,
+        right: maxRight,
+        bottom: maxBottom,
+        width: Math.max(1, maxRight - minLeft),
+        height: Math.max(1, maxBottom - minTop),
+        fontSize: dominantLineFontSize,
+        baselineY: avgBaseline,
+        lineHeight,
+        charStartIndex: textWords[0].charStartIndex,
+        charCount: textWords.reduce((sum, w) => sum + w.charCount, 0),
+        words: textWords,
+        fontFamily: typo.fontFamily,
+        rawFontFamily: typo.rawFontFamily,
+        color: typo.color,
+        fontWeight: typo.fontWeight,
+        fontStyle: typo.fontStyle,
+        hasBulletPrefix: hasBullet,
+        bulletWord,
+        rotation,
+        isVertical: true,
+        orientation: 'vertical',
+      });
+    }
+  }
+
+  return lines.sort((a, b) => a.left - b.left);
+}
+
+/**
+ * Groups words into ordered lines based on horizontal/vertical baseline alignment.
+ * Separates words by orientation so vertical text is never mixed with horizontal lines.
+ *
+ * @param words Array of extracted words.
+ * @return Array of TextLine objects.
+ */
+function assembleLines(words: TextWord[]): TextLine[] {
+  if (words.length === 0) return [];
+
+  const wordsByRotation = new Map<number, TextWord[]>();
+  for (const word of words) {
+    const rot = word.rotation || 0;
+    const bucket = wordsByRotation.get(rot) || [];
+    bucket.push(word);
+    wordsByRotation.set(rot, bucket);
+  }
+
+  const allLines: TextLine[] = [];
+
+  for (const [rot, bucketWords] of wordsByRotation.entries()) {
+    if (rot === 90 || rot === 270) {
+      allLines.push(...assembleVerticalLines(bucketWords, rot));
+    } else {
+      allLines.push(...assembleHorizontalLines(bucketWords, rot));
+    }
+  }
+
+  return allLines;
+}
+
+/**
+ * Clusters horizontal lines into semantic paragraph blocks.
+ *
+ * @param lines Sorted array of horizontal text lines.
+ * @param pageIndex Zero-based page index.
+ * @param rotation Cardinal rotation (0 or 180).
+ * @return Array of EditableTextSpan objects.
+ */
+function clusterHorizontalParagraphs(
+  lines: TextLine[],
+  pageIndex: number,
+  rotation: number
+): EditableTextSpan[] {
+  if (lines.length === 0) return [];
+
+  const paragraphClusters: TextLine[][] = [];
+  let currentCluster: TextLine[] = [lines[0]];
+
+  for (let i = 1; i < lines.length; i++) {
+    const prevLine = currentCluster[currentCluster.length - 1];
+    const nextLine = lines[i];
+
+    const isNextBullet = isBulletOrListItem(nextLine);
+    const isPrevBullet = isBulletOrListItem(prevLine);
+
+    // RULE 1: Each bullet point is its OWN separate block
+    if (isNextBullet) {
+      paragraphClusters.push(currentCluster);
+      currentCluster = [nextLine];
+      continue;
+    }
+
+    // RULE 2: If previous line was a bullet point, next line can ONLY merge if indented
+    if (isPrevBullet) {
+      const isIndentedWrap = nextLine.left >= prevLine.left - 4.0 && nextLine.left <= prevLine.left + 35.0;
+      const verticalGap = nextLine.top - prevLine.bottom;
+      const avgFontSize = (prevLine.fontSize + nextLine.fontSize) / 2;
+      const isTightLeading = verticalGap >= -avgFontSize * 0.3 && verticalGap <= avgFontSize * 1.25;
+
+      if (isIndentedWrap && isTightLeading && Math.abs(nextLine.fontSize - prevLine.fontSize) <= 1.5) {
+        currentCluster.push(nextLine);
+      } else {
+        paragraphClusters.push(currentCluster);
+        currentCluster = [nextLine];
+      }
+      continue;
+    }
+
+    // RULE 3: Regular paragraph clustering
+    const verticalGap = nextLine.top - prevLine.bottom;
+    const baselineDiff = Math.abs(prevLine.baselineY - nextLine.baselineY);
+    const avgFontSize = (prevLine.fontSize + nextLine.fontSize) / 2;
+
+    const isLeadingValid = verticalGap >= -avgFontSize * 0.4 && verticalGap <= avgFontSize * 1.35;
+    const isBaselineValid = baselineDiff >= avgFontSize * 0.75 && baselineDiff <= avgFontSize * 2.2;
+
+    const leftMarginDiff = Math.abs(nextLine.left - prevLine.left);
+    const isLeftAligned = leftMarginDiff <= 24.0;
+    const isIndentedFirstLine =
+      currentCluster.length === 1 &&
+      nextLine.left < prevLine.left &&
+      prevLine.left - nextLine.left <= 36.0;
+
+    const horizontalOverlap = Math.min(prevLine.right, nextLine.right) - Math.max(prevLine.left, nextLine.left);
+    const hasColumnOverlap = horizontalOverlap > -10.0;
+
+    const isSeparateColumn = nextLine.left > prevLine.right + 20.0 || nextLine.right < prevLine.left - 20.0;
+    const isFontParity = Math.abs(nextLine.fontSize - prevLine.fontSize) <= 1.8;
+
+    const prevEndsWithPunctuation = /[.?!:]\s*$/.test(prevLine.text);
+    const isParagraphBreak = prevEndsWithPunctuation && verticalGap > avgFontSize * 0.45;
+    const isLargeBreak = verticalGap > avgFontSize * 0.75;
+
+    const isPrevHeading = prevLine.text.length < 35 && prevLine.fontSize > nextLine.fontSize + 1.5;
+    const isLargeBreakAfterHeading = isPrevHeading && verticalGap > avgFontSize * 0.5;
+
+    const shouldMerge =
+      !isSeparateColumn &&
+      !isParagraphBreak &&
+      !isLargeBreak &&
+      !isLargeBreakAfterHeading &&
+      isFontParity &&
+      isLeadingValid &&
+      isBaselineValid &&
+      (isLeftAligned || isIndentedFirstLine || hasColumnOverlap);
+
+    if (shouldMerge) {
+      currentCluster.push(nextLine);
+    } else {
+      paragraphClusters.push(currentCluster);
+      currentCluster = [nextLine];
+    }
+  }
+
+  if (currentCluster.length > 0) {
+    paragraphClusters.push(currentCluster);
+  }
+
+  const spans: EditableTextSpan[] = [];
+
+  for (const cluster of paragraphClusters) {
+    if (cluster.length === 0) continue;
+
+    let minLeft = Infinity;
+    let maxRight = -Infinity;
+    let minTop = Infinity;
+    let maxBottom = -Infinity;
+    let sumBaselineY = 0;
+    const allClusterWords: TextWord[] = [];
+
+    for (const l of cluster) {
+      const lineMinLeft = l.hasBulletPrefix && l.bulletWord ? Math.min(l.left, l.bulletWord.left) : l.left;
+      const lineMinTop = l.hasBulletPrefix && l.bulletWord ? Math.min(l.top, l.bulletWord.top) : l.top;
+      if (lineMinLeft < minLeft) minLeft = lineMinLeft;
+      if (l.right > maxRight) maxRight = l.right;
+      if (lineMinTop < minTop) minTop = lineMinTop;
+      if (l.bottom > maxBottom) maxBottom = l.bottom;
+      sumBaselineY += l.baselineY;
+      if (l.words) {
+        for (const w of l.words) allClusterWords.push(w);
+      }
+    }
+
+    const firstLine = cluster[0];
+    const lastLine = cluster[cluster.length - 1];
+    const totalChars = cluster.reduce((sum, l) => sum + l.charCount, 0);
+
+    const spanId = `span_p_${pageIndex}_${firstLine.charStartIndex}_${totalChars}`;
+    const combinedText = cluster.map((l) => l.text).join('\n');
+
+    const typo = getDominantTypography(allClusterWords.length > 0 ? allClusterWords : cluster);
+    const dominantSpanFontSize = getDominantFontSize(allClusterWords.length > 0 ? allClusterWords : cluster);
+
+    const calculatedLineHeight =
+      cluster.length > 1
+        ? Math.abs(firstLine.baselineY - lastLine.baselineY) / (cluster.length - 1)
+        : dominantSpanFontSize * 1.25;
+
+    spans.push({
+      type: 'text',
+      id: spanId,
+      pageIndex,
+      text: combinedText,
+      left: minLeft,
+      top: minTop,
+      width: Math.max(10, maxRight - minLeft),
+      height: Math.max(dominantSpanFontSize * 1.2, maxBottom - minTop),
+      fontSize: dominantSpanFontSize,
+      fontFamily: typo.fontFamily,
+      rawFontFamily: typo.rawFontFamily,
+      color: typo.color,
+      baselineY: firstLine.baselineY,
+      charStartIndex: firstLine.charStartIndex,
+      charCount: totalChars,
+      lines: cluster,
+      lineHeight: calculatedLineHeight > 0 ? calculatedLineHeight : dominantSpanFontSize * 1.25,
+      isParagraph: cluster.length > 1,
+      fontWeight: typo.fontWeight,
+      fontStyle: typo.fontStyle,
+      hasBulletPrefix: firstLine.hasBulletPrefix,
+      bulletWord: firstLine.bulletWord,
+      rotation,
+      isVertical: false,
+      orientation: 'horizontal',
+    });
+  }
+
+  return spans;
+}
+
+/**
+ * Clusters vertical lines into semantic vertical text blocks.
+ *
+ * @param lines Sorted array of vertical text lines.
+ * @param pageIndex Zero-based page index.
+ * @param rotation Cardinal rotation (90 or 270).
+ * @return Array of EditableTextSpan objects.
+ */
+function clusterVerticalParagraphs(
+  lines: TextLine[],
+  pageIndex: number,
+  rotation: number
+): EditableTextSpan[] {
+  if (lines.length === 0) return [];
+
+  const paragraphClusters: TextLine[][] = [];
+  let currentCluster: TextLine[] = [lines[0]];
+
+  for (let i = 1; i < lines.length; i++) {
+    const prevLine = currentCluster[currentCluster.length - 1];
+    const nextLine = lines[i];
+
+    const isNextBullet = isBulletOrListItem(nextLine);
+    const isPrevBullet = isBulletOrListItem(prevLine);
+
+    if (isNextBullet || isPrevBullet) {
+      paragraphClusters.push(currentCluster);
+      currentCluster = [nextLine];
+      continue;
+    }
+
+    const horizontalGap = Math.abs(nextLine.left - prevLine.right);
+    const avgFontSize = (prevLine.fontSize + nextLine.fontSize) / 2;
+    const isLeadingValid = horizontalGap >= -avgFontSize * 0.4 && horizontalGap <= avgFontSize * 1.5;
+
+    const verticalOverlap = Math.min(prevLine.bottom, nextLine.bottom) - Math.max(prevLine.top, nextLine.top);
+    const hasRowOverlap = verticalOverlap > -10.0;
+    const isFontParity = Math.abs(nextLine.fontSize - prevLine.fontSize) <= 1.8;
+
+    if (isLeadingValid && hasRowOverlap && isFontParity) {
+      currentCluster.push(nextLine);
+    } else {
+      paragraphClusters.push(currentCluster);
+      currentCluster = [nextLine];
+    }
+  }
+
+  if (currentCluster.length > 0) {
+    paragraphClusters.push(currentCluster);
+  }
+
+  const spans: EditableTextSpan[] = [];
+
+  for (const cluster of paragraphClusters) {
+    if (cluster.length === 0) continue;
+
+    let minLeft = Infinity;
+    let maxRight = -Infinity;
+    let minTop = Infinity;
+    let maxBottom = -Infinity;
+    let sumBaseline = 0;
+    const allClusterWords: TextWord[] = [];
+
+    for (const l of cluster) {
+      const lineMinLeft = l.hasBulletPrefix && l.bulletWord ? Math.min(l.left, l.bulletWord.left) : l.left;
+      const lineMinTop = l.hasBulletPrefix && l.bulletWord ? Math.min(l.top, l.bulletWord.top) : l.top;
+      if (lineMinLeft < minLeft) minLeft = lineMinLeft;
+      if (l.right > maxRight) maxRight = l.right;
+      if (lineMinTop < minTop) minTop = lineMinTop;
+      if (l.bottom > maxBottom) maxBottom = l.bottom;
+      sumBaseline += l.baselineY;
+      if (l.words) {
+        for (const w of l.words) allClusterWords.push(w);
+      }
+    }
+
+    const firstLine = cluster[0];
+    const totalChars = cluster.reduce((sum, l) => sum + l.charCount, 0);
+
+    const spanId = `span_p_${pageIndex}_${firstLine.charStartIndex}_${totalChars}`;
+    const combinedText = cluster.map((l) => l.text).join('\n');
+
+    const typo = getDominantTypography(allClusterWords.length > 0 ? allClusterWords : cluster);
+    const dominantSpanFontSize = getDominantFontSize(allClusterWords.length > 0 ? allClusterWords : cluster);
+
+    spans.push({
+      type: 'text',
+      id: spanId,
+      pageIndex,
+      text: combinedText,
+      left: minLeft,
+      top: minTop,
+      width: Math.max(10, maxRight - minLeft),
+      height: Math.max(dominantSpanFontSize * 1.2, maxBottom - minTop),
+      fontSize: dominantSpanFontSize,
+      fontFamily: typo.fontFamily,
+      rawFontFamily: typo.rawFontFamily,
+      color: typo.color,
+      baselineY: sumBaseline / cluster.length,
+      charStartIndex: firstLine.charStartIndex,
+      charCount: totalChars,
+      lines: cluster,
+      lineHeight: dominantSpanFontSize * 1.25,
+      isParagraph: cluster.length > 1,
+      fontWeight: typo.fontWeight,
+      fontStyle: typo.fontStyle,
+      hasBulletPrefix: firstLine.hasBulletPrefix,
+      bulletWord: firstLine.bulletWord,
+      rotation,
+      isVertical: true,
+      orientation: 'vertical',
+    });
+  }
+
+  return spans;
+}
+
+/**
+ * Clusters lines into semantic paragraph blocks.
+ * Partitions lines by orientation to guarantee horizontal and vertical text are never merged.
+ *
+ * @param lines Sorted array of text lines.
+ * @param pageIndex Zero-based page index.
+ * @return Array of EditableTextSpan objects.
+ */
+function clusterParagraphs(lines: TextLine[], pageIndex: number): EditableTextSpan[] {
+  if (lines.length === 0) return [];
+
+  const linesByRotation = new Map<number, TextLine[]>();
+  for (const line of lines) {
+    const rot = line.rotation || 0;
+    const bucket = linesByRotation.get(rot) || [];
+    bucket.push(line);
+    linesByRotation.set(rot, bucket);
+  }
+
+  const allSpans: EditableTextSpan[] = [];
+
+  for (const [rot, bucketLines] of linesByRotation.entries()) {
+    if (rot === 90 || rot === 270) {
+      allSpans.push(...clusterVerticalParagraphs(bucketLines, pageIndex, rot));
+    } else {
+      allSpans.push(...clusterHorizontalParagraphs(bucketLines, pageIndex, rot));
+    }
+  }
+
+  return allSpans;
+}
