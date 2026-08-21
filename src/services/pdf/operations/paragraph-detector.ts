@@ -422,3 +422,423 @@ function getDominantTypography(items: Array<{
   };
 }
 
+/**
+ * Calculates the dominant (modal or character-weighted) font size from a list of words or characters.
+ * Prioritizes alphanumeric body characters over bullet markers, symbols, or small-caps capital letters
+ * to prevent outliers from distorting the line or span font size.
+ *
+ * @param items Array of text words or characters with fontSize property.
+ * @return The dominant font size in points.
+ */
+function getDominantFontSize(
+  items: Array<{ text?: string; unicode?: string; fontSize: number; rawFontFamily?: string }>
+): number {
+  if (items.length === 0) return 12;
+
+  // Filter for alphanumeric body characters
+  const bodyItems = items.filter((item) => {
+    const str = item.text || item.unicode || '';
+    const raw = item.rawFontFamily || '';
+    return /[a-zA-Z0-9]/.test(str) && !isSymbolFont(raw);
+  });
+
+  const candidateItems = bodyItems.length > 0 ? bodyItems : items;
+
+  // Compute character-count weighted frequency of each font size (binned to 0.1pt)
+  const sizeWeights = new Map<number, number>();
+  let totalChars = 0;
+  let weightedSum = 0;
+
+  for (const item of candidateItems) {
+    const charCount = (item.text || item.unicode || 'x').length;
+    const roundedSize = Math.round(item.fontSize * 10) / 10;
+    const currentWeight = sizeWeights.get(roundedSize) || 0;
+    sizeWeights.set(roundedSize, currentWeight + charCount);
+    weightedSum += item.fontSize * charCount;
+    totalChars += charCount;
+  }
+
+  // Find the modal font size (most frequent by character count)
+  let maxWeight = -1;
+  let modalSize = 12;
+  for (const [size, weight] of sizeWeights.entries()) {
+    if (weight > maxWeight) {
+      maxWeight = weight;
+      modalSize = size;
+    }
+  }
+
+  // If the modal font size represents >= 35% of characters, use it
+  if (maxWeight >= totalChars * 0.35) {
+    return modalSize;
+  }
+
+  return totalChars > 0 ? Math.round((weightedSum / totalChars) * 10) / 10 : modalSize;
+}
+
+/**
+ * Groups adjacent characters into words based on baseline alignment, orientation, and spacing.
+ * Separates bullet/symbol tokens if they have different colors or symbol fonts.
+ * Guarantees that characters with different rotations or orientations are never merged.
+ *
+ * @param chars Raw characters from PDF page.
+ * @return Array of TextWord objects.
+ */
+function formWords(chars: RawChar[]): TextWord[] {
+  const words: TextWord[] = [];
+  let currentWordChars: RawChar[] = [];
+
+  const flushWord = (): void => {
+    if (currentWordChars.length === 0) return;
+
+    let wordText = '';
+    let minLeft = Infinity;
+    let maxRight = -Infinity;
+    let minTop = Infinity;
+    let maxBottom = -Infinity;
+    let sumFontSize = 0;
+    let sumOriginY = 0;
+
+    for (const c of currentWordChars) {
+      wordText += c.unicode;
+      if (c.domLeft < minLeft) minLeft = c.domLeft;
+      if (c.domRight > maxRight) maxRight = c.domRight;
+      if (c.domTop < minTop) minTop = c.domTop;
+      if (c.domBottom > maxBottom) maxBottom = c.domBottom;
+      sumFontSize += c.fontSize;
+      sumOriginY += c.originY;
+    }
+
+    const trimmed = wordText.trim();
+    if (trimmed.length > 0 && (minLeft < maxRight || minTop < maxBottom)) {
+      const typo = getDominantTypography(currentWordChars);
+      const exactFontSize = Math.round((sumFontSize / currentWordChars.length) * 10) / 10;
+      const firstChar = currentWordChars[0];
+
+      words.push({
+        text: trimmed,
+        left: minLeft,
+        top: minTop,
+        right: maxRight,
+        bottom: maxBottom,
+        width: Math.max(1, maxRight - minLeft),
+        height: Math.max(1, maxBottom - minTop),
+        fontSize: exactFontSize,
+        baselineY: firstChar.isVertical ? firstChar.originX : sumOriginY / currentWordChars.length,
+        charStartIndex: firstChar.charIndex,
+        charCount: currentWordChars.length,
+        fontFamily: typo.fontFamily,
+        rawFontFamily: typo.rawFontFamily,
+        color: typo.color,
+        fontWeight: typo.fontWeight,
+        fontStyle: typo.fontStyle,
+        angle: firstChar.angle,
+        rotation: firstChar.rotation,
+        isVertical: firstChar.isVertical,
+        orientation: firstChar.isVertical ? 'vertical' : 'horizontal',
+      });
+    }
+
+    currentWordChars = [];
+  };
+
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
+    const isWhitespace = c.unicode === ' ' || c.unicode === '\t' || c.unicode === '\n' || c.unicode === '\r';
+
+    if (isWhitespace) {
+      flushWord();
+      continue;
+    }
+
+    const isCurrentBullet = isBulletChar(c.unicode) || isSymbolFont(c.rawFontFamily);
+
+    if (currentWordChars.length > 0) {
+      const prev = currentWordChars[currentWordChars.length - 1];
+      const isPrevBullet = isBulletChar(prev.unicode) || isSymbolFont(prev.rawFontFamily);
+
+      // Never merge characters with differing rotations or orientations
+      if (c.rotation !== prev.rotation || c.isVertical !== prev.isVertical) {
+        flushWord();
+        currentWordChars.push(c);
+        continue;
+      }
+
+      const fontDiff = Math.abs(c.fontSize - prev.fontSize);
+      const colorDiff = Math.abs(c.color.r - prev.color.r) + Math.abs(c.color.g - prev.color.g) + Math.abs(c.color.b - prev.color.b);
+      const isFontChanged = c.rawFontFamily !== prev.rawFontFamily;
+      const isWeightChanged = Math.abs(c.fontWeight - prev.fontWeight) >= 150;
+
+      if (c.isVertical) {
+        // Vertical word flow: spacing along vertical axis, alignment along horizontal axis
+        const xDiff = Math.abs(c.domLeft - prev.domLeft);
+        const verticalGap = Math.abs(c.domTop - prev.domBottom);
+
+        if (
+          isCurrentBullet !== isPrevBullet ||
+          colorDiff > 40 ||
+          xDiff > 3.0 ||
+          verticalGap > prev.fontSize * 0.35 ||
+          fontDiff > 0.5 ||
+          isFontChanged ||
+          isWeightChanged
+        ) {
+          flushWord();
+        }
+      } else {
+        // Horizontal word flow: spacing along horizontal axis, alignment along vertical baseline
+        const baselineDiff = Math.abs(c.domBaseline - prev.domBaseline);
+        const gap = c.domLeft - prev.domRight;
+
+        if (
+          isCurrentBullet !== isPrevBullet ||
+          colorDiff > 40 ||
+          baselineDiff > 2.5 ||
+          gap > prev.fontSize * 0.35 ||
+          gap < -2.0 ||
+          fontDiff > 0.5 ||
+          isFontChanged ||
+          isWeightChanged
+        ) {
+          flushWord();
+        }
+      }
+    }
+
+    currentWordChars.push(c);
+  }
+
+  flushWord();
+  return words;
+}
+
+/**
+ * Assembles horizontal words into ordered lines.
+ *
+ * @param words Array of extracted horizontal words.
+ * @param rotation Cardinal rotation angle (0 or 180).
+ * @return Array of TextLine objects sorted top-to-bottom.
+ */
+function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[] {
+  if (words.length === 0) return [];
+
+  const sortedWords = [...words].sort((a, b) => {
+    const baselineDiff = a.top - b.top;
+    if (Math.abs(baselineDiff) > 3.0) {
+      return baselineDiff;
+    }
+    return a.left - b.left;
+  });
+
+  const lineGroups: TextWord[][] = [];
+  let currentGroup: TextWord[] = [];
+
+  for (const word of sortedWords) {
+    if (currentGroup.length === 0) {
+      currentGroup.push(word);
+      continue;
+    }
+
+    const firstWord = currentGroup[0];
+    const baselineDiff = Math.abs(word.baselineY - firstWord.baselineY);
+    const topDiff = Math.abs(word.top - firstWord.top);
+
+    if (baselineDiff <= 3.5 || topDiff <= 4.5) {
+      currentGroup.push(word);
+    } else {
+      lineGroups.push(currentGroup);
+      currentGroup = [word];
+    }
+  }
+
+  if (currentGroup.length > 0) {
+    lineGroups.push(currentGroup);
+  }
+
+  const lines: TextLine[] = [];
+
+  for (const group of lineGroups) {
+    group.sort((a, b) => a.left - b.left);
+
+    const subGroups: TextWord[][] = [];
+    let currentSubGroup: TextWord[] = [];
+
+    for (let w = 0; w < group.length; w++) {
+      const word = group[w];
+      if (currentSubGroup.length === 0) {
+        currentSubGroup.push(word);
+        continue;
+      }
+
+      const prevWord = currentSubGroup[currentSubGroup.length - 1];
+      const horizontalGap = word.left - prevWord.right;
+      const columnGutterThreshold = Math.max(32, prevWord.fontSize * 2.5);
+
+      if (horizontalGap > columnGutterThreshold) {
+        subGroups.push(currentSubGroup);
+        currentSubGroup = [word];
+      } else {
+        currentSubGroup.push(word);
+      }
+    }
+
+    if (currentSubGroup.length > 0) {
+      subGroups.push(currentSubGroup);
+    }
+
+    for (const subGroup of subGroups) {
+      let hasBullet = false;
+      let bulletWord: TextWord | undefined;
+      let textWords = subGroup;
+
+      if (subGroup.length > 0 && isBulletWord(subGroup[0])) {
+        hasBullet = true;
+        bulletWord = subGroup[0];
+        if (subGroup.length > 1) {
+          textWords = subGroup.slice(1);
+        } else {
+          continue;
+        }
+      }
+
+      let minLeft = Infinity;
+      let maxRight = -Infinity;
+      let minTop = Infinity;
+      let maxBottom = -Infinity;
+      let sumBaselineY = 0;
+      let fullLineText = '';
+
+      for (let wIdx = 0; wIdx < textWords.length; wIdx++) {
+        const w = textWords[wIdx];
+        if (wIdx > 0) {
+          const prev = textWords[wIdx - 1];
+          const gap = w.left - prev.right;
+          if (gap >= Math.min(prev.fontSize, w.fontSize) * 0.18) {
+            fullLineText += ' ';
+          }
+        }
+        fullLineText += w.text;
+
+        if (w.left < minLeft) minLeft = w.left;
+        if (w.right > maxRight) maxRight = w.right;
+        if (w.top < minTop) minTop = w.top;
+        if (w.bottom > maxBottom) maxBottom = w.bottom;
+        sumBaselineY += w.baselineY;
+      }
+
+      if (fullLineText.trim().length === 0) continue;
+
+      const typo = getDominantTypography(textWords);
+      const dominantLineFontSize = getDominantFontSize(textWords);
+      const avgBaselineY = sumBaselineY / textWords.length;
+      const lineHeight = dominantLineFontSize * 1.25;
+
+      lines.push({
+        text: fullLineText,
+        left: minLeft,
+        top: minTop,
+        right: maxRight,
+        bottom: maxBottom,
+        width: Math.max(1, maxRight - minLeft),
+        height: Math.max(1, maxBottom - minTop),
+        fontSize: dominantLineFontSize,
+        baselineY: avgBaselineY,
+        lineHeight,
+        charStartIndex: textWords[0].charStartIndex,
+        charCount: textWords.reduce((sum, w) => sum + w.charCount, 0),
+        words: textWords,
+        fontFamily: typo.fontFamily,
+        rawFontFamily: typo.rawFontFamily,
+        color: typo.color,
+        fontWeight: typo.fontWeight,
+        fontStyle: typo.fontStyle,
+        hasBulletPrefix: hasBullet,
+        bulletWord,
+        rotation,
+        isVertical: false,
+        orientation: 'horizontal',
+      });
+    }
+  }
+
+  return lines.sort((a, b) => a.top - b.top);
+}
+
+/**
+ * Assembles vertical words into ordered lines.
+ *
+ * @param words Array of extracted vertical words.
+ * @param rotation Cardinal rotation angle (90 or 270).
+ * @return Array of TextLine objects sorted left-to-right.
+ */
+function assembleVerticalLines(words: TextWord[], rotation: number): TextLine[] {
+  if (words.length === 0) return [];
+
+  const sortedWords = [...words].sort((a, b) => {
+    const xDiff = a.left - b.left;
+    if (Math.abs(xDiff) > 3.0) {
+      return xDiff;
+    }
+    return a.top - b.top;
+  });
+
+  const lineGroups: TextWord[][] = [];
+  let currentGroup: TextWord[] = [];
+
+  for (const word of sortedWords) {
+    if (currentGroup.length === 0) {
+      currentGroup.push(word);
+      continue;
+    }
+
+    const firstWord = currentGroup[0];
+    const xDiff = Math.abs(word.left - firstWord.left);
+
+    if (xDiff <= 4.0) {
+      currentGroup.push(word);
+    } else {
+      lineGroups.push(currentGroup);
+      currentGroup = [word];
+    }
+  }
+
+  if (currentGroup.length > 0) {
+    lineGroups.push(currentGroup);
+  }
+
+  const lines: TextLine[] = [];
+
+  for (const group of lineGroups) {
+    group.sort((a, b) => a.top - b.top);
+
+    const subGroups: TextWord[][] = [];
+    let currentSubGroup: TextWord[] = [];
+
+    for (let w = 0; w < group.length; w++) {
+      const word = group[w];
+      if (currentSubGroup.length === 0) {
+        currentSubGroup.push(word);
+        continue;
+      }
+
+      const prevWord = currentSubGroup[currentSubGroup.length - 1];
+      const verticalGap = word.top - prevWord.bottom;
+      const columnGutterThreshold = Math.max(24, prevWord.fontSize * 2.0);
+
+      if (verticalGap > columnGutterThreshold) {
+        subGroups.push(currentSubGroup);
+        currentSubGroup = [word];
+      } else {
+        currentSubGroup.push(word);
+      }
+    }
+
+    if (currentSubGroup.length > 0) {
+      subGroups.push(currentSubGroup);
+    }
+
+    for (const subGroup of subGroups) {
+      let hasBullet = false;
+      let bulletWord: TextWord | undefined;
+      let textWords = subGroup;
+
