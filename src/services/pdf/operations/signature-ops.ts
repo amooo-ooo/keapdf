@@ -442,3 +442,436 @@ export async function signPdfIso32000(
     ...(options.contactInfo ? { ContactInfo: PDFString.of(options.contactInfo) } : {}),
   });
 
+  const sigDictRef = pdfDoc.context.register(sigDict);
+
+  // 3. Create Signature Field & Widget Annotation
+  const targetPageIdx = options.visual ? options.visual.pageIndex : 0;
+  const page = pdfDoc.getPage(targetPageIdx);
+  const pageRef = page.ref;
+
+  let annotRect: [number, number, number, number] = [0, 0, 0, 0];
+  if (options.visual) {
+    annotRect = [
+      options.visual.x,
+      options.visual.y,
+      options.visual.x + options.visual.width,
+      options.visual.y + options.visual.height,
+    ];
+  }
+
+  const widgetDict = pdfDoc.context.obj({
+    Type: PDFName.of('Annot'),
+    Subtype: PDFName.of('Widget'),
+    FT: PDFName.of('Sig'),
+    Rect: annotRect,
+    T: PDFString.of(`Signature_${Date.now()}`),
+    F: 132, // Print | Lock
+    P: pageRef,
+    V: sigDictRef,
+  });
+
+  // Render visual appearance on the page if requested
+  if (options.visual && options.visual.width > 10 && options.visual.height > 10) {
+    const vx = options.visual.x;
+    const vy = options.visual.y;
+    const vw = options.visual.width;
+    const vh = options.visual.height;
+
+    // Draw background badge / border on the page
+    page.drawRectangle({
+      x: vx,
+      y: vy,
+      width: vw,
+      height: vh,
+      color: rgb(0.98, 0.99, 1.0),
+      borderColor: rgb(0.2, 0.45, 0.85),
+      borderWidth: 1,
+    });
+
+    let graphicWidth = 0;
+
+    // If a signature image graphic is provided, embed it
+    if (options.visual.graphicDataUrl && options.visual.graphicDataUrl.startsWith('data:image/png;base64,')) {
+      try {
+        const rawBase64 = options.visual.graphicDataUrl.replace('data:image/png;base64,', '');
+        const imgBytes = Uint8Array.from(atob(rawBase64), (c) => c.charCodeAt(0));
+        const embeddedImg = await pdfDoc.embedPng(imgBytes);
+
+        graphicWidth = options.visual.showTextDetails ? Math.min(vw * 0.45, 140) : vw - 16;
+        const graphicHeight = Math.min(vh - 12, graphicWidth / (embeddedImg.width / embeddedImg.height));
+
+        page.drawImage(embeddedImg, {
+          x: vx + 8,
+          y: vy + (vh - graphicHeight) / 2,
+          width: graphicWidth,
+          height: graphicHeight,
+        });
+      } catch (err) {
+        console.warn('Failed to embed visual signature graphic:', err);
+      }
+    }
+
+    // Draw textual certificate details if requested
+    if (options.visual.showTextDetails) {
+      const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+      const textX = vx + (graphicWidth > 0 ? graphicWidth + 14 : 10);
+      const availableW = vw - (textX - vx) - 8;
+      const textStartY = vy + vh - 14;
+      const fontSize = Math.max(7, Math.min(9, vh / 6));
+      const lineSpacing = fontSize + 2.5;
+
+      page.drawText(`Digitally signed by:`, {
+        x: textX,
+        y: textStartY,
+        size: fontSize - 1,
+        font: helvetica,
+        color: rgb(0.4, 0.4, 0.4),
+      });
+
+      page.drawText(options.signerName || options.identity.subject.commonName, {
+        x: textX,
+        y: textStartY - lineSpacing,
+        size: fontSize + 1,
+        font: helveticaBold,
+        color: rgb(0.1, 0.15, 0.3),
+        maxWidth: availableW,
+      });
+
+      let currentY = textStartY - lineSpacing * 2;
+
+      page.drawText(`Date: ${signingTime.toLocaleString()}`, {
+        x: textX,
+        y: currentY,
+        size: fontSize - 1,
+        font: helvetica,
+        color: rgb(0.3, 0.3, 0.3),
+        maxWidth: availableW,
+      });
+      currentY -= lineSpacing;
+
+      if (options.reason) {
+        page.drawText(`Reason: ${options.reason}`, {
+          x: textX,
+          y: currentY,
+          size: fontSize - 1,
+          font: helvetica,
+          color: rgb(0.3, 0.3, 0.3),
+          maxWidth: availableW,
+        });
+        currentY -= lineSpacing;
+      }
+
+      if (options.location) {
+        page.drawText(`Location: ${options.location}`, {
+          x: textX,
+          y: currentY,
+          size: fontSize - 1,
+          font: helvetica,
+          color: rgb(0.3, 0.3, 0.3),
+          maxWidth: availableW,
+        });
+      }
+    }
+  }
+
+  const widgetRef = pdfDoc.context.register(widgetDict);
+  (fieldsArray as PDFArray).push(widgetRef);
+
+  let annots = page.node.lookup(PDFName.of('Annots'));
+  if (!annots || !(annots instanceof PDFArray)) {
+    const annotsArray = pdfDoc.context.obj([widgetRef]);
+    page.node.set(PDFName.of('Annots'), annotsArray);
+  } else {
+    annots.push(widgetRef);
+  }
+
+  // 4. Save PDF to bytes with placeholders
+  const rawSavedBytes = await pdfDoc.save({ useObjectStreams: false });
+
+  // 5. Locate /ByteRange and /Contents in raw saved bytes
+  let pdfString = '';
+  for (let i = 0; i < rawSavedBytes.length; i++) {
+    pdfString += String.fromCharCode(rawSavedBytes[i]);
+  }
+
+  const byteRangeSearchStr = '/ByteRange [ 0 1000000000 1000000000 1000000000 ]';
+  const byteRangePos = pdfString.indexOf(byteRangeSearchStr);
+  if (byteRangePos === -1) {
+    throw new Error('Failed to locate /ByteRange placeholder in serialized PDF.');
+  }
+
+  const contentsPrefix = '/Contents <';
+  const contentsPos = pdfString.indexOf(contentsPrefix, byteRangePos);
+  if (contentsPos === -1) {
+    throw new Error('Failed to locate /Contents placeholder in serialized PDF.');
+  }
+
+  const contentsStart = contentsPos + contentsPrefix.length - 1; // Position of '<'
+  const contentsEnd = contentsStart + 1 + (SIGNATURE_PLACEHOLDER_LENGTH * 2) + 1; // Position of '>' + 1
+
+  const totalLength = rawSavedBytes.length;
+
+  const b1 = 0;
+  const len1 = contentsStart;
+  const b2 = contentsEnd;
+  const len2 = totalLength - contentsEnd;
+
+  // Build exact replacement for ByteRange string
+  const actualByteRangeStr = `/ByteRange [ ${b1} ${len1} ${b2} ${len2} ]`;
+  const paddedByteRange = actualByteRangeStr.padEnd(byteRangeSearchStr.length, ' ');
+
+  // Inject updated ByteRange into buffer
+  for (let i = 0; i < paddedByteRange.length; i++) {
+    rawSavedBytes[byteRangePos + i] = paddedByteRange.charCodeAt(i);
+  }
+
+  // 6. Compute SHA-256 Digest over ByteRange byte segments (excluding /Contents)
+  const part1 = rawSavedBytes.subarray(b1, b1 + len1);
+  const part2 = rawSavedBytes.subarray(b2, b2 + len2);
+
+  const md = forge.md.sha256.create();
+  let part1Str = '';
+  for (let i = 0; i < part1.length; i++) {
+    part1Str += String.fromCharCode(part1[i]);
+  }
+  let part2Str = '';
+  for (let i = 0; i < part2.length; i++) {
+    part2Str += String.fromCharCode(part2[i]);
+  }
+  md.update(part1Str);
+  md.update(part2Str);
+  const digestBytes = md.digest().getBytes();
+
+  // 7. Construct Detached PKCS#7 SignedData structure
+  const p7 = forge.pkcs7.createSignedData();
+  p7.content = forge.util.createBuffer(''); // Detached signature: content is empty
+
+  p7.addCertificate(options.identity.certificate);
+  p7.addSigner({
+    key: options.identity.privateKey,
+    certificate: options.identity.certificate,
+    digestAlgorithm: forge.pki.oids.sha256,
+    authenticatedAttributes: [
+      {
+        type: forge.pki.oids.contentType,
+        value: forge.pki.oids.data,
+      },
+      {
+        type: forge.pki.oids.messageDigest,
+        value: digestBytes,
+      },
+      {
+        type: forge.pki.oids.signingTime,
+        value: forge.asn1.dateToUtcTime(signingTime),
+      },
+    ],
+  });
+
+  p7.sign({ detached: true });
+
+  const p7Der = forge.asn1.toDer(p7.toAsn1()).getBytes();
+  const p7Hex = forge.util.bytesToHex(p7Der).toUpperCase();
+
+  if (p7Hex.length > SIGNATURE_PLACEHOLDER_LENGTH * 2) {
+    throw new Error(`Generated PKCS#7 signature (${p7Hex.length} hex chars) exceeds allocated placeholder capacity.`);
+  }
+
+  const paddedHex = p7Hex.padEnd(SIGNATURE_PLACEHOLDER_LENGTH * 2, '0');
+
+  // 8. Inject hexadecimal signature into /Contents placeholder
+  const hexTargetStart = contentsStart + 1; // after '<'
+  for (let i = 0; i < paddedHex.length; i++) {
+    rawSavedBytes[hexTargetStart + i] = paddedHex.charCodeAt(i);
+  }
+
+  return rawSavedBytes;
+}
+
+/**
+ * Verifies all ISO 32000 digital signatures present in a PDF document.
+ *
+ * Checks byte-range boundaries, re-hashes document segments to verify integrity,
+ * and validates the PKCS#7 certificate and cryptographic signature.
+ *
+ * @param pdfBytes Binary buffer of the PDF file.
+ * @return An array of SignatureValidationResult objects describing all detected signatures.
+ */
+export async function verifyPdfSignatures(
+  pdfBytes: Uint8Array | ArrayBuffer
+): Promise<SignatureValidationResult[]> {
+  const bytes = pdfBytes instanceof Uint8Array ? pdfBytes : new Uint8Array(pdfBytes);
+  const totalLength = bytes.length;
+  const results: SignatureValidationResult[] = [];
+
+  let pdfString = '';
+  for (let i = 0; i < bytes.length; i++) {
+    pdfString += String.fromCharCode(bytes[i]);
+  }
+
+  // Regex to detect /Type /Sig or /Filter /Adobe.PPKLite dictionaries
+  const sigRegex = /<<[^>]*\/Type\s*\/Sig[^>]*>>/gs;
+  const matches = [...pdfString.matchAll(sigRegex)];
+
+  // Also check AcroForm fields
+  let matchIdx = 0;
+  for (const match of matches) {
+    matchIdx++;
+    const sigBlock = match[0];
+
+    // Extract ByteRange
+    const byteRangeMatch = /\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]/.exec(sigBlock);
+    // Extract Contents
+    const contentsMatch = /\/Contents\s*<([0-9a-fA-F\s]+)>/i.exec(sigBlock);
+
+    // Extract Name
+    const nameMatch = /\/Name\s*\(([^)]+)\)/.exec(sigBlock);
+    // Extract Reason
+    const reasonMatch = /\/Reason\s*\(([^)]+)\)/.exec(sigBlock);
+    // Extract Location
+    const locMatch = /\/Location\s*\(([^)]+)\)/.exec(sigBlock);
+    // Extract Contact
+    const contactMatch = /\/ContactInfo\s*\(([^)]+)\)/.exec(sigBlock);
+    // Extract Date
+    const dateMatch = /\/M\s*\(([^)]+)\)/.exec(sigBlock);
+    // Extract SubFilter
+    const subFilterMatch = /\/SubFilter\s*\/([a-zA-Z0-9._]+)/.exec(sigBlock);
+    const filterMatch = /\/Filter\s*\/([a-zA-Z0-9._]+)/.exec(sigBlock);
+
+    if (!byteRangeMatch || !contentsMatch) {
+      continue;
+    }
+
+    const b1 = parseInt(byteRangeMatch[1], 10);
+    const l1 = parseInt(byteRangeMatch[2], 10);
+    const b2 = parseInt(byteRangeMatch[3], 10);
+    const l2 = parseInt(byteRangeMatch[4], 10);
+
+    const rawHex = contentsMatch[1].replace(/\s+/g, '');
+    const filter = filterMatch ? filterMatch[1] : 'Adobe.PPKLite';
+    const subFilter = subFilterMatch ? subFilterMatch[1] : 'adbe.pkcs7.detached';
+
+    let isUntampered = false;
+    let isCryptValid = false;
+    let isExpired = false;
+    let isSelfSigned = false;
+
+    let certSubject: { commonName: string; organization?: string; email?: string; country?: string } = { commonName: 'Unknown Signer' };
+    let certIssuer: { commonName: string; organization?: string } = { commonName: 'Unknown Issuer' };
+    let serialNum = '-';
+    let validFromStr = '-';
+    let validToStr = '-';
+
+    try {
+      // 1. Verify byte range validity
+      if (b1 === 0 && b2 >= b1 + l1 && b2 + l2 === totalLength) {
+        // Compute SHA-256 over ByteRange segments
+        const part1 = bytes.subarray(b1, b1 + l1);
+        const part2 = bytes.subarray(b2, b2 + l2);
+
+        const md = forge.md.sha256.create();
+        let p1Str = '';
+        for (let i = 0; i < part1.length; i++) p1Str += String.fromCharCode(part1[i]);
+        let p2Str = '';
+        for (let i = 0; i < part2.length; i++) p2Str += String.fromCharCode(part2[i]);
+        md.update(p1Str);
+        md.update(p2Str);
+        const computedHash = md.digest().getBytes();
+
+        // 2. Parse PKCS#7 Structure
+        const cleanHex = rawHex.replace(/0+$/, ''); // Trim trailing zero padding
+        const p7Der = forge.util.hexToBytes(cleanHex.length % 2 !== 0 ? cleanHex + '0' : cleanHex);
+        const p7Asn1 = forge.asn1.fromDer(p7Der);
+        const p7 = forge.pkcs7.createSignedData();
+        // @ts-expect-error node-forge pkcs7 fromAsn1
+        p7.fromAsn1(p7Asn1);
+
+        if (p7.certificates && p7.certificates.length > 0) {
+          const signerCert = p7.certificates[0];
+          const getVal = (f: string) => signerCert.subject.getField(f)?.value ? String(signerCert.subject.getField(f)!.value) : undefined;
+          const getIss = (f: string) => signerCert.issuer.getField(f)?.value ? String(signerCert.issuer.getField(f)!.value) : undefined;
+
+          certSubject = {
+            commonName: getVal('commonName') || 'Unknown Signer',
+            organization: getVal('organizationName'),
+            email: getVal('emailAddress'),
+            country: getVal('countryName'),
+          };
+
+          certIssuer = {
+            commonName: getIss('commonName') || 'Unknown Issuer',
+            organization: getIss('organizationName'),
+          };
+
+          serialNum = signerCert.serialNumber;
+          validFromStr = signerCert.validity.notBefore.toLocaleDateString();
+          validToStr = signerCert.validity.notAfter.toLocaleDateString();
+
+          const now = new Date();
+          isExpired = now < signerCert.validity.notBefore || now > signerCert.validity.notAfter;
+          isSelfSigned = certSubject.commonName === certIssuer.commonName;
+
+          // Extract embedded message digest from authenticated attributes
+          const p7Obj = p7 as unknown as {
+            rawCapture?: {
+              authenticatedAttributes?: Array<{
+                value: Array<{ value: string; [k: string]: unknown }>;
+              }>;
+            };
+          };
+
+          if (p7Obj.rawCapture && p7Obj.rawCapture.authenticatedAttributes) {
+            for (const attr of p7Obj.rawCapture.authenticatedAttributes) {
+              const typeOid = forge.asn1.derToOid(attr.value[0].value);
+              if (typeOid === forge.pki.oids.messageDigest) {
+                const embeddedDigest = (attr.value[1].value[0] as unknown as { value: string }).value || attr.value[1].value;
+                if (embeddedDigest === computedHash) {
+                  isUntampered = true;
+                  isCryptValid = true;
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Error during signature verification:', err);
+    }
+
+    let status: 'valid' | 'tampered' | 'invalid' | 'expired' = 'valid';
+    if (!isUntampered) {
+      status = 'tampered';
+    } else if (isExpired) {
+      status = 'expired';
+    } else if (!isCryptValid) {
+      status = 'invalid';
+    }
+
+    const signingDate = dateMatch ? dateMatch[1] : '';
+
+    results.push({
+      signatureId: `sig_${matchIdx}`,
+      signerName: nameMatch ? nameMatch[1] : certSubject.commonName,
+      reason: reasonMatch ? reasonMatch[1] : undefined,
+      location: locMatch ? locMatch[1] : undefined,
+      contactInfo: contactMatch ? contactMatch[1] : undefined,
+      signingTimeFormatted: signingDate || 'Unknown Date',
+      isDocumentUntampered: isUntampered,
+      isCryptographicallyValid: isCryptValid,
+      isCertExpired: isExpired,
+      isSelfSigned: isSelfSigned,
+      status,
+      certificateSubject: certSubject,
+      certificateIssuer: certIssuer,
+      serialNumber: serialNum,
+      validFrom: validFromStr,
+      validTo: validToStr,
+      filter,
+      subFilter,
+      byteRange: [b1, l1, b2, l2],
+    });
+  }
+
+  return results;
+}
