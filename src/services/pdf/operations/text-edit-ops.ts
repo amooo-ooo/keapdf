@@ -484,3 +484,486 @@ export function extractPageCharacters(
 
     const heightPts = mod.FPDF_GetPageHeightF(pageHandle);
 
+    const leftPtr = engine.allocateMemory(8);
+    const topPtr = engine.allocateMemory(8);
+    const rightPtr = engine.allocateMemory(8);
+    const bottomPtr = engine.allocateMemory(8);
+    const xPtr = engine.allocateMemory(8);
+    const yPtr = engine.allocateMemory(8);
+
+    try {
+      for (let i = 0; i < totalChars; i++) {
+        const charCode = mod.FPDFText_GetUnicode(textPageHandle, i);
+        if (charCode === 0) continue;
+
+        const charStr = String.fromCharCode(charCode);
+        const fontSize = mod.FPDFText_GetFontSize(textPageHandle, i) || 12;
+
+        mod.FPDFText_GetCharBox(textPageHandle, i, leftPtr, rightPtr, bottomPtr, topPtr);
+        mod.FPDFText_GetCharOrigin(textPageHandle, i, xPtr, yPtr);
+
+        const angleRad =
+          typeof mod.FPDFText_GetCharAngle === 'function'
+            ? mod.FPDFText_GetCharAngle(textPageHandle, i)
+            : 0;
+        const angleDeg = normalizeAngleDeg(angleRad);
+        const rotation = getCardinalRotation(angleDeg);
+        const isVertical = isVerticalRotation(rotation);
+
+        const heapF64 = mod.pdfium.HEAPF64;
+        const left = heapF64[leftPtr >> 3] || 0;
+        const top = heapF64[topPtr >> 3] || 0;
+        let right = heapF64[rightPtr >> 3] || 0;
+        const bottom = heapF64[bottomPtr >> 3] || 0;
+        const originX = heapF64[xPtr >> 3] || 0;
+        const originY = heapF64[yPtr >> 3] || 0;
+
+        const isNewline = charStr === '\n' || charStr === '\r';
+        if (isNewline) continue;
+
+        if (right <= left) {
+          right = left + fontSize * 0.28;
+        }
+
+        let domTop: number;
+        let domBottom: number;
+        let domLeft: number;
+        let domRight: number;
+        let domBaseline: number;
+
+        if (isVertical) {
+          domTop = Math.max(0, heightPts - Math.max(top, bottom));
+          domBottom = Math.max(0, heightPts - Math.min(top, bottom));
+          domLeft = Math.min(left, right);
+          domRight = Math.max(left, right);
+          domBaseline = originX;
+        } else {
+          domBaseline = heightPts - originY;
+          domLeft = Math.min(left, right);
+          domRight = Math.max(left, right);
+          domTop = Math.max(0, heightPts - Math.max(top, bottom));
+          domBottom = Math.max(0, heightPts - Math.min(top, bottom));
+
+          if (domBottom <= domTop) {
+            domTop = Math.max(0, domBaseline - fontSize * 0.85);
+            domBottom = domBaseline + fontSize * 0.25;
+          }
+        }
+
+        characters.push({
+          charIndex: i,
+          unicode: charStr,
+          fontSize,
+          left,
+          top,
+          right,
+          bottom,
+          originX,
+          originY,
+          domLeft,
+          domTop,
+          domRight,
+          domBottom,
+          domBaseline,
+          angle: angleDeg,
+          rotation,
+          isVertical,
+          orientation: isVertical ? 'vertical' : 'horizontal',
+        });
+      }
+    } finally {
+      engine.freeMemory(leftPtr);
+      engine.freeMemory(topPtr);
+      engine.freeMemory(rightPtr);
+      engine.freeMemory(bottomPtr);
+      engine.freeMemory(xPtr);
+      engine.freeMemory(yPtr);
+    }
+  } finally {
+    if (textPageHandle) {
+      mod.FPDFText_ClosePage(textPageHandle);
+    }
+  }
+
+  return characters;
+}
+
+/**
+ * Computes bounding rectangles for highlighting a range of characters.
+ * Groups characters by text line and returns rectangular regions.
+ *
+ * @param characters The array of all page characters.
+ * @param startIndex The starting character index (inclusive).
+ * @param endIndex The ending character index (inclusive).
+ * @return An array of HighlightRect objects, one for each line in the range.
+ */
+export function calculateHighlightRects(
+  characters: PageCharacter[],
+  startIndex: number,
+  endIndex: number
+): HighlightRect[] {
+  if (characters.length === 0) return [];
+
+  const minIndex = Math.min(startIndex, endIndex);
+  const maxIndex = Math.max(startIndex, endIndex);
+
+  // Filter characters in the range
+  const selectedChars = characters.filter(
+    (c) => c.charIndex >= minIndex && c.charIndex <= maxIndex
+  );
+
+  if (selectedChars.length === 0) return [];
+
+  // Group characters by line and orientation
+  const lines: PageCharacter[][] = [];
+  let currentLine: PageCharacter[] = [];
+
+  for (let i = 0; i < selectedChars.length; i++) {
+    const char = selectedChars[i];
+    if (currentLine.length === 0) {
+      currentLine.push(char);
+      continue;
+    }
+
+    const prevChar = currentLine[currentLine.length - 1];
+    const isRotChanged = char.rotation !== prevChar.rotation || char.isVertical !== prevChar.isVertical;
+
+    if (isRotChanged) {
+      lines.push(currentLine);
+      currentLine = [char];
+      continue;
+    }
+
+    if (char.isVertical) {
+      const xDiff = Math.abs(char.domLeft - prevChar.domLeft);
+      const verticalGap = Math.abs(char.domTop - prevChar.domBottom);
+
+      if (xDiff > 4.0 || verticalGap > char.fontSize * 1.5) {
+        lines.push(currentLine);
+        currentLine = [char];
+      } else {
+        currentLine.push(char);
+      }
+    } else {
+      const baselineDiff = Math.abs(char.domBaseline - prevChar.domBaseline);
+      const topDiff = Math.abs(char.domTop - prevChar.domTop);
+
+      if (baselineDiff > 4.0 || topDiff > 6.0) {
+        lines.push(currentLine);
+        currentLine = [char];
+      } else {
+        currentLine.push(char);
+      }
+    }
+  }
+
+  if (currentLine.length > 0) {
+    lines.push(currentLine);
+  }
+
+  // Create bounding box for each line
+  const rects: HighlightRect[] = [];
+  for (const line of lines) {
+    if (line.length === 0) continue;
+
+    const firstChar = line[0];
+    const isVert = firstChar.isVertical || firstChar.rotation === 90 || firstChar.rotation === 270;
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let maxFontSize = 0;
+    let sumBaseline = 0;
+
+    for (const c of line) {
+      if (c.domLeft < minX) minX = c.domLeft;
+      if (c.domRight > maxX) maxX = c.domRight;
+      if (c.domTop < minY) minY = c.domTop;
+      if (c.domBottom > maxY) maxY = c.domBottom;
+      if (c.fontSize > maxFontSize) maxFontSize = c.fontSize;
+      sumBaseline += c.domBaseline;
+    }
+
+    if (isVert) {
+      const width = Math.max(maxFontSize * 1.15, maxX - minX);
+      const height = Math.max(0, maxY - minY);
+      if (width > 0 && height > 0) {
+        rects.push({
+          x: minX,
+          y: minY,
+          width,
+          height,
+        });
+      }
+    } else {
+      const avgBaseline = sumBaseline / line.length;
+      const top = Math.max(0, avgBaseline - maxFontSize * 0.85);
+      const height = maxFontSize * 1.15;
+      const width = Math.max(0, maxX - minX);
+
+      if (width > 0 && height > 0) {
+        rects.push({
+          x: minX,
+          y: top,
+          width,
+          height,
+        });
+      }
+    }
+  }
+
+  return rects;
+}
+
+/**
+ * Finds a character at or near the given DOM page coordinates.
+ *
+ * @param characters The array of all page characters.
+ * @param x Horizontal page coordinate.
+ * @param y Vertical page coordinate.
+ * @param toleranceX Horizontal tolerance padding.
+ * @param toleranceY Vertical tolerance padding.
+ * @return The matched PageCharacter or null if no character is near.
+ */
+export function findCharacterAt(
+  characters: PageCharacter[],
+  x: number,
+  y: number,
+  toleranceX: number = 4,
+  toleranceY: number = 4
+): PageCharacter | null {
+  if (characters.length === 0) return null;
+
+  let bestMatch: PageCharacter | null = null;
+  let minDistanceSq = Infinity;
+
+  for (const c of characters) {
+    const inX = x >= c.domLeft - toleranceX && x <= c.domRight + toleranceX;
+    const inY = y >= c.domTop - toleranceY && y <= c.domBottom + toleranceY;
+
+    if (inX && inY) {
+      const centerX = (c.domLeft + c.domRight) / 2;
+      const centerY = (c.domTop + c.domBottom) / 2;
+      const distSq = (x - centerX) ** 2 + (y - centerY) ** 2;
+      if (distSq < minDistanceSq) {
+        minDistanceSq = distSq;
+        bestMatch = c;
+      }
+    }
+  }
+
+  return bestMatch;
+}
+
+/**
+ * Finds the character closest to the given coordinates during drag selection.
+ * First selects the closest text line, then finds the closest character on that line.
+ *
+ * @param characters The array of all page characters.
+ * @param x Horizontal page coordinate.
+ * @param y Vertical page coordinate.
+ * @return The closest PageCharacter or null if characters list is empty.
+ */
+export function findClosestCharacter(
+  characters: PageCharacter[],
+  x: number,
+  y: number
+): PageCharacter | null {
+  if (characters.length === 0) return null;
+
+  let closestChar: PageCharacter | null = null;
+  let minDistanceSq = Infinity;
+
+  for (const c of characters) {
+    const dx = x < c.domLeft ? c.domLeft - x : x > c.domRight ? x - c.domRight : 0;
+    const dy = y < c.domTop ? c.domTop - y : y > c.domBottom ? y - c.domBottom : 0;
+    const distSq = dx * dx + dy * dy;
+
+    if (distSq < minDistanceSq) {
+      minDistanceSq = distSq;
+      closestChar = c;
+    }
+  }
+
+  return closestChar;
+}
+
+/**
+ * Permanently removes all text objects within the specified DOM bounding rectangles
+ * from the PDF page content stream and regenerates page content.
+ *
+ * @param engine The PDFium engine instance.
+ * @param pageHandle Handle to the active page.
+ * @param rects Array of bounding rectangles in DOM coordinates.
+ * @return True if page content was modified.
+ */
+export function removeTextInRects(
+  engine: PdfiumEngine,
+  pageHandle: number,
+  rects: HighlightRect[]
+): boolean {
+  if (rects.length === 0) return false;
+  const mod = engine.getModule();
+  const didRemove = removeTextObjectsInRects(engine, mod, pageHandle, rects);
+  if (didRemove) {
+    mod.FPDFPage_GenerateContent(pageHandle);
+  }
+  return didRemove;
+}
+
+/**
+ * Permanently redacts only the characters in the specified character range [startCharIndex, endCharIndex]
+ * from the PDF page content stream.
+ *
+ * Uses center-containment span matching and character-level replacement to ensure that
+ * only the selected characters are removed, leaving neighboring text and surrounding
+ * spans completely intact.
+ *
+ * @param engine The PDFium engine instance.
+ * @param docHandle The active document handle.
+ * @param pageIndex Zero-based page index.
+ * @param pageHandle The active page handle.
+ * @param startCharIndex Starting character index (inclusive).
+ * @param endCharIndex Ending character index (inclusive).
+ * @return True if page content was modified.
+ */
+export function redactTextRange(
+  engine: PdfiumEngine,
+  _docHandle: number,
+  pageIndex: number,
+  pageHandle: number,
+  startCharIndex: number,
+  endCharIndex: number
+): boolean {
+  const mod = engine.getModule();
+  const minIndex = Math.min(startCharIndex, endCharIndex);
+  const maxIndex = Math.max(startCharIndex, endCharIndex);
+
+  const spans = extractEditableSpans(engine, pageIndex, pageHandle);
+  let modified = false;
+
+  const handledCharIndices = new Set<number>();
+
+  for (const span of spans) {
+    const spanStart = span.charStartIndex;
+    const spanEnd = span.charStartIndex + span.charCount - 1;
+
+    // Check if span has any overlap with the selected redaction range
+    if (spanEnd < minIndex || spanStart > maxIndex) {
+      // No overlap: leave completely untouched to preserve neighbors
+      continue;
+    }
+
+    if (spanStart >= minIndex && spanEnd <= maxIndex) {
+      // Full overlap: entire span is redacted
+      const objectIndices = findTextObjectIndicesForSpan(
+        engine,
+        mod,
+        pageHandle,
+        span.left,
+        span.baselineY,
+        span.width,
+        span.fontSize
+      );
+
+      if (objectIndices.length > 0) {
+        removeTextObjectsByIndex(mod, pageHandle, objectIndices);
+      } else {
+        removeTextObjectsInBounds(
+          engine,
+          mod,
+          pageHandle,
+          span.left,
+          span.baselineY,
+          span.width,
+          span.fontSize
+        );
+      }
+      modified = true;
+      for (let c = spanStart; c <= spanEnd; c++) {
+        handledCharIndices.add(c);
+      }
+    } else {
+      // Partial overlap: only some characters in this span are redacted
+      const objectIndices = findTextObjectIndicesForSpan(
+        engine,
+        mod,
+        pageHandle,
+        span.left,
+        span.baselineY,
+        span.width,
+        span.fontSize
+      );
+
+      // Build replacement text by replacing only the redacted characters with spaces
+      const chars = Array.from(span.text);
+      let hasRedactedChars = false;
+      const updatedChars = chars.map((ch, idx) => {
+        const cIdx = spanStart + idx;
+        if (cIdx >= minIndex && cIdx <= maxIndex) {
+          hasRedactedChars = true;
+          handledCharIndices.add(cIdx);
+          return ' ';
+        }
+        return ch;
+      });
+
+      if (hasRedactedChars) {
+        const updatedText = updatedChars.join('');
+        if (objectIndices.length > 0) {
+          setTextObjectByIndex(engine, mod, pageHandle, objectIndices[0], updatedText);
+          for (let k = 1; k < objectIndices.length; k++) {
+            setTextObjectByIndex(engine, mod, pageHandle, objectIndices[k], ' ');
+          }
+          modified = true;
+        } else {
+          // Spatial fallback
+          const didSet = setTextObjectInBounds(
+            engine,
+            mod,
+            pageHandle,
+            span.left,
+            span.baselineY,
+            span.width,
+            span.fontSize,
+            updatedText
+          );
+          if (didSet) {
+            modified = true;
+          }
+        }
+      }
+    }
+  }
+
+  // Handle any remaining standalone characters in the selection that were not in clustered spans
+  const allCharacters = extractPageCharacters(engine, pageIndex, pageHandle);
+  const remainingChars = allCharacters.filter(
+    (c) => c.charIndex >= minIndex && c.charIndex <= maxIndex && !handledCharIndices.has(c.charIndex)
+  );
+
+  for (const char of remainingChars) {
+    const objectIndices = findTextObjectIndicesForSpan(
+      engine,
+      mod,
+      pageHandle,
+      char.left,
+      char.originY,
+      Math.max(1, char.right - char.left),
+      char.fontSize
+    );
+    if (objectIndices.length > 0) {
+      removeTextObjectsByIndex(mod, pageHandle, objectIndices);
+      modified = true;
+    }
+  }
+
+  if (modified) {
+    mod.FPDFPage_GenerateContent(pageHandle);
+  }
+
+  return modified;
+}
+
+
