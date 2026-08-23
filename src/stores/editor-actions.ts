@@ -842,3 +842,429 @@ export class EditorActions {
       this.service.document.invalidatePage(pageIndex);
     }
 
+    for (const rect of rects) {
+      canvasStore.addElement({
+        id: canvasStore.generateId(),
+        kind: 'shape',
+        variant: 'rectangle',
+        pageIndex,
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        rotation: 0,
+        locked: false,
+        visible: true,
+        flipX: false,
+        flipY: false,
+        fill: '#000000',
+        stroke: '#000000',
+        strokeWidth: 0,
+        opacity: 1.0,
+      });
+    }
+
+    this.store.clearSelection();
+    this.store.incrementPageVersion(pageIndex);
+    this.refreshDocument();
+    this.recordSnapshot('Redact Text', true);
+  }
+
+  /**
+   * Redacts text and canvas objects across the specified rectangles on a page (area mode),
+   * permanently deleting text objects within the area from the PDF content stream,
+   * purging covered canvas elements, and adding blackout shape elements.
+   *
+   * @param pageIndex Zero-based page index.
+   * @param rects Array of bounding rectangles in DOM coordinates.
+   * @param canvasStore The canvas store to add blackout elements to.
+   */
+  redactArea(pageIndex: number, rects: HighlightRect[], canvasStore: CanvasStore): void {
+    if (!this.store.isDocumentLoaded || rects.length === 0) return;
+
+    const page = this.service.document.getPage(pageIndex);
+    page.deleteTextInRects(rects);
+    this.service.document.invalidatePage(pageIndex);
+
+    // Purge or remove canvas elements on this page that are fully covered by any redaction rect
+    const pageElements = canvasStore.getElementsByPage(pageIndex);
+    for (const el of pageElements) {
+      if (el.kind === 'shape' && (el as any).fill === '#000000' && (el as any).strokeWidth === 0) {
+        continue; // preserve existing blackout rectangles
+      }
+      for (const rect of rects) {
+        const elRight = el.x + el.width;
+        const elBottom = el.y + el.height;
+        const rectRight = rect.x + rect.width;
+        const rectBottom = rect.y + rect.height;
+
+        const isFullyCovered =
+          el.x >= rect.x - 2 &&
+          el.y >= rect.y - 2 &&
+          elRight <= rectRight + 2 &&
+          elBottom <= rectBottom + 2;
+
+        if (isFullyCovered) {
+          canvasStore.removeElement(el.id);
+          break;
+        }
+      }
+    }
+
+    for (const rect of rects) {
+      canvasStore.addElement({
+        id: canvasStore.generateId(),
+        kind: 'shape',
+        variant: 'rectangle',
+        pageIndex,
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        rotation: 0,
+        locked: false,
+        visible: true,
+        flipX: false,
+        flipY: false,
+        fill: '#000000',
+        stroke: '#000000',
+        strokeWidth: 0,
+        opacity: 1.0,
+      });
+    }
+
+    this.store.clearSelection();
+    this.store.incrementPageVersion(pageIndex);
+    this.refreshDocument();
+    this.recordSnapshot('Redact Area', true);
+  }
+
+  /**
+   * Redacts text across the specified rectangles on a page.
+   * Alias for redactArea.
+   *
+   * @param pageIndex Zero-based page index.
+   * @param rects Array of bounding rectangles in DOM coordinates.
+   * @param canvasStore The canvas store to add blackout elements to.
+   */
+  redactText(pageIndex: number, rects: HighlightRect[], canvasStore: CanvasStore): void {
+    this.redactArea(pageIndex, rects, canvasStore);
+  }
+
+
+  // -- Helper for bulk operations --
+  
+  private getTargetPageIndices(defaultIndex: number): number[] {
+    const selection = useSelection();
+    const selectedPageIds = Array.from(selection.selectedIds).filter((id: string) => id.startsWith('page_'));
+    
+    if (selectedPageIds.length > 0) {
+      const indices = selectedPageIds.map((id: string) => parseInt(id.replace('page_', ''), 10));
+      // Sort descending to ensure safe mutations (deletions and insertions won't shift indices of earlier pages)
+      return indices.sort((a, b) => b - a);
+    }
+    return [defaultIndex];
+  }
+
+  // -- Page operations --
+
+  rotatePage(index: number): void {
+    if (!this.store.isDocumentLoaded) return;
+    const indices = this.getTargetPageIndices(index);
+    for (const idx of indices) {
+      this.service.document.getPage(idx).rotate(90);
+      if (this.store.pageTransforms[idx]) {
+        this.store.pageTransforms[idx].rotation = 0;
+      }
+      this.store.incrementPageVersion(idx);
+    }
+    this.refreshDocument();
+    this.recordSnapshot('Rotate Page', true);
+  }
+
+  flattenPage(index: number): void {
+    if (!this.store.isDocumentLoaded) return;
+    const indices = this.getTargetPageIndices(index);
+    for (const idx of indices) {
+      this.service.document.getPage(idx).flatten();
+      this.store.incrementPageVersion(idx);
+    }
+    this.recordSnapshot('Flatten Page', true);
+  }
+
+  async rasterizePage(index: number): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    const indices = this.getTargetPageIndices(index);
+    
+    try {
+      for (const idx of indices) {
+        // Render at 3x scale for high-quality rasterization
+        const blob = await this.service.document.getPage(idx).exportAsBlob('jpeg', 3.0);
+        const buffer = await blob.arrayBuffer();
+        
+        await this.service.document.importImageAsPage(buffer, 'image/jpeg', idx);
+        this.service.document.deletePage(idx + 1);
+        this.store.incrementPageVersion(idx);
+      }
+      this.refreshDocument();
+      useSelection().clear();
+      this.recordSnapshot('Rasterize Page', true);
+    } catch (err) {
+      console.error('Failed to rasterize pages:', err);
+    }
+  }
+
+  /**
+   * Remap page indices across canvas elements, page transforms, and page versions
+   * after a structural page operation.
+   *
+   * @param indexMap A function mapping old page indices to new page indices, or -1 for deleted pages.
+   */
+  private remapPageIndices(indexMap: (oldIndex: number) => number): void {
+    if (!this.canvasStore) return;
+
+    // Remap canvas elements, removing those on deleted pages.
+    this.canvasStore.elements = this.canvasStore.elements
+      .map(el => {
+        const newIndex = indexMap(el.pageIndex);
+        if (newIndex < 0) return null;
+        return newIndex === el.pageIndex ? el : { ...el, pageIndex: newIndex };
+      })
+      .filter((el): el is CanvasElement => el !== null);
+
+    // Remap page transforms.
+    const oldTransforms = this.store.pageTransforms;
+    const newTransforms: Record<number, typeof oldTransforms[number]> = {};
+    for (const [key, value] of Object.entries(oldTransforms)) {
+      const newIndex = indexMap(Number(key));
+      if (newIndex >= 0) {
+        newTransforms[newIndex] = value;
+      }
+    }
+    this.store.pageTransforms = newTransforms;
+
+    // Remap page versions.
+    const oldVersions = this.store.pageVersions;
+    const newVersions: Record<number, number> = {};
+    for (const [key, value] of Object.entries(oldVersions)) {
+      const newIndex = indexMap(Number(key));
+      if (newIndex >= 0) {
+        newVersions[newIndex] = value;
+      }
+    }
+    this.store.pageVersions = newVersions;
+  }
+
+  deletePage(index: number): void {
+    if (!this.store.isDocumentLoaded || this.store.pageCount <= 1) return;
+    const indices = this.getTargetPageIndices(index);
+    
+    for (const idx of indices) {
+      if (this.service.document.getPageCount() <= 1) break; // Cannot delete the last page
+      this.service.document.deletePage(idx);
+      const deletedIndex = idx;
+      this.remapPageIndices((old) => {
+        if (old === deletedIndex) return -1;
+        if (old > deletedIndex) return old - 1;
+        return old;
+      });
+    }
+    
+    this.store.currentPageIndex = Math.max(0, Math.min(this.store.currentPageIndex, this.service.document.getPageCount() - 1));
+    this.refreshDocument();
+    useSelection().clear();
+    this.recordSnapshot('Delete Page', true);
+  }
+
+  addBlankPage(afterIndex: number): void {
+    if (!this.store.isDocumentLoaded) return;
+    const indices = this.getTargetPageIndices(afterIndex);
+    for (const idx of indices) {
+      this.service.document.addBlankPage(idx + 1);
+      const atIndex = idx + 1;
+      this.remapPageIndices((old) => old >= atIndex ? old + 1 : old);
+    }
+    this.refreshDocument();
+    useSelection().clear();
+    this.recordSnapshot('Add Blank Page', true);
+  }
+
+  duplicatePage(index: number): void {
+    if (!this.store.isDocumentLoaded) return;
+    const indices = this.getTargetPageIndices(index);
+    for (const idx of indices) {
+      this.service.document.duplicatePage(idx);
+    }
+    this.refreshDocument();
+    useSelection().clear();
+    this.recordSnapshot('Duplicate Page', true);
+  }
+
+  reorderPages(fromIndices: number[], toIndex: number): void {
+    if (!this.store.isDocumentLoaded || fromIndices.length === 0) return;
+    
+    const activePage = this.store.currentPageIndex;
+    
+    this.service.document.reorderPages(fromIndices, toIndex);
+    
+    this.remapPageIndices((old) => {
+      if (fromIndices.includes(old)) {
+        const sortedFrom = [...fromIndices].sort((a, b) => a - b);
+        const offset = sortedFrom.indexOf(old);
+        return toIndex + offset;
+      } else {
+        let newIdx = old;
+        const removedBefore = fromIndices.filter(i => i < old).length;
+        newIdx -= removedBefore;
+        if (toIndex <= newIdx) {
+          newIdx += fromIndices.length;
+        }
+        return newIdx;
+      }
+    });
+
+    this.refreshDocument();
+    
+    // Update active page tracking so viewer doesn't jump
+    if (fromIndices.includes(activePage)) {
+      const sortedFrom = [...fromIndices].sort((a, b) => a - b);
+      const offset = sortedFrom.indexOf(activePage);
+      this.store.currentPageIndex = toIndex + offset;
+    } else {
+      let newIdx = activePage;
+      const removedBefore = fromIndices.filter(i => i < activePage).length;
+      newIdx -= removedBefore;
+      if (toIndex <= newIdx) {
+        newIdx += fromIndices.length;
+      }
+      this.store.currentPageIndex = newIdx;
+    }
+    
+    const selection = useSelection();
+    selection.clear();
+    for (let i = 0; i < fromIndices.length; i++) {
+      selection.select(`page_${toIndex + i}`, true, false);
+    }
+    this.recordSnapshot('Reorder Pages', true);
+  }
+
+  mergePdfFromFile(file: File, atIndex: number): void {
+    this.mergePdfsFromFiles([file], atIndex);
+  }
+
+  async mergePdfsFromFiles(files: File[], atIndex: number): Promise<void> {
+    try {
+      let currentIndex = atIndex;
+      for (const file of files) {
+        const buf = await file.arrayBuffer();
+        const previousPageCount = this.store.pageCount;
+        this.service.document.merge(buf, currentIndex);
+        this.store.pageCount = this.service.document.getPageCount();
+        currentIndex += (this.store.pageCount - previousPageCount);
+      }
+      this.refreshDocument();
+      this.recordSnapshot('Merge PDF', true);
+    } catch (err) {
+      console.error('Failed to merge PDF files:', err);
+    }
+  }
+
+  async importImagesFromFiles(files: File[], atIndex: number): Promise<void> {
+    try {
+      let currentIndex = atIndex;
+      for (const file of files) {
+        const buf = await file.arrayBuffer();
+        this.service.document.importImageAsPage(buf, file.type, currentIndex);
+        currentIndex++;
+      }
+      this.refreshDocument();
+      this.recordSnapshot('Import Image Page', true);
+    } catch (err) {
+      console.error('Failed to import images as pages:', err);
+    }
+  }
+
+  async extractPages(indices: number[], mode: 'split' | 'extract', rangeString: string): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    
+    try {
+      const splitBytes = this.service.document.split(indices);
+      const splitBuffer = splitBytes.buffer.slice(splitBytes.byteOffset, splitBytes.byteOffset + splitBytes.byteLength) as ArrayBuffer;
+      
+      if (mode === 'split') {
+        const sortedIndices = [...indices].sort((a, b) => b - a);
+        for (const idx of sortedIndices) {
+          if (this.service.document.getPageCount() > 1) {
+            this.service.document.deletePage(idx);
+          }
+        }
+        this.store.pageCount = this.service.document.getPageCount();
+        this.store.currentPageIndex = Math.max(0, Math.min(this.store.currentPageIndex, this.store.pageCount - 1));
+        this.refreshDocument();
+      }
+      
+      const baseName = this.store.fileName.replace(/\.[^/.]+$/, "");
+      let suffix = rangeString.replace(/,/g, '_').replace(/\s/g, '');
+      let newFileName = `${baseName}_${suffix}.pdf`;
+      
+      if (newFileName.length > 50) {
+        const existingSplits = this.store.workspaceFiles
+          .map(f => f.fileName)
+          .filter(name => name.startsWith(`${baseName}-split-`));
+          
+        let maxInc = 0;
+        for (const name of existingSplits) {
+          const match = name.match(/-split-(\d+)\.pdf$/);
+          if (match) {
+            maxInc = Math.max(maxInc, parseInt(match[1], 10));
+          }
+        }
+        newFileName = `${baseName}-split-${maxInc + 1}.pdf`;
+      }
+      
+      const wasAdding = this.isAddingToWorkspace;
+      try {
+        this.isAddingToWorkspace = true;
+        await this.loadDocumentFromBuffer(splitBuffer, newFileName);
+      } finally {
+        this.isAddingToWorkspace = wasAdding;
+      }
+    } catch (err) {
+      console.error('Failed to extract pages:', err);
+      throw err;
+    }
+  }
+
+  // -- Text overlay --
+
+  addTextOverlay(
+    pageIndex: number,
+    text: string,
+    posX: number,
+    posY: number,
+    fontSize: number,
+  ): void {
+    if (!this.store.isDocumentLoaded) return;
+    this.service.document.getPage(pageIndex).drawText({text, x: posX, y: posY, fontSize: fontSize, color: '#000000', fontFamily: 'Helvetica'});
+    this.store.incrementPageVersion(pageIndex);
+    this.recordSnapshot('Add Text Overlay', true);
+  }
+
+  // -- Export --
+
+  async applyCanvasComponentsToPdf(elements: CanvasElement[], onApplied?: () => void): Promise<void> {
+    const hasTransforms = Object.values(this.store.pageTransforms).some(
+      t => t && (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1)
+    );
+    if (!this.store.isDocumentLoaded || (elements.length === 0 && !hasTransforms)) return;
+    try {
+      await this.service.applyCanvasElementsToPdf(elements, this.store.pageTransforms);
+      
+      const affectedPages = new Set(elements.map(e => e.pageIndex));
+      for (const pIdx of Object.keys(this.store.pageTransforms)) {
+        affectedPages.add(parseInt(pIdx, 10));
+      }
+      for (const pageIndex of affectedPages) {
+        this.store.incrementPageVersion(pageIndex);
+      }
+      
