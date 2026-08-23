@@ -431,3 +431,414 @@ export class EditorActions {
     }
   }
 
+  async switchWorkspaceFile(id: string): Promise<void> {
+    if (this.store.activeWorkspaceFileId === id) return;
+
+    await this.saveActiveFileToWorkspace();
+
+    const file = this.service.getFile(id);
+    if (!file) return;
+
+    const fileBuffer = getFileBuffer(id);
+    if (!fileBuffer) return;
+
+    try {
+      this.service.loadDocumentFromBuffer(fileBuffer);
+      this.store.fileName = file.fileName;
+      this.store.currentPageIndex = 0;
+      this.store.isDocumentLoaded = true;
+      this.store.clearSelection();
+      this.store.pageCount = this.service.document.getPageCount();
+      this.store.incrementRenderVersion();
+      this.store.activeWorkspaceFileId = id;
+      this.historyStore?.setActiveFileId(id);
+    } catch (err) {
+      console.error('Failed to switch workspace file:', err);
+    }
+  }
+
+  reorderWorkspaceFiles(fromIndices: number[], toIndex: number): void {
+    this.service.reorderFiles(fromIndices, toIndex);
+    
+    // Update selection
+    const selection = useSelection();
+    selection.clear();
+    const files = this.store.workspaceFiles;
+    for (let i = 0; i < fromIndices.length; i++) {
+       const file = files[toIndex + i];
+       if (file) {
+         selection.select(`file_${file.id}`, true, false);
+       }
+    }
+  }
+
+  // -- Document refresh --
+
+  refreshDocument(): void {
+    if (!this.store.isDocumentLoaded) return;
+    this.store.pageCount = this.service.document.getPageCount();
+    this.store.currentPageIndex = Math.min(
+      this.store.currentPageIndex,
+      Math.max(0, this.store.pageCount - 1),
+    );
+    
+    if (this.store.activeWorkspaceFileId && this.store.pageCount > 0) {
+      const activeFile = this.service.getFile(this.store.activeWorkspaceFileId);
+      if (activeFile) {
+        try {
+          const { canvas } = this.service.document.getPage(0).render(0.2, { applyDpr: false });
+          activeFile.thumbnail = canvas.toDataURL('image/jpeg', 0.6);
+        } catch (e) {
+          console.error('Failed to update thumbnail on refresh', e);
+        }
+      }
+    }
+
+    this.store.incrementRenderVersion();
+  }
+
+  // -- Navigation --
+
+  registerScrollCallback(cb: (index: number) => void): void {
+    this.scrollCallback = cb;
+  }
+
+  goToPage(index: number): void {
+    if (index < 0 || index >= this.store.pageCount) return;
+    if (this.store.inlineEdit) {
+      this.submitInlineEdit();
+    }
+    this.store.currentPageIndex = index;
+    this.store.clearSelection();
+    this.scrollCallback?.(index);
+  }
+
+  goToPrevPage(): void {
+    if (this.store.canGoPrev) {
+      this.goToPage(this.store.currentPageIndex - 1);
+    }
+  }
+
+  goToNextPage(): void {
+    if (this.store.canGoNext) {
+      this.goToPage(this.store.currentPageIndex + 1);
+    }
+  }
+
+  /** Called by the IntersectionObserver in Canvas (no scroll triggered). */
+  setCurrentPageFromScroll(index: number): void {
+    this.store.currentPageIndex = index;
+  }
+
+  // -- Tool selection --
+
+  setTool(tool: EditorTool): void {
+    if (this.store.activeTool === tool) return;
+    if (this.store.inlineEdit) {
+      this.submitInlineEdit();
+    }
+    this.store.activeTool = tool;
+    this.store.clearSelection();
+    this.store.incrementRenderVersion();
+  }
+
+  // -- Zoom --
+
+  setZoom(zoom: number): void {
+    this.store.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom));
+  }
+
+  zoomIn(): void {
+    this.setZoom(this.store.zoom * ZOOM_STEP);
+  }
+
+  zoomOut(): void {
+    this.setZoom(this.store.zoom / ZOOM_STEP);
+  }
+
+  resetZoom(): void {
+    this.setZoom(1.0);
+  }
+
+  // -- Text & Object editing --
+
+  /**
+   * Clears any active span or object selection.
+   * Optionally commits active inline edits before clearing.
+   *
+   * @param commitActiveEdit Whether to submit active inline edits before clearing.
+   */
+  clearSelection(commitActiveEdit: boolean = true): void {
+    if (commitActiveEdit && this.store.inlineEdit) {
+      this.submitInlineEdit();
+    }
+    this.store.clearSelection();
+  }
+
+  /**
+   * Selects a canvas or PDF overlay span, submitting any active inline edit beforehand.
+   * If a text span is selected after an edit mutation, re-resolves the matching span
+   * from the refreshed page data to guarantee up-to-date metrics and IDs.
+   *
+   * @param span The span to select.
+   */
+  selectSpan(span: EditableSpan): void {
+    if (this.store.inlineEdit) {
+      this.submitInlineEdit();
+    }
+    if (span.type === 'text' && this.store.isDocumentLoaded) {
+      try {
+        const pageSpans = this.service.document.getPage(span.pageIndex).extractTextSpans();
+        const freshSpan = pageSpans.find(
+          (s) => s.id === span.id || (Math.abs(s.left - span.left) < 20 && Math.abs(s.top - span.top) < 20)
+        );
+        this.store.selectedSpan = freshSpan || span;
+      } catch {
+        this.store.selectedSpan = span;
+      }
+    } else {
+      this.store.selectedSpan = span;
+    }
+    this.store.inlineEdit = null;
+  }
+
+  /**
+   * Enters inline editing mode for a text span.
+   * Hides the underlying text glyphs on the canvas page so the transparent
+   * inline editor overlays seamlessly without ghost text.
+   *
+   * @param span The text span to edit inline.
+   */
+  startInlineEdit(span: EditableTextSpan): void {
+    if (this.store.inlineEdit) {
+      if (this.store.inlineEdit.spanId === span.id) {
+        return;
+      }
+      this.submitInlineEdit();
+    }
+
+    let targetSpan = span;
+    if (this.store.isDocumentLoaded) {
+      try {
+        const pageSpans = this.service.document.getPage(span.pageIndex).extractTextSpans();
+        const freshSpan = pageSpans.find(
+          (s) => s.id === span.id || (Math.abs(s.left - span.left) < 20 && Math.abs(s.top - span.top) < 20)
+        );
+        if (freshSpan) {
+          targetSpan = freshSpan;
+        }
+      } catch {}
+    }
+
+    this.store.selectedSpan = targetSpan;
+    this.store.inlineEdit = {
+      spanId: targetSpan.id,
+      textValue: targetSpan.text,
+      span: { ...targetSpan },
+    };
+
+    if (this.store.isDocumentLoaded) {
+      try {
+        this.service.document.getPage(targetSpan.pageIndex).hideTextSpan(targetSpan);
+        this.store.hiddenSpanIds.add(targetSpan.id);
+        this.service.document.invalidatePage(targetSpan.pageIndex);
+        this.store.incrementPageVersion(targetSpan.pageIndex);
+        this.refreshDocument();
+      } catch (err) {
+        console.error('Failed to hide text span during inline edit:', err);
+      }
+    }
+  }
+
+  updateInlineText(value: string, lines?: TextLine[]): void {
+    if (this.store.inlineEdit) {
+      this.store.inlineEdit = {
+        ...this.store.inlineEdit,
+        textValue: value,
+        styledLines: lines ?? this.store.inlineEdit.styledLines,
+      };
+    }
+  }
+
+  /**
+   * Submits and commits the active inline text edit.
+   * Clears inlineEdit state safely first to prevent recursive re-entry.
+   *
+   * @param extractedData Optional structured text and styled lines extracted directly from the editor DOM.
+   */
+  submitInlineEdit(extractedData?: { text: string; lines?: TextLine[] }): void {
+    const { inlineEdit } = this.store;
+    if (!inlineEdit) return;
+
+    this.store.inlineEdit = null;
+    this.store.hiddenSpanIds.delete(inlineEdit.spanId);
+
+    const span = inlineEdit.span;
+    const textValue = extractedData?.text ?? inlineEdit.textValue;
+    const customLines = extractedData?.lines ?? inlineEdit.styledLines;
+
+    if (textValue.trim().length > 0) {
+      // Detect if span or custom lines have mixed font sizes across lines or words
+      const hasMixedFontSize =
+        (span.lines && span.lines.some((l) => Math.abs(l.fontSize - span.lines![0].fontSize) > 0.2)) ||
+        (span.lines && span.lines.some((l) => l.words && l.words.some((w) => Math.abs(w.fontSize - l.words[0].fontSize) > 0.2))) ||
+        (customLines && customLines.some((l) => Math.abs(l.fontSize - customLines[0].fontSize) > 0.2)) ||
+        (customLines && customLines.some((l) => l.words && l.words.some((w) => Math.abs(w.fontSize - l.words[0].fontSize) > 0.2)));
+
+      this.applyTextMutation(
+        {
+          text: textValue,
+          fontSize: hasMixedFontSize ? undefined : span.fontSize,
+          fontFamily: span.fontFamily,
+          color: span.color,
+          lineHeight: span.lineHeight,
+          fontWeight: span.fontWeight,
+          fontStyle: span.fontStyle,
+          lines: customLines || span.lines,
+          reflowParagraph: true,
+        },
+        span,
+        false
+      );
+      this.recordSnapshot('Edit Text', true);
+    } else {
+      // Emptied paragraph: delete and shift downstream lines up
+      this.service.document.getPage(span.pageIndex).deleteTextSpan(span);
+      this.service.document.invalidatePage(span.pageIndex);
+      this.store.clearSelection();
+      this.store.incrementPageVersion(span.pageIndex);
+      this.refreshDocument();
+      this.recordSnapshot('Delete Text', true);
+    }
+  }
+
+  /**
+   * Cancels the active inline text edit and restores the original text span on the page.
+   */
+  cancelInlineEdit(): void {
+    const { inlineEdit } = this.store;
+    if (inlineEdit) {
+      const span = inlineEdit.span;
+      this.store.hiddenSpanIds.delete(inlineEdit.spanId);
+      this.store.inlineEdit = null;
+
+      if (this.store.isDocumentLoaded) {
+        try {
+          const charsetIndex = this.service.document.fontCharsetIndex;
+          this.service.document.getPage(span.pageIndex).replaceTextSpan(
+            span,
+            {
+              text: span.text,
+              fontSize: span.fontSize,
+              fontFamily: span.fontFamily,
+              color: span.color,
+              lineHeight: span.lineHeight,
+              fontWeight: span.fontWeight,
+              fontStyle: span.fontStyle,
+            },
+            charsetIndex
+          );
+          this.service.document.invalidatePage(span.pageIndex);
+          this.store.incrementPageVersion(span.pageIndex);
+          this.refreshDocument();
+        } catch (err) {
+          console.error('Failed to restore text span on inline edit cancel:', err);
+        }
+      }
+    }
+  }
+
+  applyTextMutation(options: TextMutationOptions, targetSpan?: EditableTextSpan, recordHistory: boolean = true): void {
+    const spanToMutate = targetSpan || (this.store.selectedSpan?.type === 'text' ? this.store.selectedSpan as EditableTextSpan : undefined);
+    if (!spanToMutate || spanToMutate.type !== 'text' || !this.store.isDocumentLoaded) return;
+    const pageIndex = spanToMutate.pageIndex;
+    const charsetIndex = this.service.document.fontCharsetIndex;
+    this.service.document.getPage(pageIndex).replaceTextSpan(spanToMutate, options, charsetIndex);
+    this.service.document.invalidatePage(pageIndex);
+    this.store.incrementPageVersion(pageIndex);
+    this.refreshDocument();
+
+    try {
+      const updatedSpans = this.service.document.getPage(pageIndex).extractTextSpans();
+      const targetLeft = options.left !== undefined ? options.left : spanToMutate.left;
+      const matchingSpan = updatedSpans.find(
+        (s) => Math.abs(s.left - targetLeft) < 25 && Math.abs(s.top - spanToMutate.top) < 25
+      );
+      if (matchingSpan) {
+        this.store.selectedSpan = matchingSpan;
+      } else {
+        this.store.clearSelection();
+      }
+    } catch {
+      this.store.clearSelection();
+    }
+
+    if (recordHistory) {
+      this.recordSnapshot('Change Text Style', true);
+    }
+  }
+
+  deleteSelectedSpan(): void {
+    const { selectedSpan } = this.store;
+    if (!selectedSpan || !this.store.isDocumentLoaded) return;
+    
+    if (selectedSpan.type === 'text') {
+      this.service.document.getPage(selectedSpan.pageIndex).deleteTextSpan(selectedSpan);
+    } else {
+      this.service.document.getPage(selectedSpan.pageIndex).removeObject(selectedSpan.pdfObjectIndex);
+    }
+    this.service.document.invalidatePage(selectedSpan.pageIndex);
+    this.store.clearSelection();
+    this.store.incrementPageVersion(selectedSpan.pageIndex);
+    this.refreshDocument();
+    this.recordSnapshot('Delete PDF Object', true);
+  }
+
+  /**
+   * Redacts a specific text character range on a page, permanently deleting only
+   * the selected text characters from the PDF content stream (preserving neighbors)
+   * and adding blackout shape elements.
+   *
+   * @param pageIndex Zero-based page index.
+   * @param startCharIndex Starting character index (inclusive).
+   * @param endCharIndex Ending character index (inclusive).
+   * @param rects Array of bounding rectangles in DOM coordinates.
+   * @param canvasStore The canvas store to add blackout elements to.
+   */
+  redactTextRange(
+    pageIndex: number,
+    startCharIndex: number,
+    endCharIndex: number,
+    rects: HighlightRect[],
+    canvasStore: CanvasStore
+  ): void {
+    if (!this.store.isDocumentLoaded || rects.length === 0) return;
+
+    if (isSyntheticCanvasCharIndex(startCharIndex) || isSyntheticCanvasCharIndex(endCharIndex)) {
+      // Redaction targeting a canvas layer TextElement
+      const startResolved = resolveCanvasTextChar(startCharIndex, pageIndex, canvasStore.elements);
+      const endResolved = resolveCanvasTextChar(endCharIndex, pageIndex, canvasStore.elements);
+      const targetElement = startResolved?.element || endResolved?.element;
+
+      if (targetElement) {
+        const startOffset = startResolved ? startResolved.charOffset : 0;
+        const endOffset = endResolved ? endResolved.charOffset : targetElement.text.length - 1;
+        const minOffset = Math.min(startOffset, endOffset);
+        const maxOffset = Math.max(startOffset, endOffset);
+
+        const chars = Array.from(targetElement.text);
+        const updatedText = chars
+          .map((ch, idx) => (idx >= minOffset && idx <= maxOffset ? ' ' : ch))
+          .join('');
+
+        canvasStore.updateElement(targetElement.id, {
+          text: updatedText,
+        });
+      }
+    } else {
+      // Redaction targeting raw PDFium content stream
+      const page = this.service.document.getPage(pageIndex);
+      page.redactTextRange(startCharIndex, endCharIndex);
+      this.service.document.invalidatePage(pageIndex);
+    }
+
