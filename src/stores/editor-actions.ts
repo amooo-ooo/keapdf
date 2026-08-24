@@ -1268,3 +1268,429 @@ export class EditorActions {
         this.store.incrementPageVersion(pageIndex);
       }
       
+      this.store.pageTransforms = {};
+      this.refreshDocument();
+      
+      if (onApplied) {
+        onApplied();
+      }
+      this.recordSnapshot('Bake Canvas Components', true);
+    } catch (err) {
+      console.error('Failed to apply canvas components to PDF:', err);
+    }
+  }
+
+  async bakePageTransforms(): Promise<void> {
+    const hasTransforms = Object.values(this.store.pageTransforms).some(
+      t => t && (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1)
+    );
+    if (!this.store.isDocumentLoaded || !hasTransforms) return;
+
+    try {
+      const finalBytes = await this.service.document.saveAsync(this.store.pageTransforms);
+      const bufferArray = finalBytes.buffer.slice(finalBytes.byteOffset, finalBytes.byteOffset + finalBytes.byteLength) as ArrayBuffer;
+      this.service.loadDocumentFromBuffer(bufferArray);
+      this.store.pageTransforms = {};
+      this.refreshDocument();
+      this.recordSnapshot('Bake Page Transforms', true);
+    } catch (err) {
+      console.error('Failed to bake page transforms into PDF:', err);
+    }
+  }
+
+  extractObjectToCanvas(type: 'image' | 'shape' | 'text', span: EditableImageSpan | EditableShapeSpan | EditableTextSpan, canvasStore: CanvasStore): string | undefined {
+    if (!this.store.isDocumentLoaded) return;
+    if (!canvasStore) return;
+
+    const newId = canvasStore.generateId();
+
+    if (type === 'image') {
+      const imgSpan = span as EditableImageSpan;
+      canvasStore.elements.push({
+        id: newId,
+        kind: 'image',
+        pageIndex: imgSpan.pageIndex,
+        x: imgSpan.left,
+        y: imgSpan.top,
+        width: imgSpan.width,
+        height: imgSpan.height,
+        rotation: imgSpan.rotation,
+        flipX: imgSpan.flipX,
+        flipY: imgSpan.flipY,
+        locked: false,
+        visible: true,
+        src: imgSpan.src,
+        opacity: 1,
+        objectFit: 'fill'
+      } as CanvasElement);
+    } else if (type === 'shape') {
+      const shapeSpan = span as EditableShapeSpan;
+      canvasStore.elements.push({
+        id: newId,
+        kind: 'shape',
+        variant: 'rectangle',
+        pageIndex: shapeSpan.pageIndex,
+        x: shapeSpan.left,
+        y: shapeSpan.top,
+        width: shapeSpan.width,
+        height: shapeSpan.height,
+        rotation: shapeSpan.rotation,
+        flipX: shapeSpan.flipX,
+        flipY: shapeSpan.flipY,
+        locked: false,
+        visible: true,
+        fill: shapeSpan.fill,
+        stroke: 'transparent',
+        strokeWidth: 0,
+        opacity: 1,
+      } as CanvasElement);
+    } else if (type === 'text') {
+      const textSpan = span as EditableTextSpan;
+      const textElement = buildTextElementFromSpan(textSpan, newId);
+      canvasStore.elements.push(textElement);
+      this.service.document.getPage(span.pageIndex).hideTextSpan(textSpan);
+      this.store.hiddenSpanIds.add(span.id);
+    }
+
+    if (type !== 'text') {
+      this.service.document.getPage(span.pageIndex).removeObject((span as EditableImageSpan | EditableShapeSpan).pdfObjectIndex);
+      this.store.hiddenSpanIds.add(span.id);
+    }
+
+    // Clear the span selection so the editable-overlay-layer's SelectionOverlay
+    // is removed. Without this, a stale overlay persists at the same position and
+    // its onResizeStart callback can re-trigger extraction on pointer events.
+    this.store.clearSelection();
+    
+    this.store.incrementPageVersion(span.pageIndex);
+    this.refreshDocument();
+
+    // Select the extracted canvas element synchronously. The caller
+    // (startResize / startDrag / startRotate) also selects this element,
+    // so this acts as an eager default for non-interaction extraction paths.
+    canvasStore.selectElement(newId);
+
+    this.recordSnapshot('Extract Object to Canvas', true);
+
+    return newId;
+  }
+
+  async exportPdf(canvasStore?: CanvasStore): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    try {
+      if (canvasStore && canvasStore.elements.length > 0) {
+        await this.burnCanvasToPdf(canvasStore);
+      }
+      const bytes = await this.service.document.saveAsync(this.store.pageTransforms);
+      downloadBytes(bytes, `edited_${this.store.fileName}`, 'application/pdf');
+    } catch (err) {
+      console.error('Failed to export PDF:', err);
+    }
+  }
+
+  private async burnCanvasToPdf(canvasStore: CanvasStore): Promise<void> {
+    const pageCount = this.service.document.getPageCount();
+    for (const el of canvasStore.elements) {
+      if (el.pageIndex >= pageCount) continue;
+      const page = this.service.document.getPage(el.pageIndex);
+      if (el.kind === 'text') {
+        page.drawText({
+          text: el.text,
+          x: el.x,
+          y: el.y,
+          width: el.width,
+          height: el.height,
+          fontSize: el.fontSize,
+          fontFamily: el.fontFamily,
+          rawFontFamily: el.rawFontFamily,
+          color: el.color,
+          fontWeight: el.fontWeight,
+          fontStyle: el.fontStyle,
+          lineHeight: el.lineHeight,
+          lines: el.lines,
+          segments: el.segments,
+          rotation: el.rotation,
+          flipX: el.flipX,
+          flipY: el.flipY
+        });
+      } else if (el.kind === 'shape') {
+        if (el.variant === 'rectangle') {
+          page.drawRectangle({
+            x: el.x, y: el.y, width: el.width, height: el.height,
+            fill: el.fill, stroke: el.stroke, strokeWidth: el.strokeWidth,
+            rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
+          });
+        } else if (el.variant === 'circle') {
+          page.drawCircle({
+            x: el.x, y: el.y, width: el.width, height: el.height,
+            fill: el.fill, stroke: el.stroke, strokeWidth: el.strokeWidth,
+            rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
+          });
+        } else if (el.variant === 'line') {
+          page.drawLine({
+            x: el.x, y: el.y, width: el.width, height: el.height,
+            stroke: el.stroke, strokeWidth: el.strokeWidth,
+            rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
+          });
+        } else if (el.variant === 'arrow') {
+          page.drawArrow({
+            x: el.x, y: el.y, width: el.width, height: el.height,
+            stroke: el.stroke, strokeWidth: el.strokeWidth,
+            rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
+          });
+        }
+      } else if (el.kind === 'path') {
+        page.drawPath({
+          points: el.points,
+          x: el.x, y: el.y, width: el.width, height: el.height,
+          stroke: el.stroke, strokeWidth: el.strokeWidth,
+          opacity: el.opacity, isHighlight: el.isHighlight,
+          rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
+        });
+      } else if (el.kind === 'image') {
+        if (el.src) {
+          const imgData = await this.getImageDataFromSrc(el.src);
+          page.drawImage({
+            id: el.id,
+            x: el.x, y: el.y, width: el.width, height: el.height,
+            objectFit: el.objectFit as any,
+            imageData: {
+              width: imgData.width,
+              height: imgData.height,
+              imgData: imgData
+            },
+            rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
+          });
+        }
+      } else if (el.kind === 'form-field') {
+        page.drawFormFieldPlaceholder({
+          id: el.id,
+          variant: el.variant,
+          label: el.label,
+          placeholder: el.placeholder,
+          x: el.x, y: el.y, width: el.width, height: el.height,
+          rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
+        });
+        page.addAcroFormField({
+          id: el.id,
+          variant: el.variant,
+          label: el.label,
+          placeholder: el.placeholder,
+          x: el.x, y: el.y, width: el.width, height: el.height,
+          rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
+        });
+      } else if (el.kind === 'note') {
+        page.addTextAnnotation({
+          x: el.x,
+          y: el.y,
+          width: el.width,
+          height: el.height,
+          author: el.author,
+          contents: el.text,
+          color: el.color,
+        });
+      }
+    }
+
+    canvasStore.elements = [];
+    canvasStore.clearDragState();
+    canvasStore.selectElement(null);
+    this.refreshDocument();
+  }
+
+  private async getImageDataFromSrc(src: string): Promise<ImageData> {
+    return new Promise((resolve, reject) => {
+      const img = new window.Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('Failed to get 2D context'));
+          return;
+        }
+        ctx.drawImage(img, 0, 0);
+        resolve(ctx.getImageData(0, 0, img.width, img.height));
+      };
+      img.onerror = reject;
+      img.crossOrigin = 'anonymous';
+      img.src = src;
+    });
+  }
+
+  // -- Organizer view toggle --
+
+  toggleOrganizerView(): void {
+    if (this.store.inlineEdit) {
+      this.submitInlineEdit();
+    }
+    this.store.showOrganizerView = !this.store.showOrganizerView;
+    this.store.clearSelection();
+  }
+
+  // -- Document sanitization --
+
+  openSanitizeDialog(): void {
+    if (!this.store.isDocumentLoaded) return;
+    this.store.showSanitizeDialog = true;
+  }
+
+  closeSanitizeDialog(): void {
+    this.store.showSanitizeDialog = false;
+  }
+
+  async inspectDocumentForSanitization(): Promise<SanitizationInspection> {
+    if (!this.store.isDocumentLoaded) {
+      throw new Error('No document loaded');
+    }
+    return this.service.inspectActiveDocumentForSanitization(this.store.pageTransforms);
+  }
+
+  async sanitizeCurrentDocument(options: SanitizeOptions): Promise<SanitizeSummary> {
+    if (!this.store.isDocumentLoaded) {
+      throw new Error('No document loaded');
+    }
+    const summary = await this.service.sanitizeActiveDocument(options, this.store.pageTransforms);
+    this.store.pageTransforms = {};
+    this.refreshDocument();
+
+    if (this.store.activeWorkspaceFileId) {
+      const activeFile = this.service.getFile(this.store.activeWorkspaceFileId);
+      if (activeFile) {
+        const savedBytes = this.service.document.save();
+        const bufferArray = savedBytes.buffer.slice(
+          savedBytes.byteOffset,
+          savedBytes.byteOffset + savedBytes.byteLength
+        ) as ArrayBuffer;
+        setFileBuffer(activeFile.id, bufferArray);
+        activeFile.sizeBytes = bufferArray.byteLength;
+      }
+    }
+
+    this.recordSnapshot('Sanitize Document', true);
+
+    return summary;
+  }
+
+  async sanitizeAndDownload(options: SanitizeOptions): Promise<SanitizeSummary> {
+    if (!this.store.isDocumentLoaded) {
+      throw new Error('No document loaded');
+    }
+    const { bytes, summary } = await this.service.sanitizeToBytes(options, this.store.pageTransforms);
+    const baseName = this.store.fileName.replace(/\.[^/.]+$/, '');
+    downloadBytes(bytes, `sanitized_${baseName}.pdf`, 'application/pdf');
+    return summary;
+  }
+
+  async sanitizeAsNewWorkspaceFile(options: SanitizeOptions): Promise<SanitizeSummary> {
+    if (!this.store.isDocumentLoaded) {
+      throw new Error('No document loaded');
+    }
+    const { bytes, summary } = await this.service.sanitizeToBytes(options, this.store.pageTransforms);
+    const bufferArray = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength
+    ) as ArrayBuffer;
+
+    const baseName = this.store.fileName.replace(/\.[^/.]+$/, '');
+    const newFileName = `sanitized_${baseName}.pdf`;
+
+    const wasAdding = this.isAddingToWorkspace;
+    try {
+      this.isAddingToWorkspace = true;
+      await this.loadDocumentFromBuffer(bufferArray, newFileName);
+    } finally {
+      this.isAddingToWorkspace = wasAdding;
+    }
+    return summary;
+  }
+
+  /**
+   * Applies imposition layout to the document and routes output to destination.
+   *
+   * @param config The imposition configuration parameters.
+   * @param destination Target destination: 'replace' active document, 'workspace' file, or 'download'.
+   * @param canvasStore Optional active canvas store with pending overlay elements.
+   */
+  async applyImposition(
+    config: ImpositionConfig,
+    destination: 'replace' | 'workspace' | 'download',
+    canvasStore?: CanvasStore
+  ): Promise<void> {
+    if (!this.store.isDocumentLoaded) {
+      throw new Error('No document loaded');
+    }
+
+    if (canvasStore && canvasStore.elements.length > 0) {
+      await this.burnCanvasToPdf(canvasStore);
+    }
+
+    const currentBytes = await this.service.document.saveAsync(this.store.pageTransforms);
+    const imposedBytes = await applyImposition(currentBytes, config);
+
+    const baseName = this.store.fileName.replace(/\.[^/.]+$/, '');
+    let modeSuffix: string = config.type;
+    if (config.type === 'nup') modeSuffix = `${config.grid.cols}x${config.grid.rows}-up`;
+    else if (config.type === 'booklet') modeSuffix = 'booklet';
+    else if (config.type === 'single-page') modeSuffix = 'single-page';
+    else if (config.type === 'posterize') modeSuffix = 'poster';
+    else if (config.type === 'cut-stack') modeSuffix = 'cut-stack';
+
+    const newFileName = `${baseName}_${modeSuffix}.pdf`;
+
+    if (destination === 'download') {
+      downloadBytes(imposedBytes, newFileName, 'application/pdf');
+      return;
+    }
+
+    const imposedBuffer = imposedBytes.buffer.slice(
+      imposedBytes.byteOffset,
+      imposedBytes.byteOffset + imposedBytes.byteLength
+    ) as ArrayBuffer;
+
+    if (destination === 'workspace') {
+      const wasAdding = this.isAddingToWorkspace;
+      try {
+        this.isAddingToWorkspace = true;
+        await this.loadDocumentFromBuffer(imposedBuffer, newFileName);
+      } finally {
+        this.isAddingToWorkspace = wasAdding;
+      }
+    } else {
+      this.store.pageTransforms = {};
+      this.service.loadDocumentFromBuffer(imposedBuffer);
+      this.store.fileName = newFileName;
+      this.store.currentPageIndex = 0;
+      this.store.pageCount = this.service.document.getPageCount();
+      this.store.clearSelection();
+      this.store.pageVersions = {};
+      this.refreshDocument();
+      this.recordSnapshot('Apply Imposition', true);
+    }
+  }
+
+  /**
+   * Opens the comprehensive document information and metadata inspector dialog.
+   */
+  openDocumentInfoDialog(): void {
+    this.store.showDocumentInfoDialog = true;
+  }
+
+  /**
+   * Closes the document information and metadata inspector dialog.
+   */
+  closeDocumentInfoDialog(): void {
+    this.store.showDocumentInfoDialog = false;
+  }
+
+  /**
+   * Retrieves extended document metadata including all custom fields, XMP stream, and metrics.
+   *
+   * @return A promise resolving to the full DocumentMetadata object.
+   */
+  async getExtendedDocumentMetadata(): Promise<DocumentMetadata> {
+    const activeBuffer = this.store.activeWorkspaceFileId
+      ? getFileBuffer(this.store.activeWorkspaceFileId)
+      : undefined;
+
