@@ -1694,3 +1694,423 @@ export class EditorActions {
       ? getFileBuffer(this.store.activeWorkspaceFileId)
       : undefined;
 
+    return this.service.document.getExtendedMetadata(
+      activeBuffer,
+      this.store.fileName,
+      activeBuffer?.byteLength
+    );
+  }
+
+  /**
+   * Updates metadata fields and custom dictionary tags in the active document,
+   * synchronizes the non-reactive binary storage buffer, and triggers a UI update.
+   *
+   * @param updates The metadata fields and custom key-value pairs to set.
+   * @return A promise resolving when updates are applied and document reloaded.
+   */
+  async updateDocumentMetadata(updates: DocumentMetadataUpdate): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    try {
+      const { bytes } = await this.service.document.updateMetadata(updates);
+      const buffer = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength
+      ) as ArrayBuffer;
+
+      if (this.store.activeWorkspaceFileId) {
+        setFileBuffer(this.store.activeWorkspaceFileId, buffer);
+      }
+
+      this.service.loadDocumentFromBuffer(buffer);
+      this.store.incrementRenderVersion();
+      this.recordSnapshot('Update Metadata', true);
+    } catch (err) {
+      console.error('Failed to update document metadata:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Opens the E-Sign dialog with the specified initial tab.
+   *
+   * @param tab Initial tab mode ('signatures', 'draw', 'type', 'upload').
+   */
+  openEsignDialog(tab: 'signatures' | 'draw' | 'type' | 'upload' = 'signatures'): void {
+    this.store.esignInitialTab = tab;
+    this.store.showEsignDialog = true;
+  }
+
+  /**
+   * Opens the ISO 32000 Certificate Secure Signing dialog.
+   */
+  openCertSignDialog(): void {
+    this.store.showCertSignDialog = true;
+  }
+
+  /**
+   * Opens the ISO 32000 Digital Signature Verification dialog.
+   */
+  openValidateSignaturesDialog(): void {
+    this.store.showValidateSignaturesDialog = true;
+  }
+
+  /**
+   * Places a saved signature as an interactive element onto the current canvas page.
+   *
+   * @param signature The saved signature record containing dataUrl and aspect ratio.
+   * @param targetPageIndex Optional zero-based target page index.
+   * @param canvasStore Optional CanvasStore instance.
+   */
+  placeSignatureOnCanvas(
+    signature: SavedSignature,
+    targetPageIndex?: number,
+    canvasStore?: CanvasStore
+  ): void {
+    const pageIdx = targetPageIndex !== undefined ? targetPageIndex : this.store.currentPageIndex;
+    const aspect = signature.aspectRatio > 0 ? signature.aspectRatio : 3;
+
+    // Default target signature width on PDF in points
+    const defaultWidth = 160;
+    const defaultHeight = Math.max(30, Math.round(defaultWidth / aspect));
+
+    let centerX = 200;
+    let centerY = 300;
+
+    try {
+      const dims = this.service.document.getPage(pageIdx).getDimensions();
+      centerX = Math.max(20, (dims.widthPts - defaultWidth) / 2);
+      centerY = Math.max(20, (dims.heightPts - defaultHeight) / 2);
+    } catch {
+      // Fallback
+    }
+
+    if (canvasStore) {
+      const elementId = canvasStore.generateId();
+      canvasStore.addElement({
+        id: elementId,
+        kind: 'image',
+        pageIndex: pageIdx,
+        x: centerX,
+        y: centerY,
+        width: defaultWidth,
+        height: defaultHeight,
+        rotation: 0,
+        locked: false,
+        visible: true,
+        flipX: false,
+        flipY: false,
+        src: signature.dataUrl,
+        objectFit: 'contain',
+        opacity: 1,
+      });
+      canvasStore.selectElement(elementId);
+    }
+
+    this.store.showEsignDialog = false;
+  }
+
+  /**
+   * Digitally signs the active document conforming to PDF ISO 32000 Section 12.8,
+   * applying any pending canvas elements first and reloading into the engine.
+   *
+   * @param options Digital signing options and identity keys.
+   * @param canvasStore Optional CanvasStore instance to bake pending elements.
+   * @return A promise resolving to the signed PDF bytes.
+   */
+  async signActiveDocument(
+    options: SignPdfOptions,
+    canvasStore?: CanvasStore
+  ): Promise<Uint8Array> {
+    if (canvasStore && canvasStore.elements.length > 0) {
+      await this.applyCanvasComponentsToPdf(canvasStore.elements, () => {
+        canvasStore.elements = [];
+      });
+    }
+
+    const signedBytes = await this.service.signActiveDocument(options, this.store.pageTransforms);
+
+    if (this.store.activeWorkspaceFileId) {
+      const buffer = signedBytes.buffer.slice(
+        signedBytes.byteOffset,
+        signedBytes.byteOffset + signedBytes.byteLength
+      ) as ArrayBuffer;
+      setFileBuffer(this.store.activeWorkspaceFileId, buffer);
+    }
+
+    this.store.incrementRenderVersion();
+    this.recordSnapshot('Sign Document', true);
+    return signedBytes;
+  }
+
+  /**
+   * Inspects and validates all ISO 32000 digital signatures present in the active document.
+   *
+   * @return A promise resolving to an array of signature validation reports.
+   */
+  async validateActiveDocumentSignatures(): Promise<SignatureValidationResult[]> {
+    return this.service.validateActiveDocumentSignatures(this.store.pageTransforms);
+  }
+}
+
+
+/** Provide actions via Svelte context from a root component. */
+export function provideEditorActions(actions: EditorActions): void {
+  setContext(EDITOR_ACTIONS_KEY, actions);
+}
+
+/** Retrieve actions from Svelte context in any child component. */
+export function useEditorActions(): EditorActions {
+  return getContext<EditorActions>(EDITOR_ACTIONS_KEY);
+}
+
+/** Convert a ColorRgba object to a CSS rgba string. */
+function colorToCss(c?: ColorRgba): string {
+  if (!c) return 'rgba(0, 0, 0, 1)';
+  const alpha = c.a !== undefined ? (c.a <= 1 ? c.a : c.a / 255) : 1;
+  return `rgba(${c.r}, ${c.g}, ${c.b}, ${alpha})`;
+}
+
+/** Check if a font or weight denotes bold typography. */
+function isBoldTypography(rawFont?: string, weight?: string | number): boolean {
+  if (typeof weight === 'number') return weight >= 600;
+  if (weight === 'bold') return true;
+  const raw = (rawFont || '').toLowerCase();
+  return (
+    raw.includes('bold') ||
+    raw.includes('black') ||
+    raw.includes('heavy') ||
+    raw.includes('semibold') ||
+    raw.includes('demibold') ||
+    raw.includes('extrabold')
+  );
+}
+
+/** Check if a font or style denotes italic typography. */
+function isItalicTypography(rawFont?: string, style?: string): boolean {
+  if (style === 'italic' || style === 'oblique') return true;
+  const raw = (rawFont || '').toLowerCase();
+  return raw.includes('italic') || raw.includes('oblique');
+}
+
+/**
+ * Extracts structured multi-line and multi-segment typography from an EditableTextSpan,
+ * preserving individual portion styles (bold, italic, font family, color, size).
+ *
+ * @param span The source native editable text span.
+ * @param id The unique element ID for the created text element.
+ * @return A fully populated TextElement.
+ */
+export function buildTextElementFromSpan(span: EditableTextSpan, id: string): TextElement {
+  const sourceLines =
+    span.lines && span.lines.length > 0
+      ? span.lines
+      : [
+          {
+            text: span.text,
+            left: span.left,
+            top: span.top,
+            right: span.left + span.width,
+            bottom: span.top + span.height,
+            width: span.width,
+            height: span.height,
+            fontSize: span.fontSize,
+            baselineY: span.baselineY,
+            lineHeight: span.lineHeight || span.fontSize * 1.25,
+            charStartIndex: span.charStartIndex,
+            charCount: span.charCount,
+            words: [],
+            fontFamily: span.fontFamily,
+            rawFontFamily: span.rawFontFamily,
+            color: span.color,
+            fontWeight: span.fontWeight,
+            fontStyle: span.fontStyle,
+          },
+        ];
+
+  const elementLines: TextElementLine[] = [];
+  const allSegments: TextSegment[] = [];
+
+  for (const line of sourceLines) {
+    const lineSegments: TextSegment[] = [];
+    const lineTopRel = Math.max(0, line.top - span.top);
+    const lineLeftRel = Math.max(0, line.left - span.left);
+    const lH = line.lineHeight || span.lineHeight || line.fontSize * 1.25;
+
+    if (line.hasBulletPrefix && line.bulletWord) {
+      const bWord = line.bulletWord;
+      const bRawFont = bWord.rawFontFamily || line.rawFontFamily || span.rawFontFamily || 'Helvetica';
+      const bDetectedFont = bWord.fontFamily || line.fontFamily || span.fontFamily || 'Helvetica';
+      const bIsBold = isBoldTypography(bRawFont, bWord.fontWeight || line.fontWeight);
+      const bIsItalic = isItalicTypography(bRawFont, bWord.fontStyle || line.fontStyle);
+      const bColStr = colorToCss(bWord.color || line.color || span.color);
+      const bFSize = bWord.fontSize || line.fontSize || span.fontSize;
+      const bLeftRel = Math.max(0, bWord.left - span.left);
+      const bTopRel = Math.max(0, (bWord.top ?? line.top) - span.top);
+
+      const bulletSegment: TextSegment = {
+        text: bWord.text,
+        fontSize: bFSize,
+        fontFamily: bDetectedFont,
+        rawFontFamily: bRawFont,
+        fontWeight: bIsBold ? 'bold' : 'normal',
+        fontStyle: bIsItalic ? 'italic' : 'normal',
+        color: bColStr,
+        charStartIndex: bWord.charStartIndex,
+        charCount: bWord.charCount,
+        left: bLeftRel,
+        top: bTopRel,
+        width: bWord.width,
+        height: bWord.height,
+        baselineY: bWord.baselineY,
+      };
+      lineSegments.push(bulletSegment);
+      allSegments.push(bulletSegment);
+    }
+
+    if (line.words && line.words.length > 0) {
+      let currentSegmentWords: typeof line.words = [];
+      let currentStyleKey = '';
+
+      const flushSegment = (): void => {
+        if (currentSegmentWords.length === 0) return;
+        const firstW = currentSegmentWords[0];
+        const lastW = currentSegmentWords[currentSegmentWords.length - 1];
+
+        let segText = '';
+        for (let wIdx = 0; wIdx < currentSegmentWords.length; wIdx++) {
+          const w = currentSegmentWords[wIdx];
+          if (wIdx > 0) {
+            const prev = currentSegmentWords[wIdx - 1];
+            const gap = w.left - prev.right;
+            if (gap >= Math.min(prev.fontSize, w.fontSize) * 0.18) {
+              segText += ' ';
+            }
+          }
+          segText += w.text;
+        }
+
+        const rawFont = firstW.rawFontFamily || line.rawFontFamily || span.rawFontFamily || 'Helvetica';
+        const detectedFont = firstW.fontFamily || line.fontFamily || span.fontFamily || 'Helvetica';
+        const isBold = isBoldTypography(rawFont, firstW.fontWeight || line.fontWeight);
+        const isItalic = isItalicTypography(rawFont, firstW.fontStyle || line.fontStyle);
+        const colStr = colorToCss(firstW.color || line.color || span.color);
+        const fSize = firstW.fontSize || line.fontSize || span.fontSize;
+
+        const segLeftRel = Math.max(0, firstW.left - span.left);
+        const segTopRel = Math.max(0, firstW.top - span.top);
+        const segW = Math.max(1, lastW.right - firstW.left);
+        const segH = Math.max(fSize * 1.1, lastW.bottom - firstW.top);
+
+        const segment: TextSegment = {
+          text: segText,
+          fontSize: fSize,
+          fontFamily: detectedFont,
+          rawFontFamily: rawFont,
+          fontWeight: isBold ? 'bold' : 'normal',
+          fontStyle: isItalic ? 'italic' : 'normal',
+          color: colStr,
+          charStartIndex: firstW.charStartIndex,
+          charCount: currentSegmentWords.reduce((sum, w) => sum + w.charCount, 0),
+          left: segLeftRel,
+          top: segTopRel,
+          width: segW,
+          height: segH,
+          baselineY: firstW.baselineY,
+        };
+
+        lineSegments.push(segment);
+        allSegments.push(segment);
+        currentSegmentWords = [];
+      };
+
+      for (const word of line.words) {
+        const rawFont = word.rawFontFamily || line.rawFontFamily || span.rawFontFamily || '';
+        const isBold = isBoldTypography(rawFont, word.fontWeight || line.fontWeight);
+        const isItalic = isItalicTypography(rawFont, word.fontStyle || line.fontStyle);
+        const col = colorToCss(word.color || line.color || span.color);
+        const fSize = Math.round((word.fontSize || line.fontSize || span.fontSize) * 10) / 10;
+
+        const styleKey = `${rawFont}__${isBold}__${isItalic}__${col}__${fSize}`;
+
+        if (currentSegmentWords.length > 0 && styleKey !== currentStyleKey) {
+          flushSegment();
+        }
+
+        currentStyleKey = styleKey;
+        currentSegmentWords.push(word);
+      }
+
+      flushSegment();
+    } else {
+      const rawFont = line.rawFontFamily || span.rawFontFamily || 'Helvetica';
+      const detectedFont = line.fontFamily || span.fontFamily || 'Helvetica';
+      const isBold = isBoldTypography(rawFont, line.fontWeight || span.fontWeight);
+      const isItalic = isItalicTypography(rawFont, line.fontStyle || span.fontStyle);
+      const colStr = colorToCss(line.color || span.color);
+      const fSize = line.fontSize || span.fontSize;
+
+      const segment: TextSegment = {
+        text: line.text,
+        fontSize: fSize,
+        fontFamily: detectedFont,
+        rawFontFamily: rawFont,
+        fontWeight: isBold ? 'bold' : 'normal',
+        fontStyle: isItalic ? 'italic' : 'normal',
+        color: colStr,
+        charStartIndex: line.charStartIndex,
+        charCount: line.charCount,
+        left: lineLeftRel,
+        top: lineTopRel,
+        width: line.width,
+        height: line.height,
+        baselineY: line.baselineY,
+      };
+
+      lineSegments.push(segment);
+      allSegments.push(segment);
+    }
+
+    elementLines.push({
+      text: line.text,
+      segments: lineSegments,
+      lineHeight: lH,
+      top: lineTopRel,
+      left: lineLeftRel,
+      width: line.width,
+      height: line.height,
+      fontSize: line.fontSize || span.fontSize,
+      baselineY: line.baselineY,
+    });
+  }
+
+  const dominantRawFont = span.rawFontFamily || span.fontFamily || 'Helvetica';
+  const dominantIsBold = isBoldTypography(dominantRawFont, span.fontWeight);
+  const dominantIsItalic = isItalicTypography(dominantRawFont, span.fontStyle);
+
+  return {
+    id,
+    kind: 'text',
+    pageIndex: span.pageIndex,
+    x: span.left,
+    y: span.top,
+    width: span.width,
+    height: span.height,
+    rotation: span.rotation || 0,
+    locked: false,
+    visible: true,
+    flipX: false,
+    flipY: false,
+    text: span.text,
+    fontSize: span.fontSize,
+    fontFamily: span.fontFamily || 'Helvetica',
+    rawFontFamily: span.rawFontFamily,
+    color: colorToCss(span.color),
+    fontWeight: dominantIsBold ? 'bold' : 'normal',
+    fontStyle: dominantIsItalic ? 'italic' : 'normal',
+    textAlign: 'left',
+    lineHeight: span.lineHeight || span.fontSize * 1.25,
+    lines: elementLines,
+    segments: allSegments,
+    originalSpan: span,
+  };
+}
