@@ -434,3 +434,434 @@
     store.renderVersion;
     store.pageVersions[pageIndex];
     
+    if (canvasContainerEl && isVisible) {
+      renderPageContent();
+    } else if (canvasContainerEl && !isVisible) {
+      canvasContainerEl.innerHTML = '';
+      editableSpans = [];
+      editableImageSpans = [];
+      editableShapeSpans = [];
+      pageCharacters = [];
+    }
+  });
+
+  // getCssFontFamily is now imported from font-loader.ts
+
+  // -- Page transform helpers --
+
+  const pageTransform = $derived(store.getPageTransform(pageIndex));
+
+  /**
+   * Convert pointer screen coordinates to page-point coordinates,
+   * accounting for the page's visual rotation and scale transforms.
+   */
+  function pointerToPageCoords(e: PointerEvent): { x: number; y: number } {
+    if (!containerWrapperEl) return { x: 0, y: 0 };
+    const { rotation, scaleX, scaleY } = pageTransform;
+
+    const rect = containerWrapperEl.getBoundingClientRect();
+
+    if (rotation === 0 && scaleX === 1 && scaleY === 1) {
+      return {
+        x: (e.clientX - rect.left) / visualScale,
+        y: (e.clientY - rect.top) / visualScale,
+      };
+    }
+
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const dx = e.clientX - cx;
+    const dy = e.clientY - cy;
+
+    const rad = -rotation * (Math.PI / 180);
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const ux = dx * cos - dy * sin;
+    const uy = dx * sin + dy * cos;
+
+    const lx = ux / scaleX;
+    const ly = uy / scaleY;
+
+    const halfW = containerWrapperEl.offsetWidth / 2;
+    const halfH = containerWrapperEl.offsetHeight / 2;
+
+    return {
+      x: (lx + halfW) / visualScale,
+      y: (ly + halfH) / visualScale,
+    };
+  }
+
+  // -- Page resize / rotate via SelectionOverlay handles --
+
+  function handlePageResizeStart(e: PointerEvent, handle: HandlePosition): void {
+    e.stopPropagation();
+    if (!containerWrapperEl) return;
+
+    const originSx = pageTransform.scaleX;
+    const originSy = pageTransform.scaleY;
+    const originRot = pageTransform.rotation;
+    const zoom = visualScale;
+    const wPts = widthPts;
+    const hPts = heightPts;
+
+    const startClientX = e.clientX;
+    const startClientY = e.clientY;
+    const originVisualW = wPts * zoom * originSx;
+    const originVisualH = hPts * zoom * originSy;
+    const isCorner = handle.includes('-');
+
+    const onMove = (me: PointerEvent): void => {
+      const rawDx = me.clientX - startClientX;
+      const rawDy = me.clientY - startClientY;
+
+      // Un-rotate screen deltas into page-local space
+      const theta = originRot * (Math.PI / 180);
+      const cos = Math.cos(-theta);
+      const sin = Math.sin(-theta);
+      const localDx = rawDx * cos - rawDy * sin;
+      const localDy = rawDx * sin + rawDy * cos;
+
+      let newSx = originSx;
+      let newSy = originSy;
+
+      if (isCorner) {
+        // Corner: preserve aspect ratio via diagonal projection
+        let proposedW = originVisualW;
+        let proposedH = originVisualH;
+
+        if (handle.includes('right')) proposedW = originVisualW + localDx;
+        else if (handle.includes('left')) proposedW = originVisualW - localDx;
+
+        if (handle.includes('bottom')) proposedH = originVisualH + localDy;
+        else if (handle.includes('top')) proposedH = originVisualH - localDy;
+
+        const dot = proposedW * originVisualW + proposedH * originVisualH;
+        const magSq = originVisualW * originVisualW + originVisualH * originVisualH;
+        const scale = Math.max(0.1, dot / magSq);
+
+        newSx = originSx * scale;
+        newSy = originSy * scale;
+      } else {
+        // Edge: scale a single dimension
+        if (handle === 'right') {
+          newSx = Math.max(0.1, originSx * (originVisualW + localDx) / originVisualW);
+        } else if (handle === 'left') {
+          newSx = Math.max(0.1, originSx * (originVisualW - localDx) / originVisualW);
+        } else if (handle === 'bottom') {
+          newSy = Math.max(0.1, originSy * (originVisualH + localDy) / originVisualH);
+        } else if (handle === 'top') {
+          newSy = Math.max(0.1, originSy * (originVisualH - localDy) / originVisualH);
+        }
+      }
+
+      store.updatePageTransform(pageIndex, { scaleX: newSx, scaleY: newSy });
+    };
+
+    const onUp = (): void => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      activeDragCleanup = null;
+      actions.recordSnapshot('Scale Page', false);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    activeDragCleanup = onUp;
+  }
+
+  function handlePageRotateStart(e: PointerEvent): void {
+    e.stopPropagation();
+    if (!containerWrapperEl) return;
+
+    const rect = containerWrapperEl.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const originRotation = pageTransform.rotation;
+    const startAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX);
+
+    const onMove = (me: PointerEvent): void => {
+      const currentAngle = Math.atan2(me.clientY - centerY, me.clientX - centerX);
+      const deltaAngle = (currentAngle - startAngle) * (180 / Math.PI);
+      let newRotation = (originRotation + deltaAngle) % 360;
+      if (newRotation < 0) newRotation += 360;
+
+      if (me.shiftKey) {
+        newRotation = Math.round(newRotation / 15) * 15;
+      } else {
+        const closest90 = Math.round(newRotation / 90) * 90;
+        if (Math.abs(newRotation - closest90) < 6) {
+          newRotation = closest90;
+        }
+      }
+      newRotation = ((newRotation % 360) + 360) % 360;
+
+      store.updatePageTransform(pageIndex, { rotation: Math.round(newRotation) });
+    };
+
+    const onUp = (): void => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      activeDragCleanup = null;
+      actions.recordSnapshot('Rotate Page Transform', false);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    activeDragCleanup = onUp;
+  }
+
+  function handleContainerClick(e: MouseEvent): void {
+    actions.setCurrentPageFromScroll(pageIndex);
+    actions.clearSelection(true);
+    canvasStore.selectElement(null);
+    selection.select(`page_${pageIndex}`, e.ctrlKey || e.metaKey, e.shiftKey);
+  }
+
+  function handleKeyDownInline(e: KeyboardEvent): void {
+    const target = e.currentTarget as HTMLElement;
+    const span = store.inlineEdit?.span;
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const extracted = span ? extractStyledLinesFromEditor(target, visualScale, span) : undefined;
+      actions.submitInlineEdit(extracted);
+    } else if (e.key === 'Enter' && e.shiftKey) {
+      e.stopPropagation();
+      e.preventDefault();
+      let inserted = false;
+      try {
+        inserted = document.execCommand('insertLineBreak');
+      } catch {
+        inserted = false;
+      }
+      if (!inserted) {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+          const range = sel.getRangeAt(0);
+          range.deleteContents();
+          const br = document.createElement('br');
+          range.insertNode(br);
+          range.setStartAfter(br);
+          range.setEndAfter(br);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      }
+      if (span) {
+        const extracted = extractStyledLinesFromEditor(target, visualScale, span);
+        actions.updateInlineText(extracted.text, extracted.lines);
+      } else {
+        actions.updateInlineText(sanitizePdfText(target.innerText || target.textContent || ''));
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      actions.cancelInlineEdit();
+    }
+  }
+
+
+
+  let isDrawing = $state(false);
+  let currentPathId = $state<string | null>(null);
+  let isTextHighlightMode = $state(false);
+  let isAreaRedactMode = $state(false);
+  let areaStartX = $state(0);
+  let areaStartY = $state(0);
+  let startCharIndex = $state<number | null>(null);
+  let currentCharIndex = $state<number | null>(null);
+  let previewHighlightRects = $state<HighlightRect[]>([]);
+  let hoveringChar = $state<PageCharacter | null>(null);
+
+  function updateHover(e: PointerEvent): void {
+    if ((store.activeTool !== 'highlight' && store.activeTool !== 'redact') || isDrawing || !containerWrapperEl) {
+      hoveringChar = null;
+      return;
+    }
+    const { x: px, y: py } = pointerToPageCoords(e);
+    hoveringChar = findUnifiedCharacterAt(unifiedCharacters, px, py, 10, 8);
+  }
+
+  function handlePointerDownDrawing(e: PointerEvent): void {
+    if (e.button !== 0 || store.isDraggingOver) return;
+    if (store.activeTool !== 'pen' && store.activeTool !== 'highlight' && store.activeTool !== 'redact' && store.activeTool !== 'note') return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    actions.setCurrentPageFromScroll(pageIndex);
+    actions.clearSelection(true);
+
+    const { x, y } = pointerToPageCoords(e);
+
+    if (store.activeTool === 'note') {
+      canvasActions.createElement('note', pageIndex, x, y, {
+        label: 'Note',
+        text: '',
+        color: store.annotateColor || '#fef08a',
+      });
+      store.activeTool = 'select';
+      return;
+    }
+
+    isDrawing = true;
+
+    if (store.activeTool === 'redact') {
+      const hitChar = findUnifiedCharacterAt(unifiedCharacters, x, y, 10, 8);
+      if (hitChar) {
+        isTextHighlightMode = true;
+        isAreaRedactMode = false;
+        startCharIndex = hitChar.charIndex;
+        currentCharIndex = hitChar.charIndex;
+        previewHighlightRects = calculateUnifiedHighlightRects(unifiedCharacters, hitChar.charIndex, hitChar.charIndex);
+      } else {
+        isTextHighlightMode = false;
+        isAreaRedactMode = true;
+        areaStartX = x;
+        areaStartY = y;
+        startCharIndex = null;
+        currentCharIndex = null;
+        previewHighlightRects = [{ x, y, width: 0, height: 0 }];
+      }
+    } else if (store.activeTool === 'highlight') {
+      isAreaRedactMode = false;
+      const hitChar = findUnifiedCharacterAt(unifiedCharacters, x, y, 10, 8);
+      if (hitChar) {
+        isTextHighlightMode = true;
+        startCharIndex = hitChar.charIndex;
+        currentCharIndex = hitChar.charIndex;
+        previewHighlightRects = calculateUnifiedHighlightRects(unifiedCharacters, hitChar.charIndex, hitChar.charIndex);
+      } else {
+        // Check if clicked directly on any canvas element on this page
+        const pageElements = canvasStore.getElementsByPage(pageIndex);
+        const hitElement = pageElements.slice().reverse().find((el) => {
+          return el.visible && x >= el.x && x <= el.x + el.width && y >= el.y && y <= el.y + el.height;
+        });
+
+        if (hitElement) {
+          if (hitElement.kind === 'text') {
+            const elChars = getCanvasTextCharacters(hitElement, pageIndex);
+            if (elChars.length > 0) {
+              isTextHighlightMode = true;
+              startCharIndex = elChars[0].charIndex;
+              currentCharIndex = elChars[elChars.length - 1].charIndex;
+              previewHighlightRects = calculateUnifiedHighlightRects(unifiedCharacters, startCharIndex, currentCharIndex);
+            }
+          } else {
+            isTextHighlightMode = false;
+            startCharIndex = null;
+            currentCharIndex = null;
+            previewHighlightRects = [{
+              x: hitElement.x,
+              y: hitElement.y,
+              width: hitElement.width,
+              height: hitElement.height,
+            }];
+          }
+        } else {
+          isTextHighlightMode = false;
+          startCharIndex = null;
+          currentCharIndex = null;
+          previewHighlightRects = [];
+          currentPathId = canvasStore.generateId();
+
+          const newPath: PathElement = {
+            id: currentPathId,
+            kind: 'path',
+            pageIndex,
+            x,
+            y,
+            width: 0,
+            height: 0,
+            rotation: 0,
+            locked: false,
+            visible: true,
+            flipX: false,
+            flipY: false,
+            points: [{ x, y }],
+            stroke: store.annotateColor,
+            strokeWidth: 14,
+            opacity: 0.4,
+            isHighlight: true,
+          };
+
+          canvasStore.addElement(newPath);
+        }
+      }
+    } else {
+      isAreaRedactMode = false;
+      isTextHighlightMode = false;
+      startCharIndex = null;
+      currentCharIndex = null;
+      previewHighlightRects = [];
+      currentPathId = canvasStore.generateId();
+
+      const newPath: PathElement = {
+        id: currentPathId,
+        kind: 'path',
+        pageIndex,
+        x,
+        y,
+        width: 0,
+        height: 0,
+        rotation: 0,
+        locked: false,
+        visible: true,
+        flipX: false,
+        flipY: false,
+        points: [{ x, y }],
+        stroke: store.annotateColor,
+        strokeWidth: store.annotateStrokeWidth,
+        opacity: 1,
+        isHighlight: false,
+      };
+
+      canvasStore.addElement(newPath);
+    }
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function handlePointerMoveDrawing(e: PointerEvent): void {
+    if (!isDrawing) {
+      updateHover(e);
+      return;
+    }
+    if (!containerWrapperEl) return;
+
+    const { x: px, y: py } = pointerToPageCoords(e);
+
+    if (isTextHighlightMode && startCharIndex !== null) {
+      const closest = findClosestUnifiedCharacter(unifiedCharacters, px, py, startCharIndex);
+      if (closest) {
+        currentCharIndex = closest.charIndex;
+        previewHighlightRects = calculateUnifiedHighlightRects(unifiedCharacters, startCharIndex, currentCharIndex);
+      }
+    } else if (isAreaRedactMode && store.activeTool === 'redact') {
+      const minX = Math.min(areaStartX, px);
+      const minY = Math.min(areaStartY, py);
+      const w = Math.abs(px - areaStartX);
+      const h = Math.abs(py - areaStartY);
+      previewHighlightRects = [{ x: minX, y: minY, width: w, height: h }];
+    } else if (currentPathId) {
+      const element = canvasStore.elements.find((el) => el.id === currentPathId) as PathElement | undefined;
+      if (element && element.kind === 'path') {
+        const newPoints = [...element.points, { x: px, y: py }];
+
+        const minX = Math.min(...newPoints.map((p) => p.x));
+        const maxX = Math.max(...newPoints.map((p) => p.x));
+        const minY = Math.min(...newPoints.map((p) => p.y));
+        const maxY = Math.max(...newPoints.map((p) => p.y));
+
+        canvasStore.updateElement(currentPathId, {
+          points: newPoints,
+          x: minX,
+          y: minY,
+          width: maxX - minX,
+          height: maxY - minY,
+        });
+      }
+    }
+  }
+
