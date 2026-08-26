@@ -567,3 +567,572 @@
                 </select>
               </div>
 
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Page Range</Label>
+                <Input
+                  type="text"
+                  placeholder="All (e.g. 1-8, 10)"
+                  bind:value={nupPageRange}
+                  class="h-8 text-xs"
+                />
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="grid gap-1.5">
+                <div class="flex justify-between text-xs">
+                  <Label class="text-xs">Outer Margin</Label>
+                  <span class="text-muted-foreground">{nupMarginPts} pt</span>
+                </div>
+                <input type="range" min="0" max="60" bind:value={nupMarginPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+              </div>
+
+              <div class="grid gap-1.5">
+                <div class="flex justify-between text-xs">
+                  <Label class="text-xs">Cell Gutter</Label>
+                  <span class="text-muted-foreground">{nupGutterPts} pt</span>
+                </div>
+                <input type="range" min="0" max="40" bind:value={nupGutterPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+              </div>
+            </div>
+
+            <div class="flex flex-wrap gap-4 pt-1">
+              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" bind:checked={nupDrawBorders} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <span>Draw Page Borders</span>
+              </label>
+
+              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" bind:checked={nupDrawCutMarks} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <span>Draw Cut Guides</span>
+              </label>
+
+              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" bind:checked={nupAutoRotate} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <span>Auto-rotate Subpages</span>
+              </label>
+            </div>
+          </div>
+
+        <!-- BOOKLET MODE CONTROLS -->
+        {:else if activeMode === 'booklet'}
+          <div class="flex flex-col gap-3.5">
+            <div class="p-3 rounded-lg bg-primary/5 border border-primary/15 text-xs text-muted-foreground">
+              <p class="font-medium text-foreground">Saddle-Stitch 2-Up Booklet Imposition</p>
+              Pairs and reorders pages into folded 4-page spreads. When printed double-sided and folded in half along the spine, pages are in exact sequential reading order.
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Binding Edge</Label>
+                <select
+                  bind:value={bookletBinding}
+                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="left">Left Edge (LTR Standard)</option>
+                  <option value="right">Right Edge (RTL / Manga)</option>
+                </select>
+              </div>
+
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Sheet Size</Label>
+                <select
+                  bind:value={bookletSheetSize}
+                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="source-2x">2x Source Page (Fit Width)</option>
+                  <option value="A4">A4 (for A5 booklet)</option>
+                  <option value="Letter">Letter (for Half-Letter booklet)</option>
+                  <option value="A3">A3 (for A4 booklet)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Output Sequence</Label>
+                <select
+                  bind:value={bookletOutputMode}
+                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="duplex">Duplex Interleaved (Front 1, Back 1...)</option>
+                  <option value="front-then-back">Fronts First, Then Backs (Manual Duplex)</option>
+                </select>
+              </div>
+
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Page Range</Label>
+                <Input
+                  type="text"
+                  placeholder="All (e.g. 1-16)"
+                  bind:value={bookletPageRange}
+                  class="h-8 text-xs"
+                />
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="grid gap-1.5">
+                <div class="flex justify-between text-xs">
+                  <Label class="text-xs">Outer Margin</Label>
+                  <span class="text-muted-foreground">{bookletMarginPts} pt</span>
+                </div>
+                <input type="range" min="0" max="50" bind:value={bookletMarginPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+              </div>
+
+              <div class="grid gap-1.5">
+                <div class="flex justify-between text-xs">
+                  <Label class="text-xs">Spine Gutter</Label>
+                  <span class="text-muted-foreground">{bookletGutterPts} pt</span>
+                </div>
+                <input type="range" min="0" max="40" bind:value={bookletGutterPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+              </div>
+            </div>
+
+            <div class="flex flex-wrap gap-4 pt-1">
+              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" bind:checked={bookletAutoPad} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <span>Auto-pad with blanks to multiple of 4</span>
+              </label>
+
+              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" bind:checked={bookletDrawFoldLine} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <span>Draw Center Spine Fold Guide</span>
+              </label>
+
+              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" bind:checked={bookletDrawBorders} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <span>Draw Page Borders</span>
+              </label>
+            </div>
+          </div>
+
+        <!-- SINGLE LARGE PAGE CONTROLS -->
+        {:else if activeMode === 'single-page'}
+          <div class="flex flex-col gap-3.5">
+            <div class="grid gap-1.5">
+              <Label class="text-xs font-medium">Continuous Layout Style</Label>
+              <div class="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  class="p-2.5 text-xs rounded-md border text-center transition-colors {singleLayout === 'vertical-strip' ? 'bg-primary text-primary-foreground border-primary font-medium' : 'bg-muted/30 border-border hover:bg-muted text-muted-foreground hover:text-foreground'}"
+                  onclick={() => { singleLayout = 'vertical-strip'; }}
+                >
+                  Vertical Roll (Webtoon)
+                </button>
+                <button
+                  type="button"
+                  class="p-2.5 text-xs rounded-md border text-center transition-colors {singleLayout === 'horizontal-strip' ? 'bg-primary text-primary-foreground border-primary font-medium' : 'bg-muted/30 border-border hover:bg-muted text-muted-foreground hover:text-foreground'}"
+                  onclick={() => { singleLayout = 'horizontal-strip'; }}
+                >
+                  Horizontal Strip (Panorama)
+                </button>
+                <button
+                  type="button"
+                  class="p-2.5 text-xs rounded-md border text-center transition-colors {singleLayout === 'grid' ? 'bg-primary text-primary-foreground border-primary font-medium' : 'bg-muted/30 border-border hover:bg-muted text-muted-foreground hover:text-foreground'}"
+                  onclick={() => { singleLayout = 'grid'; }}
+                >
+                  Single Giant Canvas Grid
+                </button>
+              </div>
+            </div>
+
+            {#if singleLayout === 'grid'}
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Grid Columns</Label>
+                <Input type="number" min="1" max="10" bind:value={singleGridCols} class="h-8 text-xs max-w-[140px]" />
+              </div>
+            {/if}
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="grid gap-1.5">
+                <div class="flex justify-between text-xs">
+                  <Label class="text-xs">Inter-Page Spacing</Label>
+                  <span class="text-muted-foreground">{singleSpacingPts} pt</span>
+                </div>
+                <input type="range" min="0" max="60" bind:value={singleSpacingPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+              </div>
+
+              <div class="grid gap-1.5">
+                <div class="flex justify-between text-xs">
+                  <Label class="text-xs">Outer Margin</Label>
+                  <span class="text-muted-foreground">{singleMarginPts} pt</span>
+                </div>
+                <input type="range" min="0" max="60" bind:value={singleMarginPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Background Color</Label>
+                <div class="flex items-center gap-2">
+                  <input type="color" bind:value={singleBgColor} class="h-8 w-10 p-0.5 rounded border border-input cursor-pointer bg-background" />
+                  <Input type="text" bind:value={singleBgColor} class="h-8 text-xs font-mono" />
+                </div>
+              </div>
+
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Page Range</Label>
+                <Input
+                  type="text"
+                  placeholder="All pages (e.g. 1-10)"
+                  bind:value={singlePageRange}
+                  class="h-8 text-xs"
+                />
+              </div>
+            </div>
+
+            <div class="pt-1">
+              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" bind:checked={singleDrawBorders} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <span>Draw Page Borders</span>
+              </label>
+            </div>
+          </div>
+
+        <!-- POSTERIZE / TILE CONTROLS -->
+        {:else if activeMode === 'posterize'}
+          <div class="flex flex-col gap-3.5">
+            <div class="grid grid-cols-2 gap-3">
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Target Sheet Size</Label>
+                <select
+                  bind:value={posterSheetSize}
+                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="A4">A4 Sheet</option>
+                  <option value="Letter">US Letter Sheet</option>
+                  <option value="A3">A3 Sheet</option>
+                </select>
+              </div>
+
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Sheet Orientation</Label>
+                <select
+                  bind:value={posterOrientation}
+                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="portrait">Portrait</option>
+                  <option value="landscape">Landscape</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="grid gap-1.5">
+              <Label class="text-xs font-medium">Tiling Method</Label>
+              <div class="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  class="p-2 text-xs rounded border text-center transition-colors {posterModeType === 'scale' ? 'bg-primary text-primary-foreground border-primary font-medium' : 'bg-muted/30 border-border text-muted-foreground'}"
+                  onclick={() => { posterModeType = 'scale'; }}
+                >
+                  Scale Poster ({posterScalePercent}%)
+                </button>
+                <button
+                  type="button"
+                  class="p-2 text-xs rounded border text-center transition-colors {posterModeType === 'grid' ? 'bg-primary text-primary-foreground border-primary font-medium' : 'bg-muted/30 border-border text-muted-foreground'}"
+                  onclick={() => { posterModeType = 'grid'; }}
+                >
+                  Fixed Sheet Grid ({posterGridCols}x{posterGridRows})
+                </button>
+              </div>
+            </div>
+
+            {#if posterModeType === 'scale'}
+              <div class="grid gap-1.5">
+                <div class="flex justify-between text-xs">
+                  <Label class="text-xs">Poster Scaling Factor</Label>
+                  <span class="font-medium text-foreground">{posterScalePercent}%</span>
+                </div>
+                <input type="range" min="120" max="600" step="20" bind:value={posterScalePercent} class="w-full h-1.5 bg-muted rounded accent-primary" />
+              </div>
+            {:else}
+              <div class="grid grid-cols-2 gap-3 p-2.5 rounded-md bg-muted/30 border border-border">
+                <div class="grid gap-1">
+                  <Label class="text-[11px]">Sheet Columns</Label>
+                  <Input type="number" min="1" max="10" bind:value={posterGridCols} class="h-7 text-xs" />
+                </div>
+                <div class="grid gap-1">
+                  <Label class="text-[11px]">Sheet Rows</Label>
+                  <Input type="number" min="1" max="10" bind:value={posterGridRows} class="h-7 text-xs" />
+                </div>
+              </div>
+            {/if}
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="grid gap-1.5">
+                <div class="flex justify-between text-xs">
+                  <Label class="text-xs">Overlap Margin (for taping)</Label>
+                  <span class="text-muted-foreground">{posterOverlapPts} pt</span>
+                </div>
+                <input type="range" min="0" max="50" bind:value={posterOverlapPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+              </div>
+
+              <div class="grid gap-1.5">
+                <div class="flex justify-between text-xs">
+                  <Label class="text-xs">Sheet Margin</Label>
+                  <span class="text-muted-foreground">{posterMarginPts} pt</span>
+                </div>
+                <input type="range" min="0" max="50" bind:value={posterMarginPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+              </div>
+            </div>
+
+            <div class="flex flex-wrap gap-4 pt-1">
+              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" bind:checked={posterDrawCutGuides} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <span>Draw Alignment & Cut Marks</span>
+              </label>
+
+              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" bind:checked={posterDrawLabels} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <span>Print Tile Sheet Coordinates</span>
+              </label>
+            </div>
+          </div>
+
+        <!-- CUT & STACK CONTROLS -->
+        {:else if activeMode === 'cut-stack'}
+          <div class="flex flex-col gap-3.5">
+            <div class="p-3 rounded-lg bg-primary/5 border border-primary/15 text-xs text-muted-foreground">
+              <p class="font-medium text-foreground">Cut-and-Stack Imposition</p>
+              Arranges pages in stacked blocks across sheets so that when printed and chopped straight through the middle with a guillotine, the physical stacks naturally assemble in sequential order without hand sorting.
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Stack Layout</Label>
+                <select
+                  bind:value={cutStackPreset}
+                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="2x1">2-Up Cut & Stack (Left/Right Stacks)</option>
+                  <option value="2x2">4-Up Cut & Stack (4 Quadrant Stacks)</option>
+                </select>
+              </div>
+
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Sheet Size</Label>
+                <select
+                  bind:value={cutStackSheetSize}
+                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="A4">A4 Sheet</option>
+                  <option value="Letter">US Letter</option>
+                  <option value="A3">A3 Sheet</option>
+                  <option value="source">Match Source Page Size</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Orientation</Label>
+                <select
+                  bind:value={cutStackOrientation}
+                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="auto">Auto (Best Fit)</option>
+                  <option value="portrait">Portrait</option>
+                  <option value="landscape">Landscape</option>
+                </select>
+              </div>
+
+              <div class="grid gap-1.5">
+                <Label class="text-xs">Page Range</Label>
+                <Input
+                  type="text"
+                  placeholder="All pages"
+                  bind:value={cutStackPageRange}
+                  class="h-8 text-xs"
+                />
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="grid gap-1.5">
+                <div class="flex justify-between text-xs">
+                  <Label class="text-xs">Outer Margin</Label>
+                  <span class="text-muted-foreground">{cutStackMarginPts} pt</span>
+                </div>
+                <input type="range" min="0" max="50" bind:value={cutStackMarginPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+              </div>
+
+              <div class="grid gap-1.5">
+                <div class="flex justify-between text-xs">
+                  <Label class="text-xs">Stack Gutter</Label>
+                  <span class="text-muted-foreground">{cutStackGutterPts} pt</span>
+                </div>
+                <input type="range" min="0" max="40" bind:value={cutStackGutterPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+              </div>
+            </div>
+
+            <div class="flex flex-wrap gap-4 pt-1">
+              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" bind:checked={cutStackDrawCutMarks} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <span>Draw Chop Cut Lines</span>
+              </label>
+
+              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" bind:checked={cutStackDrawBorders} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <span>Draw Page Borders</span>
+              </label>
+            </div>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Right Column: Interactive Live Sheet Layout Preview -->
+      <div class="md:col-span-5 p-6 bg-muted/10 flex flex-col justify-between items-center gap-4 overflow-y-auto">
+        <div class="w-full flex items-center justify-between">
+          <span class="text-xs font-semibold text-foreground uppercase tracking-wider">Sheet Layout Preview</span>
+          <span class="text-[11px] text-muted-foreground font-mono">
+            Sheet {previewSheetIndex + 1} of {totalOutputSheets}
+          </span>
+        </div>
+
+        <!-- SVG Preview Schematic Canvas -->
+        <div class="w-full aspect-[4/3] max-w-[280px] bg-background border border-border/80 rounded-lg shadow-inner flex items-center justify-center p-3 relative overflow-hidden">
+          {#if previewData}
+            {#if previewData.type === 'grid'}
+              <div
+                class="w-full h-full border border-dashed border-border/70 rounded grid gap-1 p-1.5 bg-muted/20"
+                style="grid-template-columns: repeat({previewData.cols}, 1fr); grid-template-rows: repeat({previewData.rows}, 1fr);"
+              >
+                {#each previewData.cells as cell}
+                  <div class="border border-border/80 rounded bg-background flex flex-col items-center justify-center shadow-2xs relative group">
+                    {#if cell.pageNumber}
+                      <span class="text-xs font-semibold text-primary">p.{cell.pageNumber}</span>
+                      <span class="text-[9px] text-muted-foreground">Source</span>
+                    {:else}
+                      <span class="text-[10px] text-muted-foreground/50 italic">Blank</span>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+
+            {:else if previewData.type === 'booklet'}
+              <div class="w-full h-full border border-border/80 rounded flex relative bg-muted/20">
+                <!-- Spine center line -->
+                <div class="absolute inset-y-0 left-1/2 w-0 border-l border-dashed border-destructive/60 z-10"></div>
+
+                <!-- Left Slot -->
+                <div class="w-1/2 h-full p-1.5 border-r border-border flex flex-col items-center justify-center bg-background">
+                  {#if previewData.leftPage !== null}
+                    {#if previewData.leftPage > 0}
+                      <span class="text-xs font-semibold text-primary">p.{previewData.leftPage}</span>
+                      <span class="text-[9px] text-muted-foreground">Left Page</span>
+                    {:else}
+                      <span class="text-[10px] text-muted-foreground/60 italic">Blank</span>
+                    {/if}
+                  {:else}
+                    <span class="text-[10px] text-muted-foreground/40 italic">Empty</span>
+                  {/if}
+                </div>
+
+                <!-- Right Slot -->
+                <div class="w-1/2 h-full p-1.5 flex flex-col items-center justify-center bg-background">
+                  {#if previewData.rightPage !== null}
+                    {#if previewData.rightPage > 0}
+                      <span class="text-xs font-semibold text-primary">p.{previewData.rightPage}</span>
+                      <span class="text-[9px] text-muted-foreground">Right Page</span>
+                    {:else}
+                      <span class="text-[10px] text-muted-foreground/60 italic">Blank</span>
+                    {/if}
+                  {:else}
+                    <span class="text-[10px] text-muted-foreground/40 italic">Empty</span>
+                  {/if}
+                </div>
+              </div>
+
+            {:else if previewData.type === 'single'}
+              <div class="w-full h-full border border-border/80 rounded flex flex-col items-center justify-center p-2 bg-muted/20">
+                <div class="w-full max-w-[120px] py-3 bg-background border border-border rounded flex flex-col items-center gap-1 shadow-2xs">
+                  <Layers class="h-5 w-5 text-primary" />
+                  <span class="text-[11px] font-semibold text-foreground">{previewData.pageCount} Pages</span>
+                  <span class="text-[9px] text-muted-foreground capitalize">{previewData.layout.replace('-', ' ')}</span>
+                </div>
+              </div>
+
+            {:else if previewData.type === 'poster'}
+              <div class="w-full h-full border border-border/80 rounded flex flex-col items-center justify-center p-2 bg-muted/20 relative">
+                <div class="w-3/4 h-3/4 bg-background border-2 border-primary/60 border-dashed rounded flex flex-col items-center justify-center shadow-sm">
+                  <span class="text-xs font-semibold text-primary">Tile {previewData.sheetNum}</span>
+                  <span class="text-[10px] text-muted-foreground">Row {previewData.currentRow}, Col {previewData.currentCol}</span>
+                </div>
+              </div>
+            {/if}
+          {/if}
+        </div>
+
+        <!-- Sheet Pagination controls -->
+        <div class="w-full flex items-center justify-between">
+          <Button
+            variant="outline"
+            size="sm"
+            class="h-7 px-2 text-xs"
+            disabled={previewSheetIndex <= 0}
+            onclick={() => { previewSheetIndex = Math.max(0, previewSheetIndex - 1); }}
+          >
+            <ChevronLeft class="h-3.5 w-3.5 mr-0.5" /> Prev
+          </Button>
+
+          <span class="text-[11px] text-muted-foreground">
+            {targetPagesCount} source &rarr; {totalOutputSheets} sheet{totalOutputSheets === 1 ? '' : 's'}
+          </span>
+
+          <Button
+            variant="outline"
+            size="sm"
+            class="h-7 px-2 text-xs"
+            disabled={previewSheetIndex >= totalOutputSheets - 1}
+            onclick={() => { previewSheetIndex = Math.min(totalOutputSheets - 1, previewSheetIndex + 1); }}
+          >
+            Next <ChevronRight class="h-3.5 w-3.5 ml-0.5" />
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Error message banner if any -->
+    {#if errorMessage}
+      <div class="px-6 py-2 bg-destructive/10 border-t border-destructive/20 text-xs font-medium text-destructive">
+        {errorMessage}
+      </div>
+    {/if}
+
+    <!-- Footer with Destination Selector & Action Buttons -->
+    <div class="px-6 py-3.5 border-t border-border bg-muted/30 flex flex-col sm:flex-row items-center justify-between gap-3">
+      <!-- Destination Selector -->
+      <div class="flex items-center gap-2 w-full sm:w-auto">
+        <Label class="text-xs text-muted-foreground whitespace-nowrap">Output Destination:</Label>
+        <select
+          bind:value={destination}
+          class="flex h-8 rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-xs focus:outline-none focus:ring-1 focus:ring-ring"
+        >
+          <option value="workspace">Add to Workspace as New PDF</option>
+          <option value="replace">Replace Active Document</option>
+          <option value="download">Download PDF File Directly</option>
+        </select>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
+        <Button variant="outline" size="sm" class="h-8 text-xs" onclick={onClose} disabled={isProcessing}>
+          Cancel
+        </Button>
+
+        <Button size="sm" class="h-8 text-xs min-w-[130px]" onclick={handleApply} disabled={isProcessing || !store.isDocumentLoaded}>
+          {#if isProcessing}
+            <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Imposing...
+          {:else if destination === 'download'}
+            <Download class="h-3.5 w-3.5 mr-1.5" /> Download Imposed
+          {:else if destination === 'replace'}
+            <RefreshCw class="h-3.5 w-3.5 mr-1.5" /> Replace Document
+          {:else}
+            <FilePlus class="h-3.5 w-3.5 mr-1.5" /> Create Imposed PDF
+          {/if}
+        </Button>
+      </div>
+    </div>
+  </Dialog.Content>
+</Dialog.Root>
