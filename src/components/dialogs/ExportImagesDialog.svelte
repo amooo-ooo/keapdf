@@ -1,0 +1,124 @@
+<script lang="ts">
+  import { useEditorStore } from '../../stores/editor.svelte';
+  import { useEditorActions } from '../../stores/editor-actions';
+  import * as Dialog from '$lib/components/ui/dialog/index.js';
+  import * as Select from '$lib/components/ui/select/index.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Label } from '$lib/components/ui/label/index.js';
+  import { downloadBlob } from '../../utils/download-utils';
+
+  interface Props {
+    onClose: () => void;
+  }
+
+  let { onClose }: Props = $props();
+  
+  const store = useEditorStore();
+  const actions = useEditorActions();
+
+  let exportFormat = $state<'png' | 'jpeg'>('png');
+  let exportTarget = $state<'current' | 'all'>('current');
+  let exportScale = $state(2.0);
+  let isExporting = $state(false);
+
+  async function handleExportImages(): Promise<void> {
+    isExporting = true;
+    try {
+      const baseName = store.fileName.replace(/\.[^/.]+$/, '');
+      const indicesToExport =
+        exportTarget === 'current'
+          ? [store.currentPageIndex]
+          : Array.from({ length: store.pageCount }, (_, i) => i);
+
+      for (const idx of indicesToExport) {
+        const blob = await actions.service.document.getPage(idx).exportAsBlob(exportFormat, exportScale);
+        downloadBlob(blob, `${baseName}_page_${idx + 1}.${exportFormat}`);
+      }
+
+      onClose();
+    } catch (err) {
+      console.error('Failed to export images:', err);
+    } finally {
+      isExporting = false;
+    }
+  }
+
+  function handleOpenChange(open: boolean): void {
+    if (!open) {
+      onClose();
+    }
+  }
+</script>
+
+<Dialog.Root open={true} onOpenChange={handleOpenChange}>
+  <Dialog.Content class="sm:max-w-[425px]">
+    <Dialog.Header>
+      <Dialog.Title>Export pages as images</Dialog.Title>
+      <Dialog.Description>
+        Select export range, file format, and resolution scale.
+      </Dialog.Description>
+    </Dialog.Header>
+
+    <div class="grid gap-4 py-4">
+      <div class="grid grid-cols-4 items-center gap-4">
+        <Label for="export-target" class="text-right">Target</Label>
+        <div class="col-span-3">
+          <Select.Root type="single" value={exportTarget} onValueChange={(val) => { if (val === 'current' || val === 'all') exportTarget = val; }}>
+            <Select.Trigger id="export-target" class="w-full">
+              {exportTarget === 'current' ? `Current Page (${store.currentPageIndex + 1})` : `All Pages (${store.pageCount})`}
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="current" label={`Current Page (Page ${store.currentPageIndex + 1})`}>
+                Current Page (Page {store.currentPageIndex + 1})
+              </Select.Item>
+              <Select.Item value="all" label={`All Pages (${store.pageCount} pages)`}>
+                All Pages ({store.pageCount} pages)
+              </Select.Item>
+            </Select.Content>
+          </Select.Root>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-4 items-center gap-4">
+        <Label for="export-format" class="text-right">Format</Label>
+        <div class="col-span-3">
+          <Select.Root type="single" value={exportFormat} onValueChange={(val) => { if (val === 'png' || val === 'jpeg') exportFormat = val; }}>
+            <Select.Trigger id="export-format" class="w-full">
+              {exportFormat === 'png' ? 'PNG (Lossless)' : 'JPEG (Compressed)'}
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="png" label="PNG (Lossless)">PNG (Lossless)</Select.Item>
+              <Select.Item value="jpeg" label="JPEG (Compressed)">JPEG (Compressed)</Select.Item>
+            </Select.Content>
+          </Select.Root>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-4 items-center gap-4">
+        <Label for="export-scale" class="text-right">Resolution</Label>
+        <div class="col-span-3">
+          <Select.Root type="single" value={exportScale.toString()} onValueChange={(val) => { exportScale = parseFloat(val); }}>
+            <Select.Trigger id="export-scale" class="w-full">
+              {exportScale === 1.0 ? '1.0x Standard' : exportScale === 1.5 ? '1.5x Medium' : exportScale === 2.0 ? '2.0x High DPI' : '3.0x Ultra HD'}
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="1" label="1.0x Standard">1.0x Standard</Select.Item>
+              <Select.Item value="1.5" label="1.5x Medium">1.5x Medium</Select.Item>
+              <Select.Item value="2" label="2.0x High DPI">2.0x High DPI</Select.Item>
+              <Select.Item value="3" label="3.0x Ultra HD">3.0x Ultra HD</Select.Item>
+            </Select.Content>
+          </Select.Root>
+        </div>
+      </div>
+    </div>
+
+    <Dialog.Footer>
+      <Button variant="outline" disabled={isExporting} onclick={onClose}>
+        Cancel
+      </Button>
+      <Button disabled={isExporting} onclick={handleExportImages}>
+        {isExporting ? 'Exporting...' : 'Export Images'}
+      </Button>
+    </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
