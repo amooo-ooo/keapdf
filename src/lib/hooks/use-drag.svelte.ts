@@ -21,6 +21,7 @@ export function useDrag(callbacks: DragCallbacks): DragHandlers {
   let startY: number = 0;
 
   function handlePointerDown(e: PointerEvent): void {
+    if (e.button !== 0) return;
     const target = e.currentTarget as HTMLElement | null;
     if (!target) return;
 
