@@ -22,22 +22,17 @@ export default defineConfig({
         manualChunks(id) {
           if (id.includes('node_modules')) {
             if (id.includes('@embedpdf/pdfium')) return 'vendor-pdfium';
+            if (id.includes('node-forge')) return 'vendor-forge';
             if (id.includes('pdf-lib')) return 'vendor-pdf-lib';
             if (id.includes('lucide-svelte') || id.includes('@lucide/svelte')) return 'vendor-icons';
-            
-            const pkgPath = id.toString().split('node_modules/')[1];
-            if (pkgPath.startsWith('@')) {
-              const parts = pkgPath.split('/');
-              return `${parts[0].slice(1)}-${parts[1]}`;
-            }
-            return pkgPath.split('/')[0];
+            return 'vendor-ui';
           }
         },
       },
     },
   },
   optimizeDeps: {
-    exclude: ['@embedpdf/pdfium'],
+    exclude: ['@embedpdf/pdfium', 'lucide-svelte'],
   },
   assetsInclude: ['**/*.wasm'],
 });

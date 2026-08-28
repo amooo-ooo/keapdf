@@ -24,5 +24,5 @@
   },
   "files": ["src/main.ts", "src/vite-env.d.ts"],
   "include": ["src/**/*", "src/**/*.d.ts", "src/**/*.ts", "src/**/*.svelte"],
-  "exclude": ["src/scratch/**/*", "node_modules", "dist"]
+  "exclude": ["src/scratch/**/*", "src/**/__tests__/**/*", "node_modules", "dist"]
 }
