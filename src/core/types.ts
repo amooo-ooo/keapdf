@@ -63,6 +63,8 @@ export interface DocumentMetadata {
   permissions?: number;
   /** Total digital signatures count. */
   signaturesCount?: number;
+  /** Cryptographic and standards compliance validation results for all signatures. */
+  signatureValidationResults?: import('../services/pdf/operations/signature-ops').SignatureValidationResult[];
   /** Total embedded file attachments count. */
   attachmentsCount?: number;
   /** Whether an XMP metadata XML stream exists in the document catalog. */
@@ -166,6 +168,8 @@ export interface PageCharacter {
   isVertical?: boolean;
   /** High-level text flow orientation. */
   orientation?: 'horizontal' | 'vertical';
+  /** Whether character was recognized via OCR. */
+  isOcr?: boolean;
 }
 
 /**
@@ -269,13 +273,19 @@ export interface TextWord {
   charCount: number;
   fontFamily?: string;
   rawFontFamily?: string;
+  matchedFontFamily?: string;
   color?: ColorRgba;
   fontWeight?: string;
   fontStyle?: string;
+  underline?: boolean;
+  strikethrough?: boolean;
+  backgroundColor?: string;
   angle?: number;
   rotation?: number;
   isVertical?: boolean;
   orientation?: 'horizontal' | 'vertical';
+  hasPrecedingSpace?: boolean;
+  domBaseline?: number;
 }
 
 export interface TextLine {
@@ -288,12 +298,14 @@ export interface TextLine {
   height: number;
   fontSize: number;
   baselineY: number;
+  domBaseline?: number;
   lineHeight: number;
   charStartIndex: number;
   charCount: number;
   words: TextWord[];
   fontFamily?: string;
   rawFontFamily?: string;
+  matchedFontFamily?: string;
   color?: ColorRgba;
   fontWeight?: string;
   fontStyle?: string;
@@ -303,6 +315,7 @@ export interface TextLine {
   rotation?: number;
   isVertical?: boolean;
   orientation?: 'horizontal' | 'vertical';
+  backgroundColor?: string;
 }
 
 export interface EditableTextSpan {
@@ -318,21 +331,32 @@ export interface EditableTextSpan {
   fontSize: number;
   fontFamily: string;
   rawFontFamily: string;
+  matchedFontFamily?: string;
   color: ColorRgba;
   baselineY: number;
+  domBaseline?: number;
   charStartIndex: number;
   charCount: number;
 
   lines?: TextLine[];
   lineHeight?: number;
+  letterSpacing?: string;
   isParagraph?: boolean;
   fontWeight?: string;
   fontStyle?: string;
+  underline?: boolean;
+  strikethrough?: boolean;
+  backgroundColor?: string;
+  textAlign?: 'left' | 'center' | 'right';
   hasBulletPrefix?: boolean;
   bulletWord?: TextWord;
   rotation?: number;
   isVertical?: boolean;
   orientation?: 'horizontal' | 'vertical';
+  /** Whether span was recognized via OCR from a scanned document. */
+  isOcr?: boolean;
+  /** OCR recognition confidence score (0-100). */
+  ocrConfidence?: number;
 }
 
 export interface EditableImageSpan {
@@ -367,7 +391,39 @@ export interface EditableShapeSpan {
   pdfObjectIndex: number;
 }
 
-export type EditableSpan = EditableTextSpan | EditableImageSpan | EditableShapeSpan;
+export type FormFieldVariantType = 'text-input' | 'checkbox' | 'radio' | 'dropdown' | 'signature' | 'attachment' | 'button';
+
+export interface EditableFormFieldSpan {
+  type: 'form-field';
+  id: string;
+  pageIndex: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  rotation?: number;
+  name?: string;
+  fieldId?: string;
+  fieldName?: string;
+  variant: FormFieldVariantType;
+  value?: string | boolean;
+  label?: string;
+  placeholder?: string;
+  readOnly?: boolean;
+  required?: boolean;
+  options?: string[];
+  fontSize?: number;
+  fontFamily?: string;
+  color?: string;
+  backgroundColor?: string;
+  borderColor?: string;
+  borderWidth?: number;
+  borderStyle?: 'solid' | 'dashed' | 'dotted' | 'none' | 'inset' | 'underline';
+  borderRadius?: number;
+  textAlign?: 'left' | 'center' | 'right';
+}
+
+export type EditableSpan = EditableTextSpan | EditableImageSpan | EditableShapeSpan | EditableFormFieldSpan;
 
 export interface TextMutationOptions {
   text: string;
@@ -377,9 +433,14 @@ export interface TextMutationOptions {
   left?: number;
   top?: number;
   lineHeight?: number;
+  letterSpacing?: string;
   reflowParagraph?: boolean;
   fontWeight?: string;
   fontStyle?: string;
+  underline?: boolean;
+  strikethrough?: boolean;
+  backgroundColor?: string;
+  textAlign?: 'left' | 'center' | 'right';
   lines?: TextLine[];
 }
 
@@ -444,4 +505,94 @@ export interface SanitizationInspection {
 
 /** Preset configurations for document sanitization. */
 export type SanitizePreset = 'maximum' | 'metadata_only' | 'clean_presentation' | 'custom';
+
+/** Compression preset levels. */
+export type CompressionLevel = 'lossless' | 'recommended' | 'strong' | 'flat_image' | 'custom';
+
+/** Custom image re-encoder processor for tests and custom pipelines. */
+export interface CompressImageProcessor {
+  recompressJpeg(
+    imageBytes: Uint8Array,
+    width: number,
+    height: number,
+    targetWidth: number,
+    targetHeight: number,
+    quality: number
+  ): Promise<Uint8Array | null>;
+}
+
+/** Page rasterizer delegate for flat-image compression. */
+export type PageRasterizer = (
+  pageIndex: number,
+  scale: number,
+  quality: number
+) => Promise<{ bytes: Uint8Array; widthPts: number; heightPts: number }>;
+
+/** Options controlling document compression. */
+export interface CompressOptions {
+  level: CompressionLevel;
+  imageQuality?: number;
+  maxDpi?: number;
+  useObjectStreams?: boolean;
+  removeThumbnails?: boolean;
+  removeMetadata?: boolean;
+  removePieceInfo?: boolean;
+  removeAnnotations?: boolean;
+  imageProcessor?: CompressImageProcessor;
+}
+
+/** Summary of compression operations and savings. */
+export interface CompressSummary {
+  originalSizeBytes: number;
+  compressedSizeBytes: number;
+  savingsBytes: number;
+  savingsPercentage: number;
+  imageCount: number;
+  imagesCompressed: number;
+  pagesRasterized: number;
+  thumbnailsRemoved: number;
+  pieceInfoRemoved: number;
+  metadataStripped: boolean;
+  objectStreamsUsed: boolean;
+}
+
+/** Detailed inspection results of compressibility in the document. */
+export interface CompressionInspection {
+  originalSizeBytes: number;
+  pageCount: number;
+  imageCount: number;
+  totalImageBytes: number;
+  hasThumbnails: boolean;
+  thumbnailCount: number;
+  hasPieceInfo: boolean;
+  hasXmpMetadata: boolean;
+}
+
+/**
+ * Metrics and boundaries for a page CropBox and rotation in PDF and DOM coordinates.
+ */
+export interface PageCropInfo {
+  cropLeft: number;
+  cropBottom: number;
+  cropRight: number;
+  cropTop: number;
+  cropWidth: number;
+  cropHeight: number;
+  rotation: 0 | 1 | 2 | 3;
+  hasCrop: boolean;
+  hasCropBox?: boolean;
+  domCropLeft?: number;
+  domCropTop?: number;
+  marginLeft?: number;
+  marginBottom?: number;
+  marginRight?: number;
+  marginTop?: number;
+}
+
+export type {
+  SignatureValidationResult,
+  ComplianceCheckStatus,
+  SignatureComplianceCheck,
+  EsigaComplianceReport,
+} from '../services/pdf/operations/signature-ops';
 
