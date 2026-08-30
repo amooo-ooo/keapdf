@@ -11,7 +11,7 @@ import type { EditableSpan } from './types';
 import type { CanvasElement, TextElement, ImageElement, ShapeElement, FormFieldElement, PathElement, NoteElement } from '../stores/canvas-types';
 
 /** High-level kind of an element regardless of layer. */
-export type ElementKind = 'text' | 'image' | 'shape' | 'form-field' | 'path' | 'note';
+export type ElementKind = 'text' | 'image' | 'shape' | 'form-field' | 'path' | 'note' | (string & {});
 
 /** Origin of the element. */
 export type ElementSource = 'canvas' | 'pdf-native';
@@ -127,8 +127,8 @@ export function isNoteElement(el: CanvasElement): el is NoteElement {
  * @return The resolved capabilities feature flags.
  */
 export function getElementCapabilities(element: CanvasElement | EditableSpan | UnifiedElement): ElementCapabilities {
-  if ('capabilities' in element && element.capabilities) {
-    return element.capabilities;
+  if ('capabilities' in element && Boolean(element.capabilities)) {
+    return element.capabilities as ElementCapabilities;
   }
 
   if (isCanvasElement(element)) {
@@ -184,12 +184,12 @@ export function getElementCapabilities(element: CanvasElement | EditableSpan | U
           canMove: !element.locked,
           canResize: !element.locked,
           canRotate: !element.locked,
-          canEditText: false,
+          canEditText: true,
           canHighlight: false,
           canRedact: true,
           canDelete: !element.locked,
-          canStyleTypography: false,
-          canStyleFillStroke: false,
+          canStyleTypography: true,
+          canStyleFillStroke: true,
           canAdjustOpacity: false,
           canExportToPdf: true,
         };
@@ -223,6 +223,23 @@ export function getElementCapabilities(element: CanvasElement | EditableSpan | U
           canAdjustOpacity: true,
           canExportToPdf: true,
         };
+      default: {
+        const isLocked = Boolean((element as { locked?: boolean }).locked);
+        return {
+          canSelect: true,
+          canMove: !isLocked,
+          canResize: !isLocked,
+          canRotate: !isLocked,
+          canEditText: false,
+          canHighlight: false,
+          canRedact: true,
+          canDelete: !isLocked,
+          canStyleTypography: false,
+          canStyleFillStroke: true,
+          canAdjustOpacity: true,
+          canExportToPdf: true,
+        };
+      }
     }
   }
 
@@ -271,6 +288,21 @@ export function getElementCapabilities(element: CanvasElement | EditableSpan | U
           canStyleTypography: false,
           canStyleFillStroke: true,
           canAdjustOpacity: true,
+          canExportToPdf: true,
+        };
+      case 'form-field':
+        return {
+          canSelect: true,
+          canMove: true,
+          canResize: true,
+          canRotate: true,
+          canEditText: true,
+          canHighlight: false,
+          canRedact: true,
+          canDelete: true,
+          canStyleTypography: true,
+          canStyleFillStroke: true,
+          canAdjustOpacity: false,
           canExportToPdf: true,
         };
     }
@@ -335,4 +367,14 @@ export function toUnifiedElement(element: CanvasElement | EditableSpan): Unified
     capabilities: getElementCapabilities(span),
     raw: span,
   };
+}
+
+/** Helper to check if an element supports typography styling. */
+export function canStyleTypography(element: CanvasElement | EditableSpan | UnifiedElement): boolean {
+  return getElementCapabilities(element).canStyleTypography;
+}
+
+/** Helper to check if an element supports fill and stroke styling. */
+export function canStyleFillStroke(element: CanvasElement | EditableSpan | UnifiedElement): boolean {
+  return getElementCapabilities(element).canStyleFillStroke;
 }
