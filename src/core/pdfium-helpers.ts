@@ -988,16 +988,15 @@ export function findTextObjectIndicesForSpan(
       centerInTarget =
         objCenterX >= targetLeft && objCenterX <= targetRight &&
         objCenterY >= targetBottom && objCenterY <= targetTop;
-
-      if (centerInTarget) {
-        matchedObjects.push({ index: i, left: objLeft, top: objTop });
-      }
+    } else {
+      const domCenter = pdfToDomCoords(objCenterX, objCenterY, cropInfo);
+      centerInTarget =
+        domCenter.x >= spanLeft - 2 && domCenter.x <= spanLeft + spanWidth + 2;
     }
-  } finally {
-    engine.freeMemory(leftPtr);
-    engine.freeMemory(bottomPtr);
-    engine.freeMemory(rightPtr);
-    engine.freeMemory(topPtr);
+
+    if (centerInTarget) {
+      matchedObjects.push({ index: i, left: objLeft, top: objTop });
+    }
   }
 
   // Sort matched objects geometrically: PDF top-to-bottom, then left-to-right
@@ -1146,8 +1145,7 @@ export function readCharFontName(
     return 'Helvetica';
   }
 
-  const fontBufPtr = safeAllocate(engine, 128);
-  const flagsPtr = safeAllocate(engine, 4);
+  const { fontBufPtr, flagsPtr } = engine.getFontNameScratchBuffer();
 
   try {
     const len = mod.FPDFText_GetFontInfo(textPageHandle, charIndex, fontBufPtr, 128, flagsPtr);
@@ -1155,7 +1153,8 @@ export function readCharFontName(
 
     const heapU8 = mod.pdfium.HEAPU8;
     let fontStr = '';
-    for (let k = 0; k < len; k++) {
+    const maxLen = Math.min(len, 128);
+    for (let k = 0; k < maxLen; k++) {
       const b = heapU8[fontBufPtr + k];
       if (b === 0) break;
       fontStr += String.fromCharCode(b);
@@ -1163,9 +1162,6 @@ export function readCharFontName(
     return fontStr.trim() || 'Helvetica';
   } catch {
     return 'Helvetica';
-  } finally {
-    engine.freeMemory(fontBufPtr);
-    engine.freeMemory(flagsPtr);
   }
 }
 
@@ -1190,10 +1186,7 @@ export function readCharFillColor(
     return defaultColor;
   }
 
-  const rPtr = safeAllocate(engine, 4);
-  const gPtr = safeAllocate(engine, 4);
-  const bPtr = safeAllocate(engine, 4);
-  const aPtr = safeAllocate(engine, 4);
+  const { rPtr, gPtr, bPtr, aPtr } = engine.getColorScratchBuffer();
 
   try {
     const ok = mod.FPDFText_GetFillColor(textPageHandle, charIndex, rPtr, gPtr, bPtr, aPtr);
@@ -1208,10 +1201,331 @@ export function readCharFillColor(
     };
   } catch {
     return defaultColor;
-  } finally {
-    engine.freeMemory(rPtr);
-    engine.freeMemory(gPtr);
-    engine.freeMemory(bPtr);
-    engine.freeMemory(aPtr);
   }
 }
+
+/**
+ * Extracts a base font family name by stripping PDF subset prefixes,
+ * PostScript markers, and common style suffixes.
+ *
+ * Examples:
+ *   "ABCDEF+ArialMT" -> "arial"
+ *   "Helvetica-Bold" -> "helvetica"
+ *   "TimesNewRomanPSMT" -> "times new roman"
+ *   "GHIJKL+Calibri-BoldItalic" -> "calibri"
+ *
+ * @param fontName The raw font name from PDFium.
+ * @return A lowercase base family name suitable for grouping.
+ */
+export function extractBaseFontFamily(fontName: string): string {
+  if (!fontName) return 'helvetica';
+
+  let name = fontName;
+
+  // Strip PDF subset prefix (6 uppercase letters followed by '+')
+  const plusIdx = name.indexOf('+');
+  if (plusIdx >= 0 && plusIdx <= 7) {
+    name = name.substring(plusIdx + 1);
+  }
+
+  // Add spaces to PascalCase/camelCase names before lowercasing (e.g. "OpenSans" -> "Open Sans")
+  name = name.replace(/([a-z])([A-Z])/g, '$1 $2');
+
+  // Lowercase for consistent grouping
+  name = name.toLowerCase();
+
+  // Strip common style and PostScript suffixes
+  name = name
+    .replace(/[-,_](bold|italic|oblique|bolditalic|boldoblique|regular|medium|light|semibold|demibold|extrabold|condensed|expanded|narrow|black|thin|heavy|book|psmt|ps|mt|ms|identity-h|cid)$/g, '')
+    .replace(/\s+(bold|italic|oblique|regular|medium|light|psmt|ps|mt|ms)$/g, '')
+    .replace(/(psmt|ps|mt|ms)$/g, '')
+    .trim();
+
+  return name || 'helvetica';
+}
+
+/**
+ * Locates an existing FPDF_FONT handle on the page matching the requested font family or raw name.
+ * Extracts font handles from native text page objects via FPDFTextObj_GetFont.
+ *
+ * @param engine The PDFium engine instance.
+ * @param mod The extended WASM module instance.
+ * @param pageHandle Handle to the loaded page.
+ * @param targetFontFamily Normalized font family name.
+ * @param rawFontFamily Raw font family name (potentially with subset prefix).
+ * @return FPDF_FONT handle if found, or 0 if not present on the page.
+ */
+export function findPageFontHandle(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  pageHandle: number,
+  targetFontFamily?: string,
+  rawFontFamily?: string,
+): number {
+  if (!pageHandle || (!targetFontFamily && !rawFontFamily)) return 0;
+  if (typeof mod.FPDFTextObj_GetFont !== 'function' || typeof mod.FPDFFont_GetBaseFontName !== 'function') {
+    return 0;
+  }
+
+  const cleanTarget = targetFontFamily ? targetFontFamily.toLowerCase().trim() : '';
+  const cleanRaw = rawFontFamily ? rawFontFamily.toLowerCase().trim() : '';
+  const baseTarget = cleanTarget ? extractBaseFontFamily(cleanTarget) : '';
+  const baseRaw = cleanRaw ? extractBaseFontFamily(cleanRaw) : '';
+
+  const objCount = mod.FPDFPage_CountObjects(pageHandle);
+  if (objCount <= 0) return 0;
+
+  const { fontBufPtr } = engine.getFontNameScratchBuffer();
+
+  for (let i = 0; i < objCount; i++) {
+    const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
+    if (!objHandle || mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
+
+    const fontHandle = mod.FPDFTextObj_GetFont(objHandle);
+    if (!fontHandle) continue;
+
+    const len = mod.FPDFFont_GetBaseFontName(fontHandle, fontBufPtr, 128);
+    if (len <= 0) continue;
+
+    const heapU8 = mod.pdfium.HEAPU8;
+    let name = '';
+    const maxLen = Math.min(len, 128);
+    for (let k = 0; k < maxLen; k++) {
+      const b = heapU8[fontBufPtr + k];
+      if (b === 0) break;
+      name += String.fromCharCode(b);
+    }
+    const lowerName = name.toLowerCase().trim();
+    if (!lowerName) continue;
+
+    if (cleanRaw && lowerName === cleanRaw) {
+      return fontHandle;
+    }
+
+    const baseCandidate = extractBaseFontFamily(lowerName);
+    if (baseRaw && baseCandidate === baseRaw) {
+      return fontHandle;
+    }
+    if (baseTarget && baseCandidate === baseTarget) {
+      return fontHandle;
+    }
+  }
+
+  return 0;
+}
+
+/**
+ * Queries CropBox and rotation information for a page handle.
+ * Falls back to MediaBox if an explicit CropBox is not defined.
+ *
+ * @param engine PDFium engine instance.
+ * @param mod Extended PDFium WebAssembly module.
+ * @param pageHandle Active page handle pointer.
+ * @return PageCropInfo with CropBox offsets, dimensions, and rotation.
+ */
+export function getPageCropInfo(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  pageHandle: number
+): PageCropInfo {
+  const rotation = (typeof mod?.FPDFPage_GetRotation === 'function'
+    ? mod.FPDFPage_GetRotation(pageHandle)
+    : 0) as 0 | 1 | 2 | 3;
+  const width = typeof mod?.FPDF_GetPageWidthF === 'function'
+    ? mod.FPDF_GetPageWidthF(pageHandle)
+    : (typeof mod?.FPDF_GetPageWidth === 'function' ? mod.FPDF_GetPageWidth(pageHandle) : 612);
+  const height = typeof mod?.FPDF_GetPageHeightF === 'function'
+    ? mod.FPDF_GetPageHeightF(pageHandle)
+    : (typeof mod?.FPDF_GetPageHeight === 'function' ? mod.FPDF_GetPageHeight(pageHandle) : 792);
+
+  const scratch = engine && typeof engine.getBoundsScratchBuffer === 'function'
+    ? engine.getBoundsScratchBuffer()
+    : null;
+  let mediaLeft = 0;
+  let mediaBottom = 0;
+  let mediaRight = width;
+  let mediaTop = height;
+  let cropLeft = 0;
+  let cropBottom = 0;
+  let cropRight = width;
+  let cropTop = height;
+  let hasCrop = false;
+
+  if (scratch && mod) {
+    const { leftPtr, bottomPtr, rightPtr, topPtr } = scratch;
+
+    if (typeof mod.FPDFPage_GetMediaBox === 'function') {
+      const hasMedia = Boolean(mod.FPDFPage_GetMediaBox(pageHandle, leftPtr, bottomPtr, rightPtr, topPtr));
+      if (hasMedia && mod.pdfium?.HEAPF32) {
+        const heapF32 = mod.pdfium.HEAPF32;
+        mediaLeft = heapF32[leftPtr >> 2];
+        mediaBottom = heapF32[bottomPtr >> 2];
+        mediaRight = heapF32[rightPtr >> 2];
+        mediaTop = heapF32[topPtr >> 2];
+      }
+    }
+
+    if (typeof mod.FPDFPage_GetCropBox === 'function') {
+      hasCrop = Boolean(mod.FPDFPage_GetCropBox(pageHandle, leftPtr, bottomPtr, rightPtr, topPtr));
+      if (hasCrop && mod.pdfium?.HEAPF32) {
+        const heapF32 = mod.pdfium.HEAPF32;
+        cropLeft = heapF32[leftPtr >> 2];
+        cropBottom = heapF32[bottomPtr >> 2];
+        cropRight = heapF32[rightPtr >> 2];
+        cropTop = heapF32[topPtr >> 2];
+      }
+    }
+
+    if (!hasCrop) {
+      cropLeft = mediaLeft;
+      cropBottom = mediaBottom;
+      cropRight = mediaRight;
+      cropTop = mediaTop;
+    }
+  }
+
+  const marginLeft = hasCrop ? Math.max(0, cropLeft - mediaLeft) : 0;
+  const marginBottom = hasCrop ? Math.max(0, cropBottom - mediaBottom) : 0;
+  const marginRight = hasCrop ? Math.max(0, mediaRight - cropRight) : 0;
+  const marginTop = hasCrop ? Math.max(0, mediaTop - cropTop) : 0;
+
+  let domCropLeft = marginLeft;
+  let domCropTop = marginTop;
+  if (rotation === 1) {
+    domCropLeft = marginTop;
+    domCropTop = marginRight;
+  } else if (rotation === 2) {
+    domCropLeft = marginRight;
+    domCropTop = marginBottom;
+  } else if (rotation === 3) {
+    domCropLeft = marginBottom;
+    domCropTop = marginLeft;
+  }
+
+  return {
+    cropLeft,
+    cropBottom,
+    cropRight,
+    cropTop,
+    cropWidth: width,
+    cropHeight: height,
+    rotation,
+    hasCrop,
+    hasCropBox: hasCrop,
+    domCropLeft,
+    domCropTop,
+    marginLeft,
+    marginBottom,
+    marginRight,
+    marginTop,
+  };
+}
+
+/**
+ * Converts a point from PDF user space to DOM coordinates relative to the top-left of the page viewport.
+ *
+ * @param pdfX Horizontal coordinate in PDF user space.
+ * @param pdfY Vertical coordinate in PDF user space.
+ * @param cropInfo Page CropBox and rotation information.
+ * @return DOM coordinates { x, y }.
+ */
+export function pdfToDomCoords(
+  pdfX: number,
+  pdfY: number,
+  cropInfo: PageCropInfo
+): { x: number; y: number } {
+  const { cropLeft, cropBottom, cropWidth: w, cropHeight: h, rotation: rot } = cropInfo;
+  switch (rot) {
+    case 1:
+      return {
+        x: pdfY - cropBottom,
+        y: pdfX - cropLeft,
+      };
+    case 2:
+      return {
+        x: w - (pdfX - cropLeft),
+        y: pdfY - cropBottom,
+      };
+    case 3:
+      return {
+        x: w - (pdfY - cropBottom),
+        y: h - (pdfX - cropLeft),
+      };
+    case 0:
+    default:
+      return {
+        x: pdfX - cropLeft,
+        y: h - (pdfY - cropBottom),
+      };
+  }
+}
+
+/**
+ * Converts a point from DOM viewport space to native PDF user space.
+ *
+ * @param domX Horizontal coordinate in DOM space.
+ * @param domY Vertical coordinate in DOM space.
+ * @param cropInfo Page CropBox and rotation information.
+ * @return PDF user space coordinates { x, y }.
+ */
+export function domToPdfCoords(
+  domX: number,
+  domY: number,
+  cropInfo: PageCropInfo
+): { x: number; y: number } {
+  const { cropLeft, cropBottom, cropWidth: w, cropHeight: h, rotation: rot } = cropInfo;
+  switch (rot) {
+    case 1:
+      return {
+        x: domY + cropLeft,
+        y: domX + cropBottom,
+      };
+    case 2:
+      return {
+        x: w - domX + cropLeft,
+        y: domY + cropBottom,
+      };
+    case 3:
+      return {
+        x: h - domY + cropLeft,
+        y: w - domX + cropBottom,
+      };
+    case 0:
+    default:
+      return {
+        x: domX + cropLeft,
+        y: h - domY + cropBottom,
+      };
+  }
+}
+
+/**
+ * Converts a bounding box from PDF user space to DOM axis-aligned bounds.
+ *
+ * @param left Left bound in PDF user space.
+ * @param bottom Bottom bound in PDF user space.
+ * @param right Right bound in PDF user space.
+ * @param top Top bound in PDF user space.
+ * @param cropInfo Page CropBox and rotation information.
+ * @return Bounding rectangle in DOM coordinates { left, top, right, bottom }.
+ */
+export function pdfBoxToDomBounds(
+  left: number,
+  bottom: number,
+  right: number,
+  top: number,
+  cropInfo: PageCropInfo
+): { left: number; top: number; right: number; bottom: number } {
+  const p1 = pdfToDomCoords(left, top, cropInfo);
+  const p2 = pdfToDomCoords(right, top, cropInfo);
+  const p3 = pdfToDomCoords(left, bottom, cropInfo);
+  const p4 = pdfToDomCoords(right, bottom, cropInfo);
+
+  return {
+    left: Math.min(p1.x, p2.x, p3.x, p4.x),
+    top: Math.min(p1.y, p2.y, p3.y, p4.y),
+    right: Math.max(p1.x, p2.x, p3.x, p4.x),
+    bottom: Math.max(p1.y, p2.y, p3.y, p4.y),
+  };
+}
+
