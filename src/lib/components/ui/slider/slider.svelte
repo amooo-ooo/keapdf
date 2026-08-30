@@ -6,9 +6,22 @@
 		ref = $bindable(null),
 		value = $bindable(),
 		orientation = "horizontal",
+		ticks = false,
+		tickCount = 5,
 		class: className,
 		...restProps
-	}: WithoutChildrenOrChild<SliderPrimitive.RootProps> = $props();
+	}: WithoutChildrenOrChild<SliderPrimitive.RootProps> & {
+		ticks?: boolean | number[];
+		tickCount?: number;
+	} = $props();
+
+	const computedTicks = $derived.by(() => {
+		if (!ticks) return [];
+		if (Array.isArray(ticks)) return ticks;
+		const count = tickCount ?? 5;
+		if (count <= 1) return [0, 100];
+		return Array.from({ length: count }, (_, i) => (i / (count - 1)) * 100);
+	});
 </script>
 
 <!--
@@ -31,21 +44,30 @@ get along, so we shut typescript up by casting `value` to `never`.
 			data-slot="slider-track"
 			data-orientation={orientation}
 			class={cn(
-				"bg-input/90 rounded-2xl data-horizontal:h-1 data-horizontal:w-full data-vertical:h-full data-vertical:w-1 bg-muted relative grow overflow-hidden data-horizontal:w-full data-vertical:h-full"
+				"relative grow overflow-hidden rounded-full bg-muted data-horizontal:h-1.5 data-horizontal:w-full data-vertical:h-full data-vertical:w-1.5"
 			)}
 		>
 			<SliderPrimitive.Range
 				data-slot="slider-range"
 				class={cn(
-					"bg-primary absolute select-none data-horizontal:h-full data-vertical:w-full"
+					"bg-primary absolute select-none rounded-full data-horizontal:h-full data-vertical:w-full"
 				)}
 			/>
+			{#if computedTicks.length > 0}
+				{#each computedTicks as pct}
+					<span
+						class="absolute top-1/2 -translate-y-1/2 size-1 rounded-full bg-foreground/25 pointer-events-none -translate-x-1/2"
+						style="left: {pct}%;"
+						aria-hidden="true"
+					></span>
+				{/each}
+			{/if}
 		</span>
 		{#each thumbItems as thumb (thumb.index)}
 			<SliderPrimitive.Thumb
 				data-slot="slider-thumb"
 				index={thumb.index}
-				class="hover:ring-ring/30 focus-visible:ring-ring/30 size-4 rounded-2xl bg-white ring-1 ring-black/10 transition-[color,box-shadow] duration-200 not-dark:bg-clip-padding hover:ring-4 focus-visible:ring-4 focus-visible:outline-hidden block shrink-0 select-none disabled:pointer-events-none disabled:opacity-50"
+				class="size-4 rounded-full border-2 border-primary bg-background shadow-xs ring-offset-background transition-[color,box-shadow,transform] hover:scale-110 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 cursor-grab active:cursor-grabbing block shrink-0 select-none disabled:pointer-events-none disabled:opacity-50"
 			/>
 		{/each}
 	{/snippet}
