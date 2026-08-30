@@ -25,10 +25,17 @@ export class PdfiumEngine {
   private static instance: PdfiumEngine | null = null;
   private module: ExtendedWrappedPdfiumModule | null = null;
   private isInitialized = false;
+  private initPromise: Promise<ExtendedWrappedPdfiumModule> | null = null;
 
   private activeDocumentHandle: number = 0;
   private activeBufferPtr: number = 0;
   private activeBufferSize: number = 0;
+
+  // Persistent scratch buffers to eliminate per-character malloc/free churn
+  private fontNameBufPtr: number = 0;
+  private fontFlagsPtr: number = 0;
+  private colorScratchPtr: number = 0;
+  private boundsScratchPtr: number = 0;
 
   private constructor() {}
 
@@ -43,26 +50,49 @@ export class PdfiumEngine {
   }
 
   /**
+   * Indicates whether the underlying WebAssembly module has finished initialization.
+   */
+  public get isReady(): boolean {
+    return this.isInitialized && this.module !== null;
+  }
+
+  /**
    * Initialize WebAssembly engine binary and PDFium extension runtime.
    */
-  public async initialize(): Promise<ExtendedWrappedPdfiumModule> {
+  public async initialize(options?: { wasmBinary?: ArrayBuffer | Uint8Array }): Promise<ExtendedWrappedPdfiumModule> {
     if (this.isInitialized && this.module) {
       return this.module;
     }
-
-    const response = await fetch('/pdfium.wasm');
-    if (!response.ok) {
-      throw new Error(`Failed to load pdfium.wasm: ${response.statusText}`);
+    if (this.initPromise) {
+      return this.initPromise;
     }
 
-    const wasmBinary = await response.arrayBuffer();
-    const rawModule = await init({ wasmBinary });
+    this.initPromise = (async () => {
+      try {
+        let wasmBinary: ArrayBuffer | Uint8Array;
+        if (options?.wasmBinary) {
+          wasmBinary = options.wasmBinary;
+        } else {
+          const response = await fetch('/pdfium.wasm');
+          if (!response.ok) {
+            throw new Error(`Failed to load pdfium.wasm: ${response.statusText}`);
+          }
+          wasmBinary = await response.arrayBuffer();
+        }
 
-    // Initialize extension runtime
-    rawModule.PDFiumExt_Init();
-    this.module = rawModule as unknown as ExtendedWrappedPdfiumModule;
-    this.isInitialized = true;
-    return this.module;
+        const rawModule = await init({ wasmBinary });
+
+        // Initialize extension runtime
+        rawModule.PDFiumExt_Init();
+        this.module = rawModule as unknown as ExtendedWrappedPdfiumModule;
+        this.isInitialized = true;
+        return this.module;
+      } catch (err) {
+        this.initPromise = null;
+        throw err;
+      }
+    })();
+    return this.initPromise;
   }
 
   /**
@@ -76,13 +106,13 @@ export class PdfiumEngine {
   }
 
   /**
-   * Load document from ArrayBuffer into WASM memory space.
+   * Load document from ArrayBuffer or Uint8Array into WASM memory space.
    */
-  public loadDocumentFromBuffer(buffer: ArrayBuffer): number {
+  public loadDocumentFromBuffer(buffer: ArrayBuffer | Uint8Array): number {
     const mod = this.getModule();
     this.closeCurrentDocument();
 
-    const bytes = new Uint8Array(buffer);
+    const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
     this.activeBufferSize = bytes.byteLength;
     this.activeBufferPtr = mod.pdfium.wasmExports.malloc(this.activeBufferSize);
 
@@ -132,6 +162,7 @@ export class PdfiumEngine {
       this.activeDocumentHandle = 0;
     }
     this.freeActiveBuffer();
+    this.freeScratchBuffers();
   }
 
   /**
@@ -159,6 +190,88 @@ export class PdfiumEngine {
   public freeMemory(ptr: number): void {
     if (ptr && this.module) {
       this.module.pdfium.wasmExports.free(ptr);
+    }
+  }
+
+  /**
+   * Retrieve persistent scratch buffer for font name queries (128-byte string + 4-byte flags).
+   * Eliminates 2 WASM allocations per character.
+   */
+  public getFontNameScratchBuffer(): { fontBufPtr: number; flagsPtr: number } {
+    if (!this.fontNameBufPtr) {
+      this.fontNameBufPtr = this.allocateMemory(128);
+    }
+    if (!this.fontFlagsPtr) {
+      this.fontFlagsPtr = this.allocateMemory(4);
+    }
+    return { fontBufPtr: this.fontNameBufPtr, flagsPtr: this.fontFlagsPtr };
+  }
+
+  /**
+   * Retrieve persistent scratch buffer for character fill color queries (16 bytes for RGBA uint32s).
+   * Eliminates 4 WASM allocations per character.
+   */
+  public getColorScratchBuffer(): {
+    rPtr: number;
+    gPtr: number;
+    bPtr: number;
+    aPtr: number;
+    basePtr: number;
+  } {
+    if (!this.colorScratchPtr) {
+      this.colorScratchPtr = this.allocateMemory(16);
+    }
+    return {
+      basePtr: this.colorScratchPtr,
+      rPtr: this.colorScratchPtr,
+      gPtr: this.colorScratchPtr + 4,
+      bPtr: this.colorScratchPtr + 8,
+      aPtr: this.colorScratchPtr + 12,
+    };
+  }
+
+  /**
+   * Retrieve persistent scratch buffer for 4-float bounding box queries (16 bytes).
+   * Eliminates 4 WASM allocations per object bounds query.
+   */
+  public getBoundsScratchBuffer(): {
+    leftPtr: number;
+    bottomPtr: number;
+    rightPtr: number;
+    topPtr: number;
+    basePtr: number;
+  } {
+    if (!this.boundsScratchPtr) {
+      this.boundsScratchPtr = this.allocateMemory(16);
+    }
+    return {
+      basePtr: this.boundsScratchPtr,
+      leftPtr: this.boundsScratchPtr,
+      bottomPtr: this.boundsScratchPtr + 4,
+      rightPtr: this.boundsScratchPtr + 8,
+      topPtr: this.boundsScratchPtr + 12,
+    };
+  }
+
+  /**
+   * Releases all persistent scratch buffers.
+   */
+  public freeScratchBuffers(): void {
+    if (this.fontNameBufPtr) {
+      this.freeMemory(this.fontNameBufPtr);
+      this.fontNameBufPtr = 0;
+    }
+    if (this.fontFlagsPtr) {
+      this.freeMemory(this.fontFlagsPtr);
+      this.fontFlagsPtr = 0;
+    }
+    if (this.colorScratchPtr) {
+      this.freeMemory(this.colorScratchPtr);
+      this.colorScratchPtr = 0;
+    }
+    if (this.boundsScratchPtr) {
+      this.freeMemory(this.boundsScratchPtr);
+      this.boundsScratchPtr = 0;
     }
   }
 }
