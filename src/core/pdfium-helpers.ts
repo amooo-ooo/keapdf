@@ -7,7 +7,7 @@
  */
 
 import { PdfiumEngine, type ExtendedWrappedPdfiumModule } from './pdfium-engine';
-import type { PdfMatrix, StandardFontName } from './types';
+import type { PdfMatrix, StandardFontName, PageCropInfo } from './types';
 
 /**
  * Allocate WASM memory with null-pointer safety check.
@@ -101,6 +101,8 @@ export function encodeUtf8(engine: PdfiumEngine, text: string): WasmBuffer {
  * @param byteLength The maximum byte length to read.
  * @return The decoded JavaScript string.
  */
+const UTF16LE_DECODER = new TextDecoder('utf-16le');
+
 export function readUtf16Le(
   heapU8: Uint8Array,
   ptr: number,
@@ -108,11 +110,11 @@ export function readUtf16Le(
 ): string {
   // Find the null terminator position to avoid reading garbage bytes.
   let len = 0;
-  while (len < byteLength && (heapU8[ptr + len] !== 0 || heapU8[ptr + len + 1] !== 0)) {
+  while (len + 1 < byteLength && (heapU8[ptr + len] !== 0 || heapU8[ptr + len + 1] !== 0)) {
     len += 2;
   }
   if (len === 0) return '';
-  return new TextDecoder('utf-16le').decode(
+  return UTF16LE_DECODER.decode(
     new Uint8Array(heapU8.buffer, heapU8.byteOffset + ptr, len)
   );
 }
@@ -321,6 +323,26 @@ const FONT_NAME_MAP: Record<string, StandardFontName> = {
   palatino: 'Times-Roman',
   garamond: 'Times-Roman',
   segoeui: 'Helvetica',
+
+  // URW Nimbus PostScript Type 1 clones
+  nimbusromno9lregu: 'Times-Roman',
+  nimbusromno9lreg: 'Times-Roman',
+  nimbusromno9lmedi: 'Times-Bold',
+  nimbusromno9lmedm: 'Times-Bold',
+  nimbusromno9litai: 'Times-Italic',
+  nimbusromno9lita: 'Times-Italic',
+  nimbusromno9lbold: 'Times-Bold',
+  nimbusromno9lboldital: 'Times-BoldItalic',
+  nimbusrom: 'Times-Roman',
+  nimbusroman: 'Times-Roman',
+  nimbussanlregu: 'Helvetica',
+  nimbussanlbold: 'Helvetica-Bold',
+  nimbussan: 'Helvetica',
+  nimbussans: 'Helvetica',
+  nimbusmonlregu: 'Courier',
+  nimbusmonlbold: 'Courier-Bold',
+  nimbusmon: 'Courier',
+  nimbusmono: 'Courier',
 };
 
 /** All 14 standard PDF Type 1 font names. */
@@ -351,7 +373,7 @@ export function mapStandardFontName(
     return detectedFontName as StandardFontName;
   }
 
-  const normalized = detectedFontName.toLowerCase().replace(/[\s_,]+/g, '');
+  const normalized = detectedFontName.toLowerCase().replace(/[\s_,\-]+/g, '');
   if (!fontWeight && !fontStyle) {
     const mapped = FONT_NAME_MAP[normalized];
     if (mapped) return mapped;
@@ -365,14 +387,20 @@ export function mapStandardFontName(
   if (
     lower.includes('courier') ||
     lower.includes('mono') ||
+    lower.includes('nimbusmon') ||
     lower.includes('consol') ||
     lower.includes('typewriter') ||
     lower.startsWith('cmtt') ||
-    lower.startsWith('pcr')
+    lower.startsWith('lmtt') ||
+    lower.startsWith('pcr') ||
+    lower.startsWith('qcr') ||
+    lower.startsWith('ucr')
   ) {
     base = 'Courier';
   } else if (
     lower.includes('times') ||
+    lower.includes('nimbusrom') ||
+    lower.includes('nimbusroman') ||
     lower.includes('georgia') ||
     lower.includes('palatino') ||
     lower.includes('garamond') ||
@@ -390,11 +418,29 @@ export function mapStandardFontName(
     lower.startsWith('cmr') ||
     lower.startsWith('cmbx') ||
     lower.startsWith('cmti') ||
+    lower.startsWith('cmsl') ||
+    lower.startsWith('cmcsc') ||
     lower.startsWith('cmsy') ||
+    lower.startsWith('cmmi') ||
+    lower.startsWith('cmex') ||
     lower.startsWith('lmr') ||
     lower.startsWith('lmbx') ||
     lower.startsWith('lmti') ||
-    lower.startsWith('ptm')
+    lower.startsWith('lmsl') ||
+    lower.startsWith('lmcsc') ||
+    lower.startsWith('ptm') ||
+    lower.startsWith('ppl') ||
+    lower.startsWith('qtm') ||
+    lower.startsWith('qpl') ||
+    lower.startsWith('bch') ||
+    lower.startsWith('put') ||
+    lower.startsWith('pnc') ||
+    lower.startsWith('pbk') ||
+    lower.startsWith('newtx') ||
+    lower.startsWith('newpx') ||
+    lower.startsWith('mathptmx') ||
+    lower.startsWith('mathpazo') ||
+    lower.startsWith('stix')
   ) {
     base = 'Times';
   } else {
@@ -407,13 +453,46 @@ export function mapStandardFontName(
     lower.includes('black') ||
     lower.includes('heavy') ||
     lower.includes('semibold') ||
-    lower.includes('demibold');
+    lower.includes('demibold') ||
+    lower.includes('medi') ||
+    lower.includes('medm') ||
+    lower.includes('bx') ||
+    lower.startsWith('ptmb') ||
+    lower.startsWith('phvb') ||
+    lower.startsWith('pcrb') ||
+    lower.startsWith('pplb') ||
+    lower.startsWith('bchb') ||
+    lower.startsWith('putb') ||
+    lower.startsWith('pncb') ||
+    lower.startsWith('pbkd') ||
+    lower.startsWith('txb') ||
+    lower.startsWith('pxb');
 
   const isItalic =
     fontStyle === 'italic' ||
     fontStyle === 'oblique' ||
     lower.includes('italic') ||
-    lower.includes('oblique');
+    lower.includes('oblique') ||
+    lower.includes('slanted') ||
+    lower.startsWith('cmti') ||
+    lower.startsWith('cmsl') ||
+    lower.startsWith('lmti') ||
+    lower.startsWith('lmsl') ||
+    lower.startsWith('cmssi') ||
+    lower.startsWith('lmsso') ||
+    lower.startsWith('ptmri') ||
+    lower.startsWith('ptmbi') ||
+    lower.startsWith('phvro') ||
+    lower.startsWith('phvbo') ||
+    lower.startsWith('pcrro') ||
+    lower.startsWith('pcrbo') ||
+    lower.startsWith('pplri') ||
+    lower.startsWith('pplbi') ||
+    lower.startsWith('bchri') ||
+    lower.startsWith('bchbi') ||
+    lower.startsWith('putri') ||
+    lower.startsWith('txi') ||
+    lower.startsWith('pxi');
 
   if (base === 'Courier') {
     if (isBold && isItalic) return 'Courier-BoldOblique';
@@ -569,43 +648,53 @@ export function removeTextObjectsInBounds(
   const objectsToRemove: number[] = [];
 
   if (hasBoundsApi) {
-    // Allocate bounds pointers (float* = 4 bytes each)
-    const leftPtr = safeAllocate(engine, 4);
-    const bottomPtr = safeAllocate(engine, 4);
-    const rightPtr = safeAllocate(engine, 4);
-    const topPtr = safeAllocate(engine, 4);
+    // Reusable bounds pointers (float* = 4 bytes each) from engine scratch buffer
+    const { leftPtr, bottomPtr, rightPtr, topPtr } = engine.getBoundsScratchBuffer();
 
-    try {
-      // Collect text objects that overlap the target region (reverse order for safe removal)
-      for (let i = objectCount - 1; i >= 0; i--) {
-        const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
-        if (!objHandle) continue;
+    // Collect text objects that overlap the target region (reverse order for safe removal)
+    for (let i = objectCount - 1; i >= 0; i--) {
+      const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
+      if (!objHandle) continue;
 
-        if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
+      if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
 
-        const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
-        if (!ok) continue;
+      const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
+      if (!ok) continue;
 
-        const heapF32 = mod.pdfium.HEAPF32;
-        const objLeft = heapF32[leftPtr >> 2];
-        const objBottom = heapF32[bottomPtr >> 2];
-        const objRight = heapF32[rightPtr >> 2];
-        const objTop = heapF32[topPtr >> 2];
+      const heapF32 = mod.pdfium.HEAPF32;
+      const objLeft = heapF32[leftPtr >> 2];
+      const objBottom = heapF32[bottomPtr >> 2];
+      const objRight = heapF32[rightPtr >> 2];
+      const objTop = heapF32[topPtr >> 2];
 
-        // Check bounding box overlap
-        const overlaps =
-          objLeft < targetRight && objRight > targetLeft &&
-          objBottom < targetTop && objTop > targetBottom;
+      const overlapLeft = Math.max(objLeft, targetLeft);
+      const overlapRight = Math.min(objRight, targetRight);
+      const overlapBottom = Math.max(objBottom, targetBottom);
+      const overlapTop = Math.min(objTop, targetTop);
 
-        if (overlaps) {
-          objectsToRemove.push(i);
-        }
+      const overlapWidth = overlapRight - overlapLeft;
+      const overlapHeight = overlapTop - overlapBottom;
+
+      if (overlapWidth <= 0 || overlapHeight <= 0) continue;
+
+      const objWidth = objRight - objLeft;
+      const objHeight = objTop - objBottom;
+      const objCenterX = (objLeft + objRight) / 2;
+      const objCenterY = (objBottom + objTop) / 2;
+
+      const centerInTarget =
+        objCenterX >= targetLeft && objCenterX <= targetRight &&
+        objCenterY >= targetBottom && objCenterY <= targetTop;
+
+      const substantialOverlap =
+        objWidth > 0 &&
+        overlapWidth / objWidth >= 0.4 &&
+        objHeight > 0 &&
+        overlapHeight / objHeight >= 0.4;
+
+      if (centerInTarget || substantialOverlap) {
+        objectsToRemove.push(i);
       }
-    } finally {
-      engine.freeMemory(leftPtr);
-      engine.freeMemory(bottomPtr);
-      engine.freeMemory(rightPtr);
-      engine.freeMemory(topPtr);
     }
   } else {
     // Without bounds API, remove all text objects (less precise fallback)
@@ -662,59 +751,53 @@ export function removeTextObjectsInRects(
 
   if (!hasRemoveApi) return false;
 
-  const heightPts = mod.FPDF_GetPageHeightF(pageHandle);
   const objectCount = mod.FPDFPage_CountObjects(pageHandle);
   if (objectCount === 0) return false;
 
   const hasBoundsApi = typeof mod.FPDFPageObj_GetBounds === 'function';
   if (!hasBoundsApi) return false;
 
-  const targetBoxes = rects.map((r) => ({
-    targetLeft: r.x - 2,
-    targetRight: r.x + r.width + 2,
-    targetTop: heightPts - r.y + 2,
-    targetBottom: heightPts - (r.y + r.height) - 2,
-  }));
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const targetBoxes = rects.map((r) => {
+    const p1 = domToPdfCoords(r.x, r.y, cropInfo);
+    const p2 = domToPdfCoords(r.x + r.width, r.y + r.height, cropInfo);
+    return {
+      targetLeft: Math.min(p1.x, p2.x) - 2,
+      targetRight: Math.max(p1.x, p2.x) + 2,
+      targetTop: Math.max(p1.y, p2.y) + 2,
+      targetBottom: Math.min(p1.y, p2.y) - 2,
+    };
+  });
 
   const objectsToRemove: number[] = [];
-  const leftPtr = safeAllocate(engine, 4);
-  const bottomPtr = safeAllocate(engine, 4);
-  const rightPtr = safeAllocate(engine, 4);
-  const topPtr = safeAllocate(engine, 4);
+  const { leftPtr, bottomPtr, rightPtr, topPtr } = engine.getBoundsScratchBuffer();
 
-  try {
-    for (let i = objectCount - 1; i >= 0; i--) {
-      const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
-      if (!objHandle) continue;
+  for (let i = objectCount - 1; i >= 0; i--) {
+    const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
+    if (!objHandle) continue;
 
-      if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
+    if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
 
-      const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
-      if (!ok) continue;
+    const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
+    if (!ok) continue;
 
-      const heapF32 = mod.pdfium.HEAPF32;
-      const objLeft = heapF32[leftPtr >> 2];
-      const objBottom = heapF32[bottomPtr >> 2];
-      const objRight = heapF32[rightPtr >> 2];
-      const objTop = heapF32[topPtr >> 2];
+    const heapF32 = mod.pdfium.HEAPF32;
+    const objLeft = heapF32[leftPtr >> 2];
+    const objBottom = heapF32[bottomPtr >> 2];
+    const objRight = heapF32[rightPtr >> 2];
+    const objTop = heapF32[topPtr >> 2];
 
-      const overlapsAny = targetBoxes.some(
-        (b) =>
-          objLeft < b.targetRight &&
-          objRight > b.targetLeft &&
-          objBottom < b.targetTop &&
-          objTop > b.targetBottom
-      );
+    const overlapsAny = targetBoxes.some(
+      (b) =>
+        objLeft < b.targetRight &&
+        objRight > b.targetLeft &&
+        objBottom < b.targetTop &&
+        objTop > b.targetBottom
+    );
 
-      if (overlapsAny) {
-        objectsToRemove.push(i);
-      }
+    if (overlapsAny) {
+      objectsToRemove.push(i);
     }
-  } finally {
-    engine.freeMemory(leftPtr);
-    engine.freeMemory(bottomPtr);
-    engine.freeMemory(rightPtr);
-    engine.freeMemory(topPtr);
   }
 
   if (objectsToRemove.length === 0) {
@@ -772,56 +855,67 @@ export function setTextObjectInBounds(
   const targetBottom = spanBaselineY - spanFontSize * 0.4;
   const targetTop = spanBaselineY + spanFontSize * 1.1;
 
-  const leftPtr = safeAllocate(engine, 4);
-  const bottomPtr = safeAllocate(engine, 4);
-  const rightPtr = safeAllocate(engine, 4);
-  const topPtr = safeAllocate(engine, 4);
+  const { leftPtr, bottomPtr, rightPtr, topPtr } = engine.getBoundsScratchBuffer();
 
   let modified = false;
   let isFirst = true;
 
-  try {
-    for (let i = 0; i < objectCount; i++) {
-      const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
-      if (!objHandle) continue;
+  for (let i = 0; i < objectCount; i++) {
+    const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
+    if (!objHandle) continue;
 
-      if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
+    if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
 
-      const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
-      if (!ok) continue;
+    const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
+    if (!ok) continue;
 
-      const heapF32 = mod.pdfium.HEAPF32;
-      const objLeft = heapF32[leftPtr >> 2];
-      const objBottom = heapF32[bottomPtr >> 2];
-      const objRight = heapF32[rightPtr >> 2];
-      const objTop = heapF32[topPtr >> 2];
+    const heapF32 = mod.pdfium.HEAPF32;
+    const objLeft = heapF32[leftPtr >> 2];
+    const objBottom = heapF32[bottomPtr >> 2];
+    const objRight = heapF32[rightPtr >> 2];
+    const objTop = heapF32[topPtr >> 2];
 
-      const overlaps =
-        objLeft < targetRight && objRight > targetLeft &&
-        objBottom < targetTop && objTop > targetBottom;
+    const overlapLeft = Math.max(objLeft, targetLeft);
+    const overlapRight = Math.min(objRight, targetRight);
+    const overlapBottom = Math.max(objBottom, targetBottom);
+    const overlapTop = Math.min(objTop, targetTop);
 
-      if (overlaps) {
-        // Set the first object to the actual new text,
-        // set all subsequent objects to a space to hide them
-        const textToSet = isFirst ? newText : ' ';
-        const textBuf = encodeUtf16Le(engine, textToSet);
-        try {
-          mod.FPDFText_SetText(objHandle, textBuf.ptr);
-          if (isFirst && matrix) {
-            setPageObjectMatrix(engine, mod, objHandle, matrix);
-          }
-        } finally {
-          textBuf.dispose();
+    const overlapWidth = overlapRight - overlapLeft;
+    const overlapHeight = overlapTop - overlapBottom;
+
+    if (overlapWidth <= 0 || overlapHeight <= 0) continue;
+
+    const objWidth = objRight - objLeft;
+    const objHeight = objTop - objBottom;
+    const objCenterX = (objLeft + objRight) / 2;
+    const objCenterY = (objBottom + objTop) / 2;
+
+    const centerInTarget =
+      objCenterX >= targetLeft && objCenterX <= targetRight &&
+      objCenterY >= targetBottom && objCenterY <= targetTop;
+
+    const substantialOverlap =
+      objWidth > 0 &&
+      overlapWidth / objWidth >= 0.4 &&
+      objHeight > 0 &&
+      overlapHeight / objHeight >= 0.4;
+
+    if (centerInTarget || substantialOverlap) {
+      // Set the first object to the actual new text,
+      // set all subsequent objects to a space to hide them
+      const textToSet = isFirst ? newText : ' ';
+      const textBuf = encodeUtf16Le(engine, textToSet);
+      try {
+        mod.FPDFText_SetText(objHandle, textBuf.ptr);
+        if (isFirst && matrix) {
+          setPageObjectMatrix(engine, mod, objHandle, matrix);
         }
-        modified = true;
-        isFirst = false;
+      } finally {
+        textBuf.dispose();
       }
+      modified = true;
+      isFirst = false;
     }
-  } finally {
-    engine.freeMemory(leftPtr);
-    engine.freeMemory(bottomPtr);
-    engine.freeMemory(rightPtr);
-    engine.freeMemory(topPtr);
   }
 
   return modified;
@@ -858,40 +952,40 @@ export function findTextObjectIndicesForSpan(
   const hasBoundsApi = typeof mod.FPDFPageObj_GetBounds === 'function';
   if (!hasBoundsApi) return [];
 
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const pdfLeft = spanLeft + cropInfo.cropLeft;
+
   // Tight bounding region with minimal tolerance (1pt horizontal)
-  const targetLeft = spanLeft - 1;
-  const targetRight = spanLeft + spanWidth + 1;
+  const targetLeft = pdfLeft - 1;
+  const targetRight = pdfLeft + spanWidth + 1;
   const targetBottom = spanBaselineY - spanFontSize * 0.3;
   const targetTop = spanBaselineY + spanFontSize * 0.9;
 
   const matchedObjects: Array<{ index: number; left: number; top: number }> = [];
+  const { leftPtr, bottomPtr, rightPtr, topPtr } = engine.getBoundsScratchBuffer();
 
-  const leftPtr = safeAllocate(engine, 4);
-  const bottomPtr = safeAllocate(engine, 4);
-  const rightPtr = safeAllocate(engine, 4);
-  const topPtr = safeAllocate(engine, 4);
+  for (let i = 0; i < objectCount; i++) {
+    const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
+    if (!objHandle) continue;
 
-  try {
-    for (let i = 0; i < objectCount; i++) {
-      const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
-      if (!objHandle) continue;
+    if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
 
-      if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
+    const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
+    if (!ok) continue;
 
-      const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
-      if (!ok) continue;
+    const heapF32 = mod.pdfium.HEAPF32;
+    const objLeft = heapF32[leftPtr >> 2];
+    const objBottom = heapF32[bottomPtr >> 2];
+    const objRight = heapF32[rightPtr >> 2];
+    const objTop = heapF32[topPtr >> 2];
 
-      const heapF32 = mod.pdfium.HEAPF32;
-      const objLeft = heapF32[leftPtr >> 2];
-      const objBottom = heapF32[bottomPtr >> 2];
-      const objRight = heapF32[rightPtr >> 2];
-      const objTop = heapF32[topPtr >> 2];
+    const objCenterX = (objLeft + objRight) / 2;
+    const objCenterY = (objBottom + objTop) / 2;
 
-      const objCenterX = (objLeft + objRight) / 2;
-      const objCenterY = (objBottom + objTop) / 2;
-
-      // Require the object's center to be inside the span's tight region
-      const centerInTarget =
+    // Require the object's center to be inside the span's tight region
+    let centerInTarget = false;
+    if (cropInfo.rotation === 0) {
+      centerInTarget =
         objCenterX >= targetLeft && objCenterX <= targetRight &&
         objCenterY >= targetBottom && objCenterY <= targetTop;
 
