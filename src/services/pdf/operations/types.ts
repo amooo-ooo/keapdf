@@ -28,6 +28,8 @@ export interface ShapeOptions extends DrawOptions {
   stroke?: string;
   /** The stroke line width. */
   strokeWidth?: number;
+  /** Opacity level between 0 and 1. */
+  opacity?: number;
 }
 
 /**
@@ -65,6 +67,10 @@ export interface TextOptions extends DrawOptions {
   fontWeight?: 'normal' | 'bold';
   /** Font style ('normal' | 'italic'). */
   fontStyle?: 'normal' | 'italic';
+  /** Text horizontal alignment. */
+  textAlign?: 'left' | 'center' | 'right';
+  /** Background highlight/fill color string. */
+  backgroundColor?: string;
   /** Line height in points. */
   lineHeight?: number;
   /** Styled multi-line structures for portion-level styling. */
@@ -112,6 +118,34 @@ export interface FormFieldPlaceholderOptions extends DrawOptions {
   width: number;
   /** The rendered height of the form field placeholder. */
   height: number;
+  /** Font size in points. */
+  fontSize?: number;
+  /** Font family name. */
+  fontFamily?: string;
+  /** Text and foreground indicator color (hex or rgba). */
+  color?: string;
+  /** Background fill color. */
+  backgroundColor?: string;
+  /** Border stroke color. */
+  borderColor?: string;
+  /** Border width in points. */
+  borderWidth?: number;
+  /** Border stroke style. */
+  borderStyle?: 'solid' | 'dashed' | 'dotted' | 'none' | 'inset' | 'underline';
+  /** Border corner radius. */
+  borderRadius?: number;
+  /** Text alignment. */
+  textAlign?: 'left' | 'center' | 'right';
+  /** Whether the field is required. */
+  required?: boolean;
+  /** Whether the field is read-only. */
+  readOnly?: boolean;
+  /** Current or default text value. */
+  value?: string | boolean;
+  /** Option choices for choice fields. */
+  options?: string[];
+  /** Original native AcroForm field name if promoted/extracted from document. */
+  sourceFieldName?: string;
 }
 
 /** Standard sheet size presets in points (72 pt = 1 inch). */
@@ -287,4 +321,6 @@ export type ImpositionConfig =
   | SinglePageImpositionOptions
   | PosterizeImpositionOptions
   | CutAndStackImpositionOptions;
+
+export type { NoteAnnotationOptions } from './add-annotations';
 
