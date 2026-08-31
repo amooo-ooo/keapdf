@@ -1,5 +1,5 @@
 import type { PdfiumEngine } from '../../core/pdfium-engine';
-import { readCharFontName } from '../../core/pdfium-helpers';
+import { readCharFontName, extractBaseFontFamily } from '../../core/pdfium-helpers';
 
 /**
  * Lazily-built, document-wide index of characters available per font.
@@ -90,23 +90,44 @@ export class FontCharsetIndex {
       if (allInFamily) return true;
     }
 
-    // Check document-wide character pool
-    if (this.allDocumentChars && this.allDocumentChars.size > 0) {
-      const allInDoc = charsToCheck.every((c) => this.allDocumentChars!.has(c));
-      if (allInDoc) return true;
-    }
-
     return false;
   }
 
   /**
    * Invalidates the cached index so it will be rebuilt on next access.
-   * Call this after a fallback edit that may have introduced new font data.
+   * Call this after document reload, merge, or structural mutations.
    */
   public invalidate(): void {
     this.rawCharsets = null;
     this.familyCharsets = null;
     this.allDocumentChars = null;
+  }
+
+  /**
+   * Incrementally registers new characters into the charset index
+   * without requiring an expensive full-document rescan.
+   */
+  public registerText(text: string, rawFontName: string): void {
+    if (!this.rawCharsets || !this.familyCharsets || !this.allDocumentChars) {
+      return;
+    }
+    let rawSet = this.rawCharsets.get(rawFontName);
+    if (!rawSet) {
+      rawSet = new Set<string>();
+      this.rawCharsets.set(rawFontName, rawSet);
+    }
+    const baseName = extractBaseFontFamily(rawFontName);
+    let familySet = this.familyCharsets.get(baseName);
+    if (!familySet) {
+      familySet = new Set<string>();
+      this.familyCharsets.set(baseName, familySet);
+    }
+    for (const char of text) {
+      if (char === '\n' || char === '\r') continue;
+      this.allDocumentChars.add(char);
+      rawSet.add(char);
+      familySet.add(char);
+    }
   }
 
   /**
@@ -194,42 +215,5 @@ export class FontCharsetIndex {
   }
 }
 
-/**
- * Extracts a base font family name by stripping PDF subset prefixes,
- * PostScript markers, and common style suffixes.
- *
- * Examples:
- *   "ABCDEF+ArialMT" -> "arial"
- *   "Helvetica-Bold" -> "helvetica"
- *   "TimesNewRomanPSMT" -> "times new roman"
- *   "GHIJKL+Calibri-BoldItalic" -> "calibri"
- *
- * @param fontName The raw font name from PDFium.
- * @return A lowercase base family name suitable for grouping.
- */
-export function extractBaseFontFamily(fontName: string): string {
-  if (!fontName) return 'helvetica';
+export { extractBaseFontFamily } from '../../core/pdfium-helpers';
 
-  let name = fontName;
-
-  // Strip PDF subset prefix (6 uppercase letters followed by '+')
-  const plusIdx = name.indexOf('+');
-  if (plusIdx >= 0 && plusIdx <= 7) {
-    name = name.substring(plusIdx + 1);
-  }
-
-  // Add spaces to PascalCase/camelCase names before lowercasing (e.g. "OpenSans" -> "Open Sans")
-  name = name.replace(/([a-z])([A-Z])/g, '$1 $2');
-
-  // Lowercase for consistent grouping
-  name = name.toLowerCase();
-
-  // Strip common style and PostScript suffixes
-  name = name
-    .replace(/[-,_](bold|italic|oblique|bolditalic|boldoblique|regular|medium|light|semibold|demibold|extrabold|condensed|expanded|narrow|black|thin|heavy|book|psmt|ps|mt|ms|identity-h|cid)$/g, '')
-    .replace(/\s+(bold|italic|oblique|regular|medium|light|psmt|ps|mt|ms)$/g, '')
-    .replace(/(psmt|ps|mt|ms)$/g, '')
-    .trim();
-
-  return name || 'helvetica';
-}
