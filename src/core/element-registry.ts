@@ -23,9 +23,29 @@
 
 import { getContext, setContext } from 'svelte';
 import type { Component } from 'svelte';
-import type { CanvasElementBase } from '../stores/canvas-types';
+import type {
+  CanvasElementBase,
+  TextElement,
+  ShapeElement,
+  ImageElement,
+  FormFieldElement,
+  PathElement,
+  NoteElement,
+} from '../stores/canvas-types';
 import type { PdfPage } from '../services/pdf/pdf-page';
 import type { PdfDocument } from '../services/pdf/pdf-document';
+
+export type { CanvasElementBase };
+
+/** Mapping of built-in element kinds to their concrete element types. */
+export interface BuiltinElementMap {
+  text: TextElement;
+  shape: ShapeElement;
+  image: ImageElement;
+  'form-field': FormFieldElement;
+  path: PathElement;
+  note: NoteElement;
+}
 
 const ELEMENT_REGISTRY_KEY = Symbol('element-registry');
 
@@ -104,7 +124,7 @@ export interface ElementDefinition<
    * Svelte component that renders this element on the canvas overlay.
    * Receives ElementRenderProps as $props().
    */
-  readonly component: Component<ElementRenderProps<E>>;
+  readonly component?: Component<ElementRenderProps<E>> | null;
 
   /**
    * Svelte component for the right-panel property editor.
@@ -172,13 +192,32 @@ export class ElementRegistry {
   }
 
   /**
+   * Unregister an element type definition.
+   *
+   * @param kind The element kind discriminant string.
+   */
+  unregister(kind: string): void {
+    this.definitions.delete(kind);
+  }
+
+  /**
    * Retrieve the definition for a given element kind.
    *
    * @param kind The element kind discriminant string.
    * @return The registered element definition.
    * @throws Error if no definition is registered for the given kind.
    */
-  get<K extends string>(kind: K): ElementDefinition<K> {
+  get(kind: 'text'): ElementDefinition<'text', TextElement>;
+  get(kind: 'shape'): ElementDefinition<'shape', ShapeElement>;
+  get(kind: 'image'): ElementDefinition<'image', ImageElement>;
+  get(kind: 'form-field'): ElementDefinition<'form-field', FormFieldElement>;
+  get(kind: 'path'): ElementDefinition<'path', PathElement>;
+  get(kind: 'note'): ElementDefinition<'note', NoteElement>;
+  get<
+    K extends string = string,
+    E extends CanvasElementBase & { kind: K } = CanvasElementBase & { kind: K },
+  >(kind: K): ElementDefinition<K, E>;
+  get(kind: string): ElementDefinition<any, any> {
     const def = this.definitions.get(kind);
     if (!def) {
       throw new Error(
@@ -186,7 +225,17 @@ export class ElementRegistry {
         `Available kinds: ${this.getRegisteredKinds().join(', ')}`
       );
     }
-    return def as ElementDefinition<K>;
+    return def as unknown as ElementDefinition;
+  }
+
+  /**
+   * Retrieve the definition for a given element kind safely.
+   *
+   * @param kind The element kind discriminant string.
+   * @return The registered element definition or undefined.
+   */
+  tryGet(kind: string): ElementDefinition<any, any> | undefined {
+    return this.definitions.get(kind) as unknown as ElementDefinition<any, any> | undefined;
   }
 
   /**
