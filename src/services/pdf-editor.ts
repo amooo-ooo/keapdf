@@ -6,24 +6,43 @@ import type {
   SanitizeOptions,
   SanitizeSummary,
   SanitizationInspection,
+  CompressOptions,
+  CompressSummary,
+  CompressionInspection,
   DocumentMetadata,
   DocumentMetadataUpdate,
 } from '../core/types';
 import type { SignPdfOptions, SignatureValidationResult } from './pdf/operations/signature-ops';
 import type { WorkspaceFile } from '../stores/editor.svelte';
 import { deleteFileBuffer, clearAllFileBuffers } from '../stores/editor.svelte';
+import type { ElementRegistry, BurnContext } from '../core/element-registry';
 
 /**
  * Manages the PDF editor workspace and provides direct access to the PdfDocument facade.
  */
 export class PdfEditorService {
-  private engine: PdfiumEngine;
+  public readonly engine: PdfiumEngine;
   private _workspaceFiles: WorkspaceFile[];
   private _document: PdfDocument | null = null;
+  private _elementRegistry: ElementRegistry | null = null;
 
-  constructor(workspaceFilesRef: WorkspaceFile[] = []) {
-    this.engine = PdfiumEngine.getInstance();
+  constructor(
+    workspaceFilesRef: WorkspaceFile[] = [],
+    elementRegistry?: ElementRegistry,
+    engine?: PdfiumEngine
+  ) {
+    this.engine = engine ?? PdfiumEngine.getInstance();
     this._workspaceFiles = workspaceFilesRef;
+    if (elementRegistry) {
+      this._elementRegistry = elementRegistry;
+    }
+  }
+
+  /**
+   * Sets or updates the active element registry used for element serialization.
+   */
+  public setElementRegistry(registry: ElementRegistry): void {
+    this._elementRegistry = registry;
   }
 
   /**
@@ -55,7 +74,6 @@ export class PdfEditorService {
     this._document = null;
     this.engine.loadDocumentFromBuffer(buffer);
     this.document.setRawBuffer(buffer);
-    this.document.fontCharsetIndex.ensureBuilt();
   }
 
   /**
@@ -107,11 +125,52 @@ export class PdfEditorService {
    */
   public clearWorkspace(): void {
     if (this._document) {
-      this._document.closeAllPages();
+      this._document.dispose();
     }
+    this.engine.closeCurrentDocument();
     this._document = null;
     this._workspaceFiles.length = 0;
     clearAllFileBuffers();
+  }
+
+  /**
+   * Serializes canvas overlay elements onto the active PDF pages using registered element definitions.
+   *
+   * @param elements Array of CanvasElements to burn.
+   */
+  public async burnElementsToDocument(elements: CanvasElement[]): Promise<void> {
+    if (elements.length === 0) return;
+
+    const byPage = new Map<number, CanvasElement[]>();
+    for (const el of elements) {
+      if (!byPage.has(el.pageIndex)) byPage.set(el.pageIndex, []);
+      byPage.get(el.pageIndex)!.push(el);
+    }
+
+    const doc = this.document;
+
+    for (const [pageIndex, pageElements] of byPage.entries()) {
+      if (pageIndex >= doc.getPageCount()) continue;
+      const page = doc.getPage(pageIndex);
+      const dims = page.getDimensions();
+      const burnCtx: BurnContext = {
+        page,
+        document: doc,
+        pageWidth: dims.widthPts,
+        pageHeight: dims.heightPts,
+      };
+
+      for (const el of pageElements) {
+        if (this._elementRegistry && this._elementRegistry.has(el.kind)) {
+          const def = this._elementRegistry.get(el.kind);
+          try {
+            await def.burn(el, burnCtx);
+          } catch (e) {
+            console.error(`Failed to burn element ${el.id}:`, e);
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -121,163 +180,9 @@ export class PdfEditorService {
   public async applyCanvasElementsToPdf(elements: CanvasElement[], pageTransforms?: Record<number, PageTransform>): Promise<void> {
     if (elements.length === 0 && (!pageTransforms || Object.keys(pageTransforms).length === 0)) return;
 
-    const byPage = new Map<number, CanvasElement[]>();
-    for (const el of elements) {
-      if (!byPage.has(el.pageIndex)) byPage.set(el.pageIndex, []);
-      byPage.get(el.pageIndex)!.push(el);
-    }
-
-    const imageDatas = new Map<string, { width: number; height: number; imgData: ImageData }>();
-    for (const el of elements) {
-      if (el.kind === 'image' && el.src) {
-        if (!imageDatas.has(el.id)) {
-          const imgDataResult = await new Promise<{ width: number; height: number; imgData: ImageData }>((resolve, reject) => {
-            const img = new Image();
-            img.onload = () => {
-              const canvas = document.createElement('canvas');
-              canvas.width = img.naturalWidth;
-              canvas.height = img.naturalHeight;
-              const ctx = canvas.getContext('2d');
-              if (!ctx) return reject(new Error('Failed to get canvas context.'));
-              ctx.drawImage(img, 0, 0);
-              resolve({
-                width: img.naturalWidth,
-                height: img.naturalHeight,
-                imgData: ctx.getImageData(0, 0, img.naturalWidth, img.naturalHeight)
-              });
-            };
-            img.onerror = () => reject(new Error('Failed to load image for dimensions.'));
-            img.src = el.src!;
-          });
-          imageDatas.set(el.id, imgDataResult);
-        }
-      }
-    }
+    await this.burnElementsToDocument(elements);
 
     const doc = this.document;
-
-    for (const [pageIndex, pageElements] of byPage.entries()) {
-      const page = doc.getPage(pageIndex);
-
-      for (const el of pageElements) {
-        if (el.kind === 'text') {
-          page.drawText({
-            text: el.text,
-            x: el.x,
-            y: el.y,
-            width: el.width,
-            height: el.height,
-            fontSize: el.fontSize,
-            fontFamily: el.fontFamily,
-            rawFontFamily: el.rawFontFamily,
-            color: el.color,
-            fontWeight: el.fontWeight,
-            fontStyle: el.fontStyle,
-            lineHeight: el.lineHeight,
-            lines: el.lines,
-            segments: el.segments,
-            rotation: el.rotation,
-            flipX: el.flipX,
-            flipY: el.flipY
-          });
-        } else if (el.kind === 'shape') {
-          // If shape has opacity, convert its hex colors to rgba strings so parseColor handles them
-          let fillStr = el.fill;
-          let strokeStr = el.stroke;
-          if (el.opacity !== undefined && el.opacity < 1.0) {
-            const op = Math.round(el.opacity * 255).toString(16).padStart(2, '0');
-            if (fillStr && fillStr.startsWith('#') && fillStr.length === 7) fillStr += op;
-            if (strokeStr && strokeStr.startsWith('#') && strokeStr.length === 7) strokeStr += op;
-          }
-
-          const shapeOptions = {
-            x: el.x,
-            y: el.y,
-            width: el.width,
-            height: el.height,
-            fill: fillStr,
-            stroke: strokeStr,
-            strokeWidth: el.strokeWidth,
-            rotation: el.rotation,
-            flipX: el.flipX,
-            flipY: el.flipY
-          };
-
-          if (el.variant === 'rectangle') {
-            if (el.isHighlight) {
-              page.addHighlightAnnotation(shapeOptions);
-            } else {
-              page.drawRectangle(shapeOptions);
-            }
-          } else if (el.variant === 'circle') {
-            page.drawCircle(shapeOptions);
-          } else if (el.variant === 'line') {
-            page.drawLine(shapeOptions);
-          } else if (el.variant === 'arrow') {
-            page.drawArrow(shapeOptions);
-          }
-        } else if (el.kind === 'path') {
-          let strokeStr = el.stroke;
-          if (el.opacity !== undefined && el.opacity < 1.0) {
-            const op = Math.round(el.opacity * 255).toString(16).padStart(2, '0');
-            if (strokeStr && strokeStr.startsWith('#') && strokeStr.length === 7) strokeStr += op;
-          }
-          page.addInkAnnotation({
-            x: el.x,
-            y: el.y,
-            points: el.points,
-            stroke: strokeStr,
-            strokeWidth: el.strokeWidth,
-            isHighlight: el.isHighlight,
-            opacity: el.opacity,
-            rotation: el.rotation,
-            flipX: el.flipX,
-            flipY: el.flipY
-          });
-        } else if (el.kind === 'image') {
-          const imgDataResult = imageDatas.get(el.id);
-          if (imgDataResult) {
-            page.drawImage({
-              id: el.id,
-              x: el.x,
-              y: el.y,
-              width: el.width,
-              height: el.height,
-              objectFit: el.objectFit,
-              rotation: el.rotation,
-              flipX: el.flipX,
-              flipY: el.flipY,
-              imageData: imgDataResult
-            });
-          }
-        } else if (el.kind === 'form-field') {
-          page.addAcroFormField({
-            id: el.id,
-            variant: el.variant || 'text-input',
-            label: el.label,
-            placeholder: el.placeholder,
-            x: el.x,
-            y: el.y,
-            width: el.width,
-            height: el.height,
-            rotation: el.rotation,
-            flipX: el.flipX,
-            flipY: el.flipY
-          });
-        } else if (el.kind === 'note') {
-          page.addTextAnnotation({
-            x: el.x,
-            y: el.y,
-            width: el.width,
-            height: el.height,
-            author: el.author,
-            contents: el.text,
-            color: el.color,
-          });
-        }
-      }
-    }
-
     const finalBytes = await doc.saveAsync(pageTransforms);
     const bufferArray = finalBytes.buffer.slice(finalBytes.byteOffset, finalBytes.byteOffset + finalBytes.byteLength) as ArrayBuffer;
     this.loadDocumentFromBuffer(bufferArray);
@@ -329,6 +234,54 @@ export class PdfEditorService {
     pageTransforms?: Record<number, PageTransform>
   ): Promise<{ bytes: Uint8Array; summary: SanitizeSummary }> {
     return this.document.sanitize(options, pageTransforms);
+  }
+
+  /**
+   * Compresses the active PDF document in-place, applying compression
+   * settings and reloading the compressed stream into the WASM engine.
+   *
+   * @param options The compression preset and options to apply.
+   * @param pageTransforms Optional active visual transforms.
+   * @return A promise resolving to the compression summary.
+   */
+  public async compressActiveDocument(
+    options: CompressOptions,
+    pageTransforms?: Record<number, PageTransform>
+  ): Promise<CompressSummary> {
+    const { bytes, summary } = await this.document.compress(options, pageTransforms);
+    const bufferArray = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength
+    ) as ArrayBuffer;
+    this.loadDocumentFromBuffer(bufferArray);
+    return summary;
+  }
+
+  /**
+   * Generates a compressed copy of the active PDF as binary bytes without
+   * replacing the active document in the engine.
+   *
+   * @param options The compression preset and options to apply.
+   * @param pageTransforms Optional active visual transforms.
+   * @return A promise resolving to the compressed bytes and savings summary.
+   */
+  public async compressToBytes(
+    options: CompressOptions,
+    pageTransforms?: Record<number, PageTransform>
+  ): Promise<{ bytes: Uint8Array; summary: CompressSummary }> {
+    return this.document.compress(options, pageTransforms);
+  }
+
+  /**
+   * Inspects the active document for compression characteristics.
+   *
+   * @param pageTransforms Optional active visual transforms.
+   * @return A promise resolving to compression inspection details.
+   */
+  public async inspectCompression(
+    pageTransforms?: Record<number, PageTransform>
+  ): Promise<CompressionInspection> {
+    return this.document.inspectCompression(pageTransforms);
   }
 
   /**
