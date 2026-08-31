@@ -1,6 +1,7 @@
 import type { Component } from 'svelte';
-import type { ElementDefinition, BurnContext, ElementRenderProps, ElementPanelProps } from '../core/element-registry';
+import type { ElementDefinition, ElementRenderProps, BurnContext } from '../core/element-registry';
 import type { PathElement } from '../stores/canvas-types';
+import PathElementRender from './components/PathElementRender.svelte';
 
 /**
  * Definition for the path element type.
@@ -10,16 +11,6 @@ export const pathElementDef: ElementDefinition<'path', PathElement> = {
   label: 'Path',
   defaults: { width: 0, height: 0 },
 
-  /**
-   * Creates a new PathElement instance.
-   *
-   * @param id The unique identifier.
-   * @param pageIndex The zero-based page index.
-   * @param x The X coordinate in PDF points.
-   * @param y The Y coordinate in PDF points.
-   * @param overrides Optional partial overrides.
-   * @return The initialized path element.
-   */
   create(id: string, pageIndex: number, x: number, y: number, overrides?: Partial<PathElement>): PathElement {
     return {
       id,
@@ -43,8 +34,26 @@ export const pathElementDef: ElementDefinition<'path', PathElement> = {
     };
   },
 
-  component: null as unknown as Component<ElementRenderProps<PathElement>>,
-  propertiesPanel: null as unknown as Component<ElementPanelProps<PathElement>>,
+  component: PathElementRender as unknown as Component<ElementRenderProps<PathElement>>,
+  propertiesPanel: null,
+
+  normalize(element: PathElement): PathElement {
+    return {
+      ...element,
+      opacity: Math.max(0, Math.min(1, element.opacity ?? 1)),
+      strokeWidth: Math.max(1, element.strokeWidth ?? 1),
+    };
+  },
+
+  hitTest(element: PathElement, point: { x: number; y: number }): boolean {
+    if (!element.points || element.points.length === 0) return false;
+    const tol = Math.max(8, (element.strokeWidth ?? 2) * 2);
+    return element.points.some(p => {
+      const dx = (p.x - element.x) - point.x;
+      const dy = (p.y - element.y) - point.y;
+      return Math.sqrt(dx * dx + dy * dy) <= tol;
+    });
+  },
 
   /**
    * Burns the path element onto the PDF page.
@@ -53,6 +62,7 @@ export const pathElementDef: ElementDefinition<'path', PathElement> = {
    * @param ctx The burn context containing the page facade.
    */
   burn(element: PathElement, ctx: BurnContext): void {
+    if (element.visible === false) return;
     let strokeStr = element.stroke;
     
     // Handle opacity by converting to hex alpha channel

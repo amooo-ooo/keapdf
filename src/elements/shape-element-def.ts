@@ -1,6 +1,9 @@
 import type { Component } from 'svelte';
 import type { ElementDefinition, ElementRenderProps, ElementPanelProps, BurnContext } from '../core/element-registry';
 import type { ShapeElement } from '../stores/canvas-types';
+import ShapeElementRender from './components/ShapeElementRender.svelte';
+import ShapeSection from '../components/panels/element-properties/ShapeSection.svelte';
+import { parseColor } from '../services/pdf/utils';
 
 /**
  * Element definition for shape elements.
@@ -10,16 +13,6 @@ export const shapeElementDef: ElementDefinition<'shape', ShapeElement> = {
   label: 'Shape',
   defaults: { width: 100, height: 100 },
 
-  /**
-   * Creates a new shape element instance.
-   *
-   * @param id Unique element identifier.
-   * @param pageIndex Target page zero-based index.
-   * @param x Left edge position in PDF points.
-   * @param y Top edge position in PDF points.
-   * @param overrides Optional property overrides.
-   * @return The fully initialized shape element.
-   */
   create(id: string, pageIndex: number, x: number, y: number, overrides?: Partial<ShapeElement>): ShapeElement {
     return {
       id,
@@ -35,8 +28,8 @@ export const shapeElementDef: ElementDefinition<'shape', ShapeElement> = {
       flipX: false,
       flipY: false,
       variant: 'rectangle',
-      fill: '#ffffff',
-      stroke: '#000000',
+      fill: 'rgba(59, 130, 246, 0.15)',
+      stroke: '#3b82f6',
       strokeWidth: 2,
       opacity: 1,
       isHighlight: false,
@@ -44,8 +37,32 @@ export const shapeElementDef: ElementDefinition<'shape', ShapeElement> = {
     };
   },
 
-  component: null as unknown as Component<ElementRenderProps<ShapeElement>>,
-  propertiesPanel: null as unknown as Component<ElementPanelProps<ShapeElement>>,
+  component: ShapeElementRender as unknown as Component<ElementRenderProps<ShapeElement>>,
+  propertiesPanel: ShapeSection as unknown as Component<ElementPanelProps<ShapeElement>>,
+
+  normalize(element: ShapeElement): ShapeElement {
+    return {
+      ...element,
+      width: Math.max(5, element.width),
+      height: Math.max(5, element.height),
+      opacity: Math.max(0, Math.min(1, element.opacity ?? 1)),
+      strokeWidth: Math.max(0, element.strokeWidth ?? 0),
+    };
+  },
+
+  hitTest(element: ShapeElement, point: { x: number; y: number }): boolean {
+    if (point.x < 0 || point.x > element.width || point.y < 0 || point.y > element.height) {
+      return false;
+    }
+    if (element.variant === 'circle') {
+      const rx = element.width / 2;
+      const ry = element.height / 2;
+      const dx = point.x - rx;
+      const dy = point.y - ry;
+      return (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1;
+    }
+    return true;
+  },
 
   /**
    * Serializes the shape element into the PDF page.
@@ -54,14 +71,14 @@ export const shapeElementDef: ElementDefinition<'shape', ShapeElement> = {
    * @param ctx The burn context containing the page handle.
    */
   burn(element: ShapeElement, ctx: BurnContext): void {
-    const alphaHex = Math.round((element.opacity ?? 1) * 255).toString(16).padStart(2, '0');
+    if (element.visible === false) return;
     
-    const applyOpacity = (color: string) => {
+    const applyOpacity = (color: string, opacity: number): string => {
       if (!color || color === 'transparent') return color;
-      if (color.startsWith('#') && color.length === 7) {
-        return color + alphaHex;
-      }
-      return color;
+      const parsed = parseColor(color);
+      const finalAlpha = Math.round(parsed.a * opacity);
+      const toHex = (n: number) => n.toString(16).padStart(2, '0');
+      return `#${toHex(parsed.r)}${toHex(parsed.g)}${toHex(parsed.b)}${toHex(finalAlpha)}`;
     };
 
     const options = {
@@ -72,8 +89,8 @@ export const shapeElementDef: ElementDefinition<'shape', ShapeElement> = {
       rotation: element.rotation,
       flipX: element.flipX,
       flipY: element.flipY,
-      fill: applyOpacity(element.fill),
-      stroke: applyOpacity(element.stroke),
+      fill: applyOpacity(element.fill, element.opacity ?? 1),
+      stroke: applyOpacity(element.stroke, element.opacity ?? 1),
       strokeWidth: element.strokeWidth
     };
 
