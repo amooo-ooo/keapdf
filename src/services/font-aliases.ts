@@ -502,3 +502,506 @@ export function resolveLatexFont(rawFontName: string): FontAliasResolution | nul
           cssStack: CSS_STACK_LATEX_SERIF,
           weight: 'normal',
           style: 'italic',
+        };
+      case 'csc':
+        return {
+          canonicalName: 'Computer Modern Small Caps',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'normal',
+          style: 'normal',
+        };
+      case 'tt':
+      case 'tcsc':
+        return {
+          canonicalName: 'Computer Modern Typewriter',
+          matchedGoogleFont: 'Source Code Pro',
+          category: 'monospace',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_MONO,
+          weight: 'normal',
+          style: 'normal',
+        };
+      case 'itt':
+      case 'sltt':
+        return {
+          canonicalName: 'Computer Modern Typewriter',
+          matchedGoogleFont: 'Source Code Pro',
+          category: 'monospace',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_MONO,
+          weight: 'normal',
+          style: 'italic',
+        };
+      case 'ss':
+        return {
+          canonicalName: 'Computer Modern Sans',
+          matchedGoogleFont: 'Source Sans 3',
+          category: 'sans-serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SANS,
+          weight: 'normal',
+          style: 'normal',
+        };
+      case 'ssbx':
+        return {
+          canonicalName: 'Computer Modern Sans Bold Extended',
+          matchedGoogleFont: 'Source Sans 3',
+          category: 'sans-serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SANS,
+          weight: 'bold',
+          style: 'normal',
+        };
+      case 'ssi':
+        return {
+          canonicalName: 'Computer Modern Sans Slanted',
+          matchedGoogleFont: 'Source Sans 3',
+          category: 'sans-serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SANS,
+          weight: 'normal',
+          style: 'italic',
+        };
+      case 'mi':
+        return {
+          canonicalName: 'Computer Modern Math Italic',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'normal',
+          style: 'italic',
+        };
+      case 'mib':
+        return {
+          canonicalName: 'Computer Modern Math Italic Bold',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'bold',
+          style: 'italic',
+        };
+      case 'sy':
+        return {
+          canonicalName: 'Computer Modern Math Symbol',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'normal',
+          style: 'normal',
+        };
+      case 'bsy':
+        return {
+          canonicalName: 'Computer Modern Bold Math Symbol',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'bold',
+          style: 'normal',
+        };
+      case 'ex':
+        return {
+          canonicalName: 'Computer Modern Math Extension',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'normal',
+          style: 'normal',
+        };
+    }
+  }
+
+  // 2. Latin Modern family (GUST consortium)
+  const lmMatch = key.match(/^lm([a-z]+?)(\d*)$/);
+  if (lmMatch) {
+    const code = lmMatch[1];
+    switch (code) {
+      case 'r':
+        return {
+          canonicalName: 'Latin Modern Roman',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'normal',
+          style: 'normal',
+        };
+      case 'bx':
+        return {
+          canonicalName: 'Latin Modern Bold Extended',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'bold',
+          style: 'normal',
+        };
+      case 'b':
+        return {
+          canonicalName: 'Latin Modern Demi',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'bold',
+          style: 'normal',
+        };
+      case 'ti':
+        return {
+          canonicalName: 'Latin Modern Text Italic',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'normal',
+          style: 'italic',
+        };
+      case 'sl':
+      case 'ro':
+        return {
+          canonicalName: 'Latin Modern Slanted',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'normal',
+          style: 'italic',
+        };
+      case 'csc':
+      case 'cso':
+        return {
+          canonicalName: 'Latin Modern Small Caps',
+          matchedGoogleFont: 'STIX Two Text',
+          category: 'serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SERIF,
+          weight: 'normal',
+          style: 'normal',
+        };
+      case 'ss':
+      case 'sans':
+        return {
+          canonicalName: 'Latin Modern Sans',
+          matchedGoogleFont: 'Source Sans 3',
+          category: 'sans-serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SANS,
+          weight: 'normal',
+          style: 'normal',
+        };
+      case 'ssbx':
+        return {
+          canonicalName: 'Latin Modern Sans Bold Extended',
+          matchedGoogleFont: 'Source Sans 3',
+          category: 'sans-serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SANS,
+          weight: 'bold',
+          style: 'normal',
+        };
+      case 'sso':
+        return {
+          canonicalName: 'Latin Modern Sans Oblique',
+          matchedGoogleFont: 'Source Sans 3',
+          category: 'sans-serif',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_SANS,
+          weight: 'normal',
+          style: 'italic',
+        };
+      case 'tt':
+      case 'mono':
+      case 'tc':
+      case 'tk':
+        return {
+          canonicalName: 'Latin Modern Typewriter',
+          matchedGoogleFont: 'Source Code Pro',
+          category: 'monospace',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_MONO,
+          weight: 'normal',
+          style: 'normal',
+        };
+      case 'to':
+      case 'tti':
+      case 'tlo':
+        return {
+          canonicalName: 'Latin Modern Typewriter Oblique',
+          matchedGoogleFont: 'Source Code Pro',
+          category: 'monospace',
+          isMetricCompatible: false,
+          cssStack: CSS_STACK_LATEX_MONO,
+          weight: 'normal',
+          style: 'italic',
+        };
+    }
+  }
+
+  // 3. TeX Gyre family codes
+  if (key.startsWith('qtm')) {
+    return {
+      canonicalName: 'TeX Gyre Termes',
+      matchedGoogleFont: 'Tinos',
+      category: 'serif',
+      isMetricCompatible: true,
+      cssStack: '"TeX Gyre Termes", "Tinos", "Times New Roman", Times, serif',
+    };
+  }
+  if (key.startsWith('qhv')) {
+    return {
+      canonicalName: 'TeX Gyre Heros',
+      matchedGoogleFont: 'Arimo',
+      category: 'sans-serif',
+      isMetricCompatible: true,
+      cssStack: '"TeX Gyre Heros", "Arimo", Helvetica, Arial, sans-serif',
+    };
+  }
+  if (key.startsWith('qcr')) {
+    return {
+      canonicalName: 'TeX Gyre Cursor',
+      matchedGoogleFont: 'Cousine',
+      category: 'monospace',
+      isMetricCompatible: true,
+      cssStack: '"TeX Gyre Cursor", "Cousine", "Courier New", Courier, monospace',
+    };
+  }
+  if (key.startsWith('qpl')) {
+    return {
+      canonicalName: 'TeX Gyre Pagella',
+      matchedGoogleFont: 'Cinzel',
+      category: 'serif',
+      isMetricCompatible: false,
+      cssStack: '"TeX Gyre Pagella", "Palatino Linotype", Palatino, serif',
+    };
+  }
+  if (key.startsWith('qbk')) {
+    return {
+      canonicalName: 'TeX Gyre Bonum',
+      matchedGoogleFont: 'Besley',
+      category: 'serif',
+      isMetricCompatible: false,
+      cssStack: '"TeX Gyre Bonum", "ITC Bookman", Bookman, serif',
+    };
+  }
+  if (key.startsWith('qcs')) {
+    return {
+      canonicalName: 'TeX Gyre Schola',
+      matchedGoogleFont: 'Tinos',
+      category: 'serif',
+      isMetricCompatible: false,
+      cssStack: '"TeX Gyre Schola", "New Century Schoolbook", Century, serif',
+    };
+  }
+  if (key.startsWith('qag')) {
+    return {
+      canonicalName: 'TeX Gyre Adventor',
+      matchedGoogleFont: 'Questrial',
+      category: 'sans-serif',
+      isMetricCompatible: false,
+      cssStack: '"TeX Gyre Adventor", "ITC Avant Garde", "Century Gothic", sans-serif',
+    };
+  }
+  if (key.startsWith('qzc')) {
+    return {
+      canonicalName: 'TeX Gyre Chorus',
+      matchedGoogleFont: 'Dancing Script',
+      category: 'handwriting',
+      isMetricCompatible: false,
+      cssStack: '"TeX Gyre Chorus", "Zapf Chancery", cursive',
+    };
+  }
+
+  // 4. Common LaTeX package font names
+  if (
+    key.startsWith('newtx') ||
+    key.startsWith('ntxtmr') ||
+    key.startsWith('txr') ||
+    key.startsWith('txb') ||
+    key.startsWith('txi') ||
+    key.startsWith('mathptmx') ||
+    key.startsWith('ztmr')
+  ) {
+    return {
+      canonicalName: 'Times New Roman',
+      matchedGoogleFont: 'Tinos',
+      category: 'serif',
+      isMetricCompatible: true,
+      cssStack: '"Tinos", "Times New Roman", Times, serif',
+    };
+  }
+
+  if (
+    key.startsWith('newpx') ||
+    key.startsWith('npxr') ||
+    key.startsWith('pxr') ||
+    key.startsWith('pxb') ||
+    key.startsWith('mathpazo') ||
+    key.startsWith('fplmr')
+  ) {
+    return {
+      canonicalName: 'Palatino',
+      matchedGoogleFont: 'Cinzel',
+      category: 'serif',
+      isMetricCompatible: false,
+      cssStack: '"Palatino Linotype", Palatino, "Book Antiqua", serif',
+    };
+  }
+
+  if (key.startsWith('fourier') || key.startsWith('futr')) {
+    return {
+      canonicalName: 'Utopia',
+      matchedGoogleFont: 'STIX Two Text',
+      category: 'serif',
+      isMetricCompatible: false,
+      cssStack: 'Utopia, "STIX Two Text", Georgia, serif',
+    };
+  }
+
+  if (key.startsWith('charter') || key.startsWith('xcharter') || key.startsWith('bchr')) {
+    return {
+      canonicalName: 'Charter',
+      matchedGoogleFont: 'STIX Two Text',
+      category: 'serif',
+      isMetricCompatible: false,
+      cssStack: '"Bitstream Charter", Charter, "STIX Two Text", Georgia, serif',
+    };
+  }
+
+  if (key.startsWith('stix')) {
+    return {
+      canonicalName: 'STIX Two Text',
+      matchedGoogleFont: 'STIX Two Text',
+      category: 'serif',
+      isMetricCompatible: true,
+      cssStack: '"STIX Two Text", "Times New Roman", Times, serif',
+    };
+  }
+
+  if (key.startsWith('msam') || key.startsWith('msbm')) {
+    return {
+      canonicalName: 'AMS Math Symbols',
+      matchedGoogleFont: 'STIX Two Text',
+      category: 'serif',
+      isMetricCompatible: false,
+      cssStack: '"STIX Two Text", serif',
+    };
+  }
+
+  if (key.startsWith('eurm') || key.startsWith('eurb')) {
+    return {
+      canonicalName: 'AMS Euler',
+      matchedGoogleFont: 'STIX Two Text',
+      category: 'serif',
+      isMetricCompatible: false,
+      cssStack: '"STIX Two Text", serif',
+    };
+  }
+
+  if (key.startsWith('ccr')) {
+    return {
+      canonicalName: 'Concrete Roman',
+      matchedGoogleFont: 'STIX Two Text',
+      category: 'serif',
+      isMetricCompatible: false,
+      cssStack: CSS_STACK_LATEX_SERIF,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Typeface abbreviations in the Karl Berry scheme.
+ */
+const BERRY_TYPEFACES: Record<string, { name: string; category: FontCategory; googleFont: string }> = {
+  tm: { name: 'Times New Roman', category: 'serif', googleFont: 'Tinos' },
+  hv: { name: 'Helvetica', category: 'sans-serif', googleFont: 'Arimo' },
+  cr: { name: 'Courier New', category: 'monospace', googleFont: 'Cousine' },
+  pl: { name: 'Palatino', category: 'serif', googleFont: 'Cinzel' },
+  ch: { name: 'Charter', category: 'serif', googleFont: 'STIX Two Text' },
+  nc: { name: 'New Century Schoolbook', category: 'serif', googleFont: 'Tinos' },
+  bk: { name: 'ITC Bookman', category: 'serif', googleFont: 'Besley' },
+  ag: { name: 'ITC Avant Garde', category: 'sans-serif', googleFont: 'Questrial' },
+  zc: { name: 'ITC Zapf Chancery', category: 'handwriting', googleFont: 'Dancing Script' },
+  zd: { name: 'ITC Zapf Dingbats', category: 'display', googleFont: 'Arial' },
+  sy: { name: 'Symbol', category: 'serif', googleFont: 'STIX Two Text' },
+  ut: { name: 'Utopia', category: 'serif', googleFont: 'STIX Two Text' },
+  fr: { name: 'Frutiger', category: 'sans-serif', googleFont: 'Hind' },
+  op: { name: 'Optima', category: 'sans-serif', googleFont: 'Marcellus' },
+  un: { name: 'Univers', category: 'sans-serif', googleFont: 'Roboto' },
+  gs: { name: 'Gill Sans', category: 'sans-serif', googleFont: 'Cabin' },
+  bd: { name: 'Bodoni', category: 'serif', googleFont: 'Bodoni Moda' },
+  ga: { name: 'Garamond', category: 'serif', googleFont: 'EB Garamond' },
+};
+
+/**
+ * Decodes Karl Berry dvips/pdflatex font names (e.g. ptmr8t, phvb8t, pcrr8t).
+ * Pattern: S TT W [V] [E]
+ * Length: typically 6 to 8 characters.
+ */
+export function resolveBerryCode(rawFontName: string): FontAliasResolution | null {
+  if (!rawFontName) return null;
+  const key = normalizeKey(rawFontName);
+
+  // Must be between 5 and 9 characters and start with a known foundry code
+  if (key.length < 5 || key.length > 9) return null;
+  const supplier = key.charAt(0);
+  if (!/[pbmuqfghijlt]/.test(supplier)) return null;
+
+  const typefaceCode = key.substring(1, 3);
+  const tf = BERRY_TYPEFACES[typefaceCode];
+  if (!tf) return null;
+
+  const remainder = key.substring(3);
+  const isBold = remainder.includes('b') || remainder.includes('d') || remainder.includes('k');
+  const isItalic = remainder.includes('i') || remainder.includes('o');
+
+  let cssStack = `"${tf.name}", sans-serif`;
+  if (tf.category === 'serif') {
+    cssStack = `"${tf.name}", "${tf.googleFont}", Georgia, "Times New Roman", serif`;
+  } else if (tf.category === 'monospace') {
+    cssStack = `"${tf.name}", "${tf.googleFont}", "Courier New", monospace`;
+  } else if (tf.category === 'sans-serif') {
+    cssStack = `"${tf.name}", "${tf.googleFont}", Arial, Helvetica, sans-serif`;
+  }
+
+  return {
+    canonicalName: tf.name,
+    matchedGoogleFont: tf.googleFont,
+    category: tf.category,
+    isMetricCompatible: ['tm', 'hv', 'cr'].includes(typefaceCode),
+    cssStack,
+    isSystemFont: ['tm', 'hv', 'cr'].includes(typefaceCode),
+    weight: isBold ? 'bold' : 'normal',
+    style: isItalic ? 'italic' : 'normal',
+  };
+}
+
+/**
+ * Master font alias resolver:
+ * Runs input through commercial aliases, LaTeX/TeX parsers, and Berry decoders.
+ */
+export function resolveFontAlias(rawFontName: string): FontAliasResolution | null {
+  if (!rawFontName) return null;
+
+  // 1. Direct commercial match (Calibri, Cambria, Arial, etc.)
+  const comm = resolveCommercialFontAlias(rawFontName);
+  if (comm) return comm;
+
+  // 2. LaTeX Computer Modern / Latin Modern / Package match
+  const latex = resolveLatexFont(rawFontName);
+  if (latex) return latex;
+
+  // 3. Karl Berry dvips scheme decoder
+  const berry = resolveBerryCode(rawFontName);
+  if (berry) return berry;
+
+  return null;
+}
