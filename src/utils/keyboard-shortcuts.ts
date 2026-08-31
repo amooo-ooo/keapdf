@@ -4,26 +4,53 @@
 
 import type { EditorStore } from '../stores/editor.svelte';
 import type { EditorActions } from '../stores/editor-actions';
-
 import type { CanvasStore } from '../stores/canvas.svelte';
 
 export function setupKeyboardShortcuts(
   store: EditorStore,
   actions: EditorActions,
-  canvasStore: CanvasStore
+  canvasStore: CanvasStore,
+  target: EventTarget = typeof window !== 'undefined' ? window : (globalThis as unknown as EventTarget)
 ): () => void {
   function handleKeyDown(e: KeyboardEvent): void {
     // Ignore shortcuts when user is typing inside an input/textarea/editable element
     const target = e.target as Element | null;
     const isTyping =
-      (target instanceof HTMLElement &&
+      (typeof HTMLElement !== 'undefined' &&
+        target instanceof HTMLElement &&
         (target.tagName === 'INPUT' ||
           target.tagName === 'TEXTAREA' ||
           target.isContentEditable ||
           Boolean(target.closest('[contenteditable="true"]')))) ||
       store.isInlineEditing;
 
-    const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+    const isCtrlOrCmd = (e.ctrlKey || e.metaKey) && !e.altKey;
+
+    // Escape: cancel crop, cancel inline edit, or clear selection
+    if (e.key === 'Escape') {
+      if (store.isCropping) {
+        e.preventDefault();
+        actions.cancelCropMode();
+        return;
+      }
+      if (store.isInlineEditing) {
+        e.preventDefault();
+        actions.cancelInlineEdit();
+        return;
+      } else if (!isTyping) {
+        e.preventDefault();
+        actions.clearSelection(true);
+        canvasStore.selectElement(null);
+        return;
+      }
+    }
+
+    // Enter: apply crop if in crop mode
+    if (e.key === 'Enter' && store.isCropping && store.activeCrop && !isTyping) {
+      e.preventDefault();
+      actions.cropPage(store.activeCrop.pageIndex, store.activeCrop.margins, store.activeCrop.scope);
+      return;
+    }
 
     // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y: Undo & Redo
     if (isCtrlOrCmd && !isTyping) {
@@ -78,32 +105,11 @@ export function setupKeyboardShortcuts(
 
     // Non-typing shortcuts
     if (!isTyping) {
-      // Escape: clear selection or inline edit
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        if (store.isInlineEditing) {
-          actions.cancelInlineEdit();
-        } else {
-          actions.clearSelection(true);
-          canvasStore.selectElement(null);
-        }
-        return;
-      }
-
       // Delete / Backspace: delete selected text span or canvas element
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (canvasStore.selectedElementId) {
+        if (canvasStore.selectedElementId || store.hasSelection) {
           e.preventDefault();
-          const id = canvasStore.selectedElementId;
-          const el = canvasStore.elements.find((item) => item.id === id);
-          const kind = el?.kind ?? 'Element';
-          canvasStore.removeElement(id);
-          actions.recordSnapshot(`Delete ${kind}`);
-          return;
-        }
-        if (store.hasSelection) {
-          e.preventDefault();
-          actions.deleteSelectedSpan();
+          void actions.deleteSelected();
           return;
         }
       }
@@ -122,8 +128,8 @@ export function setupKeyboardShortcuts(
     }
   }
 
-  window.addEventListener('keydown', handleKeyDown);
+  target.addEventListener('keydown', handleKeyDown as EventListener);
   return () => {
-    window.removeEventListener('keydown', handleKeyDown);
+    target.removeEventListener('keydown', handleKeyDown as EventListener);
   };
 }
