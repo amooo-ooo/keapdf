@@ -316,3 +316,119 @@ export function deletePage(engine: PdfiumEngine, docHandle: number, pageIndex: n
   if (pageCount <= 1) throw new Error('Cannot delete the last page in a PDF.');
   mod.FPDFPage_Delete(docHandle, pageIndex);
 }
+
+/**
+ * Checks whether an ArrayBuffer contains a valid %PDF- header per ISO 32000-1 Clause 7.5.2.
+ */
+function isPdfBuffer(buffer: ArrayBuffer): boolean {
+  if (!buffer || buffer.byteLength < 5) return false;
+  const view = new Uint8Array(buffer);
+  const maxSearch = Math.min(view.byteLength - 4, 1024);
+  for (let i = 0; i < maxSearch; i++) {
+    if (
+      view[i] === 0x25 &&     // %
+      view[i + 1] === 0x50 && // P
+      view[i + 2] === 0x44 && // D
+      view[i + 3] === 0x46 && // F
+      view[i + 4] === 0x2d    // -
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Merges multiple PDF documents and image files into a single unified PDF using the PDFium engine.
+ * @param engine The PDFium engine instance.
+ * @param items Array of input items with name, binary buffer, and optional mimeType.
+ * @returns Object containing the serialized Uint8Array and the total page count.
+ */
+export async function mergeDocumentsAndImages(
+  engine: PdfiumEngine,
+  items: Array<{ name: string; buffer: ArrayBuffer; mimeType?: string }>
+): Promise<{ data: Uint8Array; pageCount: number }> {
+  const mod = engine.getModule();
+  const destDocHandle = mod.FPDF_CreateNewDocument();
+  if (!destDocHandle) {
+    throw new Error('Failed to create new PDF document for merging.');
+  }
+
+  try {
+    for (const item of items) {
+      const isPdf = item.mimeType === 'application/pdf' ||
+        item.name.toLowerCase().endsWith('.pdf') ||
+        isPdfBuffer(item.buffer);
+
+      if (isPdf) {
+        const sourceBytes = new Uint8Array(item.buffer);
+        const sourceSize = sourceBytes.byteLength;
+        const sourcePtr = engine.allocateMemory(sourceSize);
+
+        try {
+          const heapBytes = new Uint8Array(mod.pdfium.HEAPU8.buffer, sourcePtr, sourceSize);
+          heapBytes.set(sourceBytes);
+
+          const srcDocHandle = mod.FPDF_LoadMemDocument(sourcePtr, sourceSize, '');
+          if (!srcDocHandle) {
+            throw new Error(`Failed to load PDF document: ${item.name}`);
+          }
+
+          try {
+            const pageCount = mod.FPDF_GetPageCount(destDocHandle);
+            const success = mod.FPDF_ImportPages(destDocHandle, srcDocHandle, 0 as unknown as string, pageCount);
+            if (!success) {
+              throw new Error(`PDFium failed to import pages from ${item.name}`);
+            }
+          } finally {
+            mod.FPDF_CloseDocument(srcDocHandle);
+          }
+        } finally {
+          engine.freeMemory(sourcePtr);
+        }
+      } else {
+        const targetIndex = mod.FPDF_GetPageCount(destDocHandle);
+        await importImageAsPage(
+          engine,
+          destDocHandle,
+          item.buffer,
+          item.mimeType || 'image/png',
+          targetIndex
+        );
+      }
+    }
+
+    const totalPages = mod.FPDF_GetPageCount(destDocHandle);
+    if (totalPages === 0) {
+      throw new Error('Merged document contains no readable pages.');
+    }
+
+    const writerPtr = mod.PDFiumExt_OpenFileWriter();
+    if (!writerPtr) {
+      throw new Error('Failed to open PDF file writer.');
+    }
+
+    try {
+      const saved = mod.PDFiumExt_SaveAsCopy(destDocHandle, writerPtr);
+      if (!saved) {
+        throw new Error('Failed to save merged PDF document.');
+      }
+
+      const size = mod.PDFiumExt_GetFileWriterSize(writerPtr);
+      const dataPtr = engine.allocateMemory(size);
+      try {
+        mod.PDFiumExt_GetFileWriterData(writerPtr, dataPtr, size);
+        const srcBytes = new Uint8Array(mod.pdfium.HEAPU8.buffer, dataPtr, size);
+        const result = new Uint8Array(size);
+        result.set(srcBytes);
+        return { data: result, pageCount: totalPages };
+      } finally {
+        engine.freeMemory(dataPtr);
+      }
+    } finally {
+      mod.PDFiumExt_CloseFileWriter(writerPtr);
+    }
+  } finally {
+    mod.FPDF_CloseDocument(destDocHandle);
+  }
+}
