@@ -9,17 +9,7 @@ import type {
 } from '../../../core/types';
 
 export type { DocumentMetadataUpdate };
-import {
-  PDFDocument,
-  PDFName,
-  PDFDict,
-  PDFString,
-  PDFHexString,
-  PDFNumber,
-  PDFBool,
-  PDFArray,
-  PDFStream,
-} from 'pdf-lib';
+import type { PDFDict } from 'pdf-lib';
 
 /**
  * Standard PDF annotation subtypes mapped to their human-readable names.
@@ -147,22 +137,23 @@ export function formatByteSize(bytes?: number): string {
  */
 function decodePdfObjectValue(val: unknown): string {
   if (val === undefined || val === null) return '';
-  if (val instanceof PDFString || val instanceof PDFHexString) {
-    return val.decodeText().trim();
+  if (typeof (val as { decodeText?: () => string }).decodeText === 'function') {
+    return (val as { decodeText: () => string }).decodeText().trim();
   }
-  if (val instanceof PDFName) {
-    return val.asString().replace(/^\//, '').trim();
+  if (typeof (val as { asString?: () => string }).asString === 'function') {
+    return (val as { asString: () => string }).asString().replace(/^\//, '').trim();
   }
-  if (val instanceof PDFNumber) {
-    return val.asNumber().toString();
+  if (typeof (val as { asNumber?: () => number }).asNumber === 'function') {
+    return (val as { asNumber: () => number }).asNumber().toString();
   }
-  if (val instanceof PDFBool) {
-    return val.asBoolean() ? 'true' : 'false';
+  if (typeof (val as { asBoolean?: () => boolean }).asBoolean === 'function') {
+    return (val as { asBoolean: () => boolean }).asBoolean() ? 'true' : 'false';
   }
-  if (val instanceof PDFArray) {
+  if (typeof (val as { size?: () => number; get?: (i: number) => unknown }).size === 'function') {
+    const arr = val as { size: () => number; get: (i: number) => unknown };
     const items: string[] = [];
-    for (let i = 0; i < val.size(); i++) {
-      items.push(decodePdfObjectValue(val.get(i)));
+    for (let i = 0; i < arr.size(); i++) {
+      items.push(decodePdfObjectValue(arr.get(i)));
     }
     return items.join(', ');
   }
@@ -470,13 +461,14 @@ export async function extractAllMetadata(
   if (rawBuffer && rawBuffer.byteLength > 0) {
     try {
       const bytes = rawBuffer instanceof Uint8Array ? rawBuffer : new Uint8Array(rawBuffer);
+      const { PDFDocument, PDFDict: PDFDictClass, PDFName, PDFStream: PDFStreamClass } = await import('pdf-lib');
       const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: true });
 
       // Inspect Info Dictionary
       const infoRef = pdfDoc.context.trailerInfo.Info;
       if (infoRef) {
         const infoDict = pdfDoc.context.lookup(infoRef);
-        if (infoDict instanceof PDFDict) {
+        if (infoDict instanceof PDFDictClass) {
           for (const [keyName, val] of infoDict.entries()) {
             const rawKeyStr = keyName.asString();
             const cleanKey = rawKeyStr.replace(/^\//, '').trim();
@@ -527,7 +519,7 @@ export async function extractAllMetadata(
         const metaRef = pdfDoc.catalog.get(PDFName.of('Metadata'));
         if (metaRef) {
           const stream = pdfDoc.context.lookup(metaRef);
-          if (stream instanceof PDFStream) {
+          if (stream && stream instanceof PDFStreamClass) {
             const rawContents = stream.getContents();
             hasXmp = true;
             xmpString = new TextDecoder('utf-8', { fatal: false }).decode(rawContents);
@@ -684,6 +676,7 @@ export async function updateDocumentMetadata(
   updates: DocumentMetadataUpdate
 ): Promise<Uint8Array> {
   const bytes = pdfBytes instanceof Uint8Array ? pdfBytes : new Uint8Array(pdfBytes);
+  const { PDFDocument, PDFName, PDFString, PDFDict: PDFDictClass } = await import('pdf-lib');
   const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: true });
 
   if (updates.title !== undefined) pdfDoc.setTitle(updates.title);
@@ -714,7 +707,7 @@ export async function updateDocumentMetadata(
   const infoRef = pdfDoc.context.trailerInfo.Info;
   if (infoRef) {
     const existing = pdfDoc.context.lookup(infoRef);
-    if (existing instanceof PDFDict) {
+    if (existing instanceof PDFDictClass) {
       infoDict = existing;
     }
   }
