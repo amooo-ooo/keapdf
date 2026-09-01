@@ -1,6 +1,6 @@
 import type { PdfiumEngine } from '../../../core/pdfium-engine';
-import { encodeUtf16Le, setPageObjectMatrix, mapStandardFontName } from '../../../core/pdfium-helpers';
-import { buildTransformMatrix } from '../utils';
+import { encodeUtf16Le, setPageObjectMatrix, mapStandardFontName, getPageCropInfo } from '../../../core/pdfium-helpers';
+import { buildTransformMatrix, parseColor } from '../utils';
 import type { FormFieldPlaceholderOptions } from './types';
 
 /**
@@ -19,6 +19,8 @@ export function drawFormFieldPlaceholder(
 ): void {
   const mod = engine.getModule();
   const pageHeight = mod.FPDF_GetPageHeightF(pageHandle);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const cropOffset = cropInfo.hasCropBox ? { cropX: cropInfo.cropLeft, cropY: cropInfo.cropBottom } : undefined;
   const matrix = buildTransformMatrix(
     options.x,
     options.y,
@@ -27,40 +29,62 @@ export function drawFormFieldPlaceholder(
     pageHeight,
     options.rotation || 0,
     options.flipX || false,
-    options.flipY || false
+    options.flipY || false,
+    cropOffset
   );
+
+  const parseColorFallback = (colStr?: string, defaultCol = { r: 239, g: 246, b: 255, a: 200 }) => {
+    if (!colStr) return defaultCol;
+    try {
+      const parsed = parseColor(colStr);
+      return {
+        r: parsed.r,
+        g: parsed.g,
+        b: parsed.b,
+        a: parsed.a !== undefined ? (parsed.a <= 1 ? Math.round(parsed.a * 255) : parsed.a) : 255,
+      };
+    } catch {
+      return defaultCol;
+    }
+  };
+
+  const bgCol = parseColorFallback(options.backgroundColor, { r: 241, g: 245, b: 249, a: 180 });
+  const borderCol = parseColorFallback(options.borderColor, { r: 100, g: 116, b: 139, a: 255 });
+  const borderWidth = options.borderWidth !== undefined ? options.borderWidth : 1;
+  const textCol = parseColorFallback(options.color, { r: 15, g: 23, b: 42, a: 255 });
+  const fontSize = options.fontSize && options.fontSize > 0 ? options.fontSize : 10;
 
   const rectObj = mod.FPDFPageObj_CreateNewRect(0, 0, options.width, options.height);
   if (rectObj) {
-    mod.FPDFPageObj_SetFillColor(rectObj, 239, 246, 255, 200);
-    mod.FPDFPageObj_SetStrokeColor(rectObj, 191, 219, 254, 255);
-    mod.FPDFPageObj_SetStrokeWidth(rectObj, 1);
+    mod.FPDFPageObj_SetFillColor(rectObj, bgCol.r, bgCol.g, bgCol.b, bgCol.a);
+    mod.FPDFPageObj_SetStrokeColor(rectObj, borderCol.r, borderCol.g, borderCol.b, borderCol.a);
+    mod.FPDFPageObj_SetStrokeWidth(rectObj, borderWidth);
     mod.FPDFPath_SetDrawMode(rectObj, 1, true);
     setPageObjectMatrix(engine, mod, rectObj, matrix);
     mod.FPDFPage_InsertObject(pageHandle, rectObj);
   }
 
-  const standardFont = mapStandardFontName('Helvetica');
+  const standardFont = mapStandardFontName(options.fontFamily || 'Helvetica');
   let fontHandle = mod.FPDFText_LoadStandardFont(docHandle, standardFont);
   if (fontHandle) {
-    let labelText = options.label || options.variant || 'Form Field';
-    if (options.variant === 'text-input') labelText = options.label || 'Text Input';
-    else if (options.variant === 'checkbox') labelText = options.label || 'Checkbox';
-    else if (options.variant === 'radio') labelText = options.label || 'Radio';
-    else if (options.variant === 'dropdown') labelText = options.label || 'Dropdown';
+    let labelText: string = String(options.value || options.label || options.placeholder || options.variant || 'Form Field');
+    if (options.variant === 'text-input') labelText = String(options.value || options.placeholder || options.label || 'Text Input');
+    else if (options.variant === 'checkbox') labelText = (options.value === 'true' ? '[x] ' : '[ ] ') + (options.label || 'Checkbox');
+    else if (options.variant === 'radio') labelText = '(o) ' + (options.label || 'Radio');
+    else if (options.variant === 'dropdown') labelText = String(options.value || options.label || 'Dropdown') + ' v';
     else if (options.variant === 'signature') labelText = options.label || 'Signature';
     else if (options.variant === 'attachment') labelText = options.label || 'Attachment';
 
     const textBuf = encodeUtf16Le(engine, labelText);
     try {
-      const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, fontHandle, 10);
+      const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, fontHandle, fontSize);
       if (textObjHandle) {
         mod.FPDFText_SetText(textObjHandle, textBuf.ptr);
-        mod.FPDFPageObj_SetFillColor(textObjHandle, 29, 78, 216, 255);
+        mod.FPDFPageObj_SetFillColor(textObjHandle, textCol.r, textCol.g, textCol.b, textCol.a);
         
         const textMatrix = { ...matrix };
-        const lx = 5;
-        const ly = options.height / 2 - 3;
+        const lx = options.textAlign === 'center' ? Math.max(5, options.width / 4) : 5;
+        const ly = options.height / 2 - (fontSize / 3);
         textMatrix.e += lx * matrix.a + ly * matrix.c;
         textMatrix.f += lx * matrix.b + ly * matrix.d;
         
@@ -69,7 +93,7 @@ export function drawFormFieldPlaceholder(
       }
     } finally {
       textBuf.dispose();
-      // mod.FPDFFont_Close(fontHandle); // Standard fonts should not be closed
+      // Standard fonts should not be closed
     }
   }
 }
