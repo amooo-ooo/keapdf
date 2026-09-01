@@ -4,11 +4,17 @@ import {
   setPageObjectMatrix,
   mapStandardFontName,
   calculateTextWidth,
+  findPageFontHandle,
+  extractBaseFontFamily,
+  getPageCropInfo,
 } from '../../../core/pdfium-helpers';
-import { parseColor, sanitizePdfText } from '../utils';
+import type { PageCropInfo } from '../../../core/types';
+import { parseColor, sanitizePdfText, buildTransformMatrix } from '../utils';
 import type { StandardFontName } from '../../../core/types';
 import type { TextOptions } from './types';
 import type { TextSegment } from '../../../stores/canvas-types';
+import type { FontCharsetIndex } from '../font-charset-index';
+import { loadGoogleFont } from '../../font-loader';
 
 /**
  * Resolves a font family, raw font name, and optional weight/style to a standard PDF font.
@@ -67,29 +73,49 @@ export function resolveStandardFont(
  * @param docHandle The handle to the loaded PDF document.
  * @param pageHandle The handle to the active PDF page.
  * @param options Configuration parameters for text content, styling, and positioning.
+ * @param charsetIndex Optional document font character availability index.
  */
 export function drawText(
   engine: PdfiumEngine,
   docHandle: number,
   pageHandle: number,
-  options: TextOptions
+  options: TextOptions,
+  charsetIndex?: FontCharsetIndex
 ): void {
   const mod = engine.getModule();
-  const pageHeight = mod.FPDF_GetPageHeightF(pageHandle);
+  const pageHeight = typeof mod?.FPDF_GetPageHeightF === 'function'
+    ? mod.FPDF_GetPageHeightF(pageHandle)
+    : (typeof mod?.FPDF_GetPageHeight === 'function' ? mod.FPDF_GetPageHeight(pageHandle) : 792);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
 
   const hasLines = options.lines && options.lines.length > 0;
   const hasSegments = options.segments && options.segments.length > 0;
   const hasMultiLineText = Boolean(options.text && options.text.includes('\n'));
 
   if (hasLines || hasSegments || hasMultiLineText) {
-    drawMultiSegmentText(engine, mod, docHandle, pageHandle, pageHeight, options);
+    drawMultiSegmentText(engine, mod, docHandle, pageHandle, pageHeight, options, charsetIndex, cropInfo);
     return;
   }
 
   const cleanText = sanitizePdfText(options.text);
   if (!cleanText || cleanText.length === 0) return;
 
-  // Single-style text fallback
+  // Attempt to preserve embedded font subset if all characters are available
+  let fontHandle = 0;
+  if (charsetIndex) {
+    const rawName = options.rawFontFamily || options.fontFamily || '';
+    const charsAvailable = charsetIndex.hasAllChars(cleanText, rawName);
+    if (charsAvailable) {
+      fontHandle = findPageFontHandle(
+        engine,
+        mod,
+        pageHandle,
+        options.fontFamily,
+        options.rawFontFamily
+      );
+    }
+  }
+
   const standardFont = resolveStandardFont(
     options.fontFamily,
     options.rawFontFamily,
@@ -97,8 +123,14 @@ export function drawText(
     options.fontStyle
   );
 
-  let fontHandle = mod.FPDFText_LoadStandardFont(docHandle, standardFont);
-  if (!fontHandle) fontHandle = mod.FPDFText_LoadStandardFont(docHandle, 'Helvetica');
+  // Fallback to standard PDF font if font subset is not available or characters missing
+  if (!fontHandle) {
+    fontHandle = mod.FPDFText_LoadStandardFont(docHandle, standardFont);
+    if (!fontHandle) fontHandle = mod.FPDFText_LoadStandardFont(docHandle, 'Helvetica');
+    if (options.fontFamily) {
+      loadGoogleFont(extractBaseFontFamily(options.fontFamily));
+    }
+  }
 
   if (fontHandle) {
     const textBuf = encodeUtf16Le(engine, cleanText);
@@ -110,9 +142,11 @@ export function drawText(
         const textColor = parseColor(options.color || '#000000');
         mod.FPDFPageObj_SetFillColor(textObjHandle, textColor.r, textColor.g, textColor.b, textColor.a);
 
+        const cropX = cropInfo.hasCropBox ? cropInfo.cropLeft : 0;
+        const cropY = cropInfo.hasCropBox ? cropInfo.cropBottom : 0;
         const elemW = options.width || calculateTextWidth(cleanText, options.fontSize, standardFont);
         const elemH = options.height || options.fontSize * 1.25;
-        const elemCx = options.x + elemW / 2;
+        const elemCx = options.x + cropX + elemW / 2;
         const elemCy = options.y + elemH / 2;
 
         const theta = -(options.rotation || 0) * (Math.PI / 180);
@@ -128,7 +162,7 @@ export function drawText(
 
         // Baseline in unrotated DOM page coordinate frame
         const domBaselineY = options.y + options.fontSize * 0.82;
-        const domBaselineX = options.x;
+        const domBaselineX = options.x + cropX;
 
         const dx = domBaselineX - elemCx;
         const dy = domBaselineY - elemCy;
@@ -137,7 +171,31 @@ export function drawText(
         const rotDy = dx * sin + dy * cos;
 
         const pdfX = elemCx + rotDx * sx;
-        const pdfY = (pageHeight - elemCy) - rotDy * sy;
+        const pdfY = (pageHeight - elemCy) + cropY - rotDy * sy;
+
+        if (options.backgroundColor) {
+          const bgCol = parseColor(options.backgroundColor);
+          if (bgCol.a > 0) {
+            const bgRect = mod.FPDFPageObj_CreateNewRect(0, 0, elemW, elemH);
+            if (bgRect) {
+              mod.FPDFPageObj_SetFillColor(bgRect, bgCol.r, bgCol.g, bgCol.b, bgCol.a);
+              mod.FPDFPath_SetDrawMode(bgRect, 1, false);
+              const bgMatrix = buildTransformMatrix(
+                options.x,
+                options.y,
+                elemW,
+                elemH,
+                pageHeight,
+                options.rotation || 0,
+                options.flipX || false,
+                options.flipY || false,
+                cropInfo.hasCropBox ? { cropX: cropInfo.cropLeft, cropY: cropInfo.cropBottom } : undefined
+              );
+              setPageObjectMatrix(engine, mod, bgRect, bgMatrix);
+              mod.FPDFPage_InsertObject(pageHandle, bgRect);
+            }
+          }
+        }
 
         const matrix = { a, b, c, d, e: pdfX, f: pdfY };
         setPageObjectMatrix(engine, mod, textObjHandle, matrix);
@@ -158,6 +216,7 @@ export function drawText(
  * @param pageHandle The active PDF page handle.
  * @param pageHeight The height of the target PDF page in points.
  * @param options Configuration parameters for text content, styling, and positioning.
+ * @param charsetIndex Optional document font character availability index.
  */
 function drawMultiSegmentText(
   engine: PdfiumEngine,
@@ -165,11 +224,15 @@ function drawMultiSegmentText(
   docHandle: number,
   pageHandle: number,
   pageHeight: number,
-  options: TextOptions
+  options: TextOptions,
+  charsetIndex?: FontCharsetIndex,
+  cropInfo?: PageCropInfo
 ): void {
   const elemW = options.width || 0;
   const elemH = options.height || 0;
-  const elemCx = options.x + elemW / 2;
+  const cropX = cropInfo?.hasCropBox ? cropInfo.cropLeft : 0;
+  const cropY = cropInfo?.hasCropBox ? cropInfo.cropBottom : 0;
+  const elemCx = options.x + cropX + elemW / 2;
   const elemCy = options.y + elemH / 2;
 
   const theta = -(options.rotation || 0) * (Math.PI / 180);
@@ -257,6 +320,17 @@ function drawMultiSegmentText(
     }
   }
 
+  const standardFontCache = new Map<string, number>();
+  const getStandardFontHandle = (name: string): number => {
+    let h = standardFontCache.get(name);
+    if (!h) {
+      h = mod.FPDFText_LoadStandardFont(docHandle, name);
+      if (!h) h = mod.FPDFText_LoadStandardFont(docHandle, 'Helvetica');
+      if (h) standardFontCache.set(name, h);
+    }
+    return h || 0;
+  };
+
   for (const line of linesToDraw) {
     let currentLineX = line.left;
 
@@ -283,7 +357,7 @@ function drawMultiSegmentText(
 
       // Baseline in unrotated DOM page coordinates
       const domBaselineY = options.y + segRelY + segFontSize * 0.82;
-      const domBaselineX = options.x + segRelX;
+      const domBaselineX = options.x + cropX + segRelX;
 
       const dx = domBaselineX - elemCx;
       const dy = domBaselineY - elemCy;
@@ -292,12 +366,32 @@ function drawMultiSegmentText(
       const rotDy = dx * sin + dy * cos;
 
       const pdfX = elemCx + rotDx * sx;
-      const pdfY = (pageHeight - elemCy) - rotDy * sy;
+      const pdfY = (pageHeight - elemCy) + cropY - rotDy * sy;
 
       const segMatrix = { a, b, c, d, e: pdfX, f: pdfY };
 
-      let segFontHandle = mod.FPDFText_LoadStandardFont(docHandle, segStandardFont);
-      if (!segFontHandle) segFontHandle = mod.FPDFText_LoadStandardFont(docHandle, 'Helvetica');
+      let segFontHandle = 0;
+      if (charsetIndex) {
+        const segRawName = segment.rawFontFamily || options.rawFontFamily || segment.fontFamily || options.fontFamily || '';
+        const charsAvailable = charsetIndex.hasAllChars(cleanText, segRawName);
+        if (charsAvailable) {
+          segFontHandle = findPageFontHandle(
+            engine,
+            mod,
+            pageHandle,
+            segment.fontFamily || options.fontFamily,
+            segment.rawFontFamily || options.rawFontFamily
+          );
+        }
+      }
+
+      if (!segFontHandle) {
+        segFontHandle = getStandardFontHandle(segStandardFont);
+        const fam = segment.fontFamily || options.fontFamily;
+        if (fam) {
+          loadGoogleFont(extractBaseFontFamily(fam));
+        }
+      }
 
       if (segFontHandle) {
         const textBuf = encodeUtf16Le(engine, cleanText);
@@ -308,6 +402,32 @@ function drawMultiSegmentText(
 
             const segColor = parseColor(segment.color || options.color || '#000000');
             mod.FPDFPageObj_SetFillColor(textObjHandle, segColor.r, segColor.g, segColor.b, segColor.a);
+
+            const segBgColorStr = segment.backgroundColor || (options.lines && options.lines.length > 0 ? undefined : options.backgroundColor);
+            if (segBgColorStr) {
+              const segBg = parseColor(segBgColorStr);
+              if (segBg.a > 0) {
+                const segH = line.height || segFontSize * 1.25;
+                const bgRect = mod.FPDFPageObj_CreateNewRect(0, 0, segWidth, segH);
+                if (bgRect) {
+                  mod.FPDFPageObj_SetFillColor(bgRect, segBg.r, segBg.g, segBg.b, segBg.a);
+                  mod.FPDFPath_SetDrawMode(bgRect, 1, false);
+                  const bgMatrix = buildTransformMatrix(
+                    options.x + segRelX,
+                    options.y + segRelY,
+                    segWidth,
+                    segH,
+                    pageHeight,
+                    options.rotation || 0,
+                    options.flipX || false,
+                    options.flipY || false,
+                    cropInfo?.hasCropBox ? { cropX: cropInfo.cropLeft, cropY: cropInfo.cropBottom } : undefined
+                  );
+                  setPageObjectMatrix(engine, mod, bgRect, bgMatrix);
+                  mod.FPDFPage_InsertObject(pageHandle, bgRect);
+                }
+              }
+            }
 
             setPageObjectMatrix(engine, mod, textObjHandle, segMatrix);
             mod.FPDFPage_InsertObject(pageHandle, textObjHandle);
