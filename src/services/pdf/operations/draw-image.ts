@@ -1,5 +1,5 @@
 import type { PdfiumEngine } from '../../../core/pdfium-engine';
-import { setPageObjectMatrix } from '../../../core/pdfium-helpers';
+import { setPageObjectMatrix, getPageCropInfo } from '../../../core/pdfium-helpers';
 import { buildTransformMatrix } from '../utils';
 import type { ImageOptions } from './types';
 
@@ -23,6 +23,8 @@ export function drawImage(
 ): void {
   const mod = engine.getModule();
   const pageHeight = mod.FPDF_GetPageHeightF(pageHandle);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const cropOffset = cropInfo.hasCropBox ? { cropX: cropInfo.cropLeft, cropY: cropInfo.cropBottom } : undefined;
   const { width: imgW, height: imgH, imgData } = options.imageData;
   const rgba = imgData.data;
   const pixelCount = imgW * imgH;
@@ -62,6 +64,18 @@ export function drawImage(
             renderW = (options.height || imgH) * imgRatio;
             renderX = options.x + ((options.width || imgW) - renderW) / 2;
           }
+        } else if (options.objectFit === 'cover') {
+          const imgRatio = imgW / imgH;
+          const boxRatio = (options.width || imgW) / (options.height || imgH);
+          if (imgRatio > boxRatio) {
+            renderH = options.height;
+            renderW = options.height * imgRatio;
+            renderX = options.x - (renderW - options.width) / 2;
+          } else {
+            renderW = options.width;
+            renderH = options.width / imgRatio;
+            renderY = options.y - (renderH - options.height) / 2;
+          }
         }
         
         const imgBaseMatrix = buildTransformMatrix(
@@ -72,7 +86,8 @@ export function drawImage(
           pageHeight,
           options.rotation || 0,
           options.flipX || false,
-          options.flipY || false
+          options.flipY || false,
+          cropOffset
         );
         
         const imageMatrix = {
