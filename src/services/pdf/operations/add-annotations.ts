@@ -4,7 +4,7 @@ import { parseColor } from '../utils';
 import type { ShapeOptions, PathOptions } from './types';
 
 const FPDF_ANNOT_TEXT = 1;
-const FPDF_ANNOT_HIGHLIGHT = 8;
+const FPDF_ANNOT_HIGHLIGHT = 9;
 const FPDF_ANNOT_INK = 15;
 
 /**
@@ -45,42 +45,84 @@ export function addHighlightAnnotation(
 
   const width = options.width || 0;
   const height = options.height || 0;
+  const rotation = options.rotation || 0;
+  const flipX = options.flipX || false;
+  const flipY = options.flipY || false;
+
+  // Centre: (cx, cy) = (x + width/2, y + height/2) in page coords
+  const cx = options.x + width / 2;
+  const cy = options.y + height / 2;
+
+  const rad = (rotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+
+  const corners = [
+    { px: options.x, py: options.y }, // TL
+    { px: options.x + width, py: options.y }, // TR
+    { px: options.x, py: options.y + height }, // BL
+    { px: options.x + width, py: options.y + height } // BR
+  ];
+
+  const rotatedCorners = corners.map(corner => {
+    let dx = corner.px - cx;
+    let dy = corner.py - cy;
+    if (flipX) dx = -dx;
+    if (flipY) dy = -dy;
+
+    const rx = cx + dx * cos - dy * sin;
+    const ry = cy + dx * sin + dy * cos;
+    return { x: rx, pdfY: pageHeight - ry };
+  });
+
+  const TL = rotatedCorners[0];
+  const TR = rotatedCorners[1];
+  const BL = rotatedCorners[2];
+  const BR = rotatedCorners[3];
+
+  let minX = TL.x;
+  let maxX = TL.x;
+  let minPdfY = TL.pdfY;
+  let maxPdfY = TL.pdfY;
+
+  for (const corner of rotatedCorners) {
+    minX = Math.min(minX, corner.x);
+    maxX = Math.max(maxX, corner.x);
+    minPdfY = Math.min(minPdfY, corner.pdfY);
+    maxPdfY = Math.max(maxPdfY, corner.pdfY);
+  }
 
   // Set Bounding Box
-  const rectPtr = createRect(engine, options.x, options.y, width, height, pageHeight);
+  const rectPtr = engine.allocateMemory(16); // 4 floats
+  const heap = mod.pdfium.HEAPF32;
+  heap[rectPtr >> 2] = minX;
+  heap[(rectPtr >> 2) + 1] = minPdfY;
+  heap[(rectPtr >> 2) + 2] = maxX;
+  heap[(rectPtr >> 2) + 3] = maxPdfY;
   mod.FPDFAnnot_SetRect(annotHandle, rectPtr);
   engine.freeMemory(rectPtr);
 
-  // Set Color
+  // Set colour (/C dictionary entry per ISO 32000-1)
   const fill = parseColor(options.fill || '#ffff00');
-  mod.FPDFAnnot_SetColor(annotHandle, 1, fill.r, fill.g, fill.b, fill.a);
+  const alpha = typeof options.opacity === 'number' ? Math.round(options.opacity * 255) : fill.a;
+  mod.FPDFAnnot_SetColor(annotHandle, 0, fill.r, fill.g, fill.b, alpha);
 
   // Set Flags (Print = 4)
   if (mod.FPDFAnnot_SetFlags) {
     mod.FPDFAnnot_SetFlags(annotHandle, 4);
   }
 
-  // Note: Highlight annotations technically require QuadPoints to correctly select text.
-  // FPDFAnnot_AppendAttachmentPoints adds a quadpoint based on 4 points (8 floats).
-  const quadPtr = engine.allocateMemory(32); // 8 floats
-  const heap = mod.pdfium.HEAPF32;
-  
-  // Point order for QuadPoints: bottom-left, bottom-right, top-right, top-left
-  // Actually PDF specification requires: x1 y1 x2 y2 x3 y3 x4 y4 (in counter-clockwise or specific order)
   // Standard QuadPoints order: TopLeft, TopRight, BottomLeft, BottomRight
-  const left = options.x;
-  const right = options.x + width;
-  const top = pageHeight - options.y;
-  const bottom = pageHeight - (options.y + height);
-
-  heap[quadPtr >> 2] = left;
-  heap[(quadPtr >> 2) + 1] = top;
-  heap[(quadPtr >> 2) + 2] = right;
-  heap[(quadPtr >> 2) + 3] = top;
-  heap[(quadPtr >> 2) + 4] = left;
-  heap[(quadPtr >> 2) + 5] = bottom;
-  heap[(quadPtr >> 2) + 6] = right;
-  heap[(quadPtr >> 2) + 7] = bottom;
+  const quadPtr = engine.allocateMemory(32); // 8 floats
+  
+  heap[quadPtr >> 2] = TL.x;
+  heap[(quadPtr >> 2) + 1] = TL.pdfY;
+  heap[(quadPtr >> 2) + 2] = TR.x;
+  heap[(quadPtr >> 2) + 3] = TR.pdfY;
+  heap[(quadPtr >> 2) + 4] = BL.x;
+  heap[(quadPtr >> 2) + 5] = BL.pdfY;
+  heap[(quadPtr >> 2) + 6] = BR.x;
+  heap[(quadPtr >> 2) + 7] = BR.pdfY;
 
   if (mod.FPDFAnnot_AppendAttachmentPoints) {
     mod.FPDFAnnot_AppendAttachmentPoints(annotHandle, quadPtr);
@@ -124,24 +166,24 @@ export function addInkAnnotation(
   }
 
   const strokeWidth = options.strokeWidth || 1;
-  // Use generous padding to prevent clipping at miter joins and sharp angles.
-  const padding = strokeWidth * 1.5;
+  // Use generous padding to prevent clipping at mitre joins and sharp angles.
+  const padding = Math.max(strokeWidth * 2, 8);
   
   const rectPtr = createRect(
     engine, 
     minX - padding, 
     minY - padding, 
-    (maxX - minX) + strokeWidth, 
-    (maxY - minY) + strokeWidth, 
+    (maxX - minX) + padding * 2, 
+    (maxY - minY) + padding * 2, 
     pageHeight
   );
   mod.FPDFAnnot_SetRect(annotHandle, rectPtr);
   engine.freeMemory(rectPtr);
 
-  // Set Color
+  // Set colour (/C dictionary entry per ISO 32000-1)
   const stroke = parseColor(options.stroke || '#000000');
   const alpha = typeof options.opacity === 'number' ? Math.round(options.opacity * 255) : stroke.a;
-  mod.FPDFAnnot_SetColor(annotHandle, 1, stroke.r, stroke.g, stroke.b, alpha);
+  mod.FPDFAnnot_SetColor(annotHandle, 0, stroke.r, stroke.g, stroke.b, alpha);
   
   // Set Flags (Print = 4)
   if (mod.FPDFAnnot_SetFlags) {
@@ -207,8 +249,9 @@ export function addTextAnnotation(
   mod.FPDFAnnot_SetRect(annotHandle, rectPtr);
   engine.freeMemory(rectPtr);
 
+  // Set colour (/C dictionary entry per ISO 32000-1)
   const col = parseColor(options.color || '#fef08a');
-  mod.FPDFAnnot_SetColor(annotHandle, 1, col.r, col.g, col.b, col.a);
+  mod.FPDFAnnot_SetColor(annotHandle, 0, col.r, col.g, col.b, col.a);
 
   if (mod.FPDFAnnot_SetFlags) {
     mod.FPDFAnnot_SetFlags(annotHandle, 4);
