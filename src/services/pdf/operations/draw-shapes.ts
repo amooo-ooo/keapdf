@@ -1,5 +1,5 @@
 import type { PdfiumEngine } from '../../../core/pdfium-engine';
-import { setPageObjectMatrix } from '../../../core/pdfium-helpers';
+import { setPageObjectMatrix, getPageCropInfo } from '../../../core/pdfium-helpers';
 import { parseColor, buildTransformMatrix } from '../utils';
 import type { ShapeOptions } from './types';
 
@@ -17,6 +17,8 @@ export function drawRectangle(
 ): void {
   const mod = engine.getModule();
   const pageHeight = mod.FPDF_GetPageHeightF(pageHandle);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const cropOffset = cropInfo.hasCropBox ? { cropX: cropInfo.cropLeft, cropY: cropInfo.cropBottom } : undefined;
   const fill = parseColor(options.fill || 'transparent');
   const stroke = parseColor(options.stroke || '#000000');
   const strokeWidth = options.strokeWidth || 0;
@@ -40,7 +42,8 @@ export function drawRectangle(
       pageHeight,
       options.rotation || 0,
       options.flipX || false,
-      options.flipY || false
+      options.flipY || false,
+      cropOffset
     );
     
     setPageObjectMatrix(engine, mod, rectObj, matrix);
@@ -62,6 +65,8 @@ export function drawCircle(
 ): void {
   const mod = engine.getModule();
   const pageHeight = mod.FPDF_GetPageHeightF(pageHandle);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const cropOffset = cropInfo.hasCropBox ? { cropX: cropInfo.cropLeft, cropY: cropInfo.cropBottom } : undefined;
   const fill = parseColor(options.fill || 'transparent');
   const stroke = parseColor(options.stroke || '#000000');
   const strokeWidth = options.strokeWidth || 0;
@@ -99,7 +104,8 @@ export function drawCircle(
       pageHeight,
       options.rotation || 0,
       options.flipX || false,
-      options.flipY || false
+      options.flipY || false,
+      cropOffset
     );
     
     setPageObjectMatrix(engine, mod, pathObj, matrix);
@@ -121,6 +127,8 @@ export function drawLine(
 ): void {
   const mod = engine.getModule();
   const pageHeight = mod.FPDF_GetPageHeightF(pageHandle);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const cropOffset = cropInfo.hasCropBox ? { cropX: cropInfo.cropLeft, cropY: cropInfo.cropBottom } : undefined;
   const stroke = parseColor(options.stroke || '#000000');
   const strokeWidth = options.strokeWidth || 0;
   const width = options.width || 0;
@@ -143,7 +151,8 @@ export function drawLine(
       pageHeight,
       options.rotation || 0,
       options.flipX || false,
-      options.flipY || false
+      options.flipY || false,
+      cropOffset
     );
     
     setPageObjectMatrix(engine, mod, pathObj, matrix);
@@ -165,6 +174,8 @@ export function drawArrow(
 ): void {
   const mod = engine.getModule();
   const pageHeight = mod.FPDF_GetPageHeightF(pageHandle);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const cropOffset = cropInfo.hasCropBox ? { cropX: cropInfo.cropLeft, cropY: cropInfo.cropBottom } : undefined;
   const stroke = parseColor(options.stroke || '#000000');
   const strokeWidth = options.strokeWidth || 0;
   const width = options.width || 0;
@@ -178,7 +189,8 @@ export function drawArrow(
     pageHeight,
     options.rotation || 0,
     options.flipX || false,
-    options.flipY || false
+    options.flipY || false,
+    cropOffset
   );
   
   const pathObj = mod.FPDFPageObj_CreateNewPath(0, height / 2);
@@ -221,6 +233,8 @@ export function drawPath(
 ): void {
   const mod = engine.getModule();
   const pageHeight = mod.FPDF_GetPageHeightF(pageHandle);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const cropOffset = cropInfo.hasCropBox ? { cropX: cropInfo.cropLeft, cropY: cropInfo.cropBottom } : undefined;
   const stroke = parseColor(options.stroke || '#000000');
   const strokeWidth = options.strokeWidth || 0;
   
@@ -262,7 +276,8 @@ export function drawPath(
       pageHeight,
       options.rotation || 0,
       options.flipX || false,
-      options.flipY !== undefined ? !options.flipY : true // Default to true to invert Y-axis for PDF space
+      options.flipY !== undefined ? !options.flipY : true, // Default to true to invert Y-axis for PDF space
+      cropOffset
     );
     
     setPageObjectMatrix(engine, mod, pathObj, matrix);
