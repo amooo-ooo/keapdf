@@ -753,3 +753,255 @@ export function findCharacterAt(
     const inY = y >= c.domTop - toleranceY && y <= c.domBottom + toleranceY;
 
     if (inX && inY) {
+      const centerX = (c.domLeft + c.domRight) / 2;
+      const centerY = (c.domTop + c.domBottom) / 2;
+      const distSq = (x - centerX) ** 2 + (y - centerY) ** 2;
+      if (distSq < minDistanceSq) {
+        minDistanceSq = distSq;
+        bestMatch = c;
+      }
+    }
+  }
+
+  return bestMatch;
+}
+
+/**
+ * Finds the character closest to the given coordinates during drag selection.
+ * First selects the closest text line, then finds the closest character on that line.
+ *
+ * @param characters The array of all page characters.
+ * @param x Horizontal page coordinate.
+ * @param y Vertical page coordinate.
+ * @return The closest PageCharacter or null if characters list is empty.
+ */
+export function findClosestCharacter(
+  characters: PageCharacter[],
+  x: number,
+  y: number
+): PageCharacter | null {
+  if (characters.length === 0) return null;
+
+  let closestChar: PageCharacter | null = null;
+  let minDistanceSq = Infinity;
+
+  for (const c of characters) {
+    const dx = x < c.domLeft ? c.domLeft - x : x > c.domRight ? x - c.domRight : 0;
+    const dy = y < c.domTop ? c.domTop - y : y > c.domBottom ? y - c.domBottom : 0;
+    const distSq = dx * dx + dy * dy;
+
+    if (distSq < minDistanceSq) {
+      minDistanceSq = distSq;
+      closestChar = c;
+    }
+  }
+
+  return closestChar;
+}
+
+/**
+ * Permanently removes all text objects within the specified DOM bounding rectangles
+ * from the PDF page content stream and regenerates page content.
+ *
+ * @param engine The PDFium engine instance.
+ * @param pageHandle Handle to the active page.
+ * @param rects Array of bounding rectangles in DOM coordinates.
+ * @return True if page content was modified.
+ */
+export function removeTextInRects(
+  engine: PdfiumEngine,
+  pageHandle: number,
+  rects: HighlightRect[]
+): boolean {
+  if (rects.length === 0) return false;
+  const mod = engine.getModule();
+  const didRemove = removeTextObjectsInRects(engine, mod, pageHandle, rects);
+  if (didRemove) {
+    mod.FPDFPage_GenerateContent(pageHandle);
+  }
+  return didRemove;
+}
+
+/**
+ * Permanently redacts only the characters in the specified character range [startCharIndex, endCharIndex]
+ * from the PDF page content stream.
+ *
+ * Uses center-containment span matching and character-level replacement to ensure that
+ * only the selected characters are removed, leaving neighboring text and surrounding
+ * spans completely intact.
+ *
+ * @param engine The PDFium engine instance.
+ * @param docHandle The active document handle.
+ * @param pageIndex Zero-based page index.
+ * @param pageHandle The active page handle.
+ * @param startCharIndex Starting character index (inclusive).
+ * @param endCharIndex Ending character index (inclusive).
+ * @return True if page content was modified.
+ */
+export function redactTextRange(
+  engine: PdfiumEngine,
+  _docHandle: number,
+  pageIndex: number,
+  pageHandle: number,
+  startCharIndex: number,
+  endCharIndex: number
+): boolean {
+  const mod = engine.getModule();
+  const minIndex = Math.min(startCharIndex, endCharIndex);
+  const maxIndex = Math.max(startCharIndex, endCharIndex);
+
+  const spans = extractEditableSpans(engine, pageIndex, pageHandle);
+  let modified = false;
+
+  const handledCharIndices = new Set<number>();
+
+  for (const span of spans) {
+    const spanStart = span.charStartIndex;
+    const spanEnd = span.charStartIndex + span.charCount - 1;
+
+    // Check if span has any overlap with the selected redaction range
+    if (spanEnd < minIndex || spanStart > maxIndex) {
+      // No overlap: leave completely untouched to preserve neighbors
+      continue;
+    }
+
+    if (spanStart >= minIndex && spanEnd <= maxIndex) {
+      // Full overlap: entire span is redacted
+      const objectIndices = findTextObjectIndicesForSpan(
+        engine,
+        mod,
+        pageHandle,
+        span.left,
+        span.baselineY,
+        span.width,
+        span.fontSize
+      );
+
+      if (objectIndices.length > 0) {
+        removeTextObjectsByIndex(mod, pageHandle, objectIndices);
+      } else {
+        removeTextObjectsInBounds(
+          engine,
+          mod,
+          pageHandle,
+          span.left,
+          span.baselineY,
+          span.width,
+          span.fontSize
+        );
+      }
+      modified = true;
+      for (let c = spanStart; c <= spanEnd; c++) {
+        handledCharIndices.add(c);
+      }
+    } else {
+      // Partial overlap: only some characters in this span are redacted
+      let pdfCharIdx = spanStart;
+      const targetLines = span.lines && span.lines.length > 0 ? span.lines : [{
+        left: span.left,
+        baselineY: span.baselineY,
+        width: span.width,
+        fontSize: span.fontSize,
+        text: span.text
+      }];
+
+      for (const line of targetLines) {
+        if (!line.text) continue;
+        
+        const lineChars = Array.from(line.text);
+        let hasRedactedChars = false;
+        
+        const updatedChars = lineChars.map((ch) => {
+          if (ch === '\n' || ch === '\r') {
+            return ch;
+          }
+          const cIdx = pdfCharIdx++;
+          if (cIdx >= minIndex && cIdx <= maxIndex) {
+            hasRedactedChars = true;
+            handledCharIndices.add(cIdx);
+            return ' ';
+          }
+          return ch;
+        });
+
+        if (hasRedactedChars) {
+          const updatedText = updatedChars.join('');
+          const objectIndices = findTextObjectIndicesForSpan(
+            engine,
+            mod,
+            pageHandle,
+            line.left,
+            line.baselineY,
+            line.width,
+            line.fontSize
+          );
+
+          if (objectIndices.length > 0) {
+            setTextObjectByIndex(engine, mod, pageHandle, objectIndices[0], updatedText);
+            for (let k = 1; k < objectIndices.length; k++) {
+              setTextObjectByIndex(engine, mod, pageHandle, objectIndices[k], ' ');
+            }
+            modified = true;
+          } else {
+            // Spatial fallback
+            const didSet = setTextObjectInBounds(
+              engine,
+              mod,
+              pageHandle,
+              line.left,
+              line.baselineY,
+              line.width,
+              line.fontSize,
+              updatedText
+            );
+            if (didSet) {
+              modified = true;
+            }
+          }
+        } else {
+          // Still increment pdfCharIdx for untouched lines
+          for (const ch of lineChars) {
+            if (ch !== '\n' && ch !== '\r') pdfCharIdx++;
+          }
+        }
+      }
+    }
+  }
+
+  if (modified) {
+    mod.FPDFPage_GenerateContent(pageHandle);
+  }
+
+  // Handle any remaining standalone characters in the selection that were not in clustered spans
+  const allCharacters = extractPageCharacters(engine, pageIndex, pageHandle);
+  const remainingChars = allCharacters.filter(
+    (c) => c.charIndex >= minIndex && c.charIndex <= maxIndex && !handledCharIndices.has(c.charIndex)
+  );
+
+  for (const char of remainingChars) {
+    const objectIndices = findTextObjectIndicesForSpan(
+      engine,
+      mod,
+      pageHandle,
+      char.left,
+      char.originY,
+      Math.max(1, char.right - char.left),
+      char.fontSize
+    );
+    if (objectIndices.length > 0) {
+      setTextObjectByIndex(engine, mod, pageHandle, objectIndices[0], ' ');
+      for (let k = 1; k < objectIndices.length; k++) {
+        setTextObjectByIndex(engine, mod, pageHandle, objectIndices[k], ' ');
+      }
+      modified = true;
+    }
+  }
+
+  if (modified) {
+    mod.FPDFPage_GenerateContent(pageHandle);
+  }
+
+  return modified;
+}
+
+
