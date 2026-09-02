@@ -4,6 +4,7 @@ import type {
   EditableTextSpan,
   StandardFontName,
   TextMutationOptions,
+  TextLine,
   TextWord,
 } from '../../../core/types';
 import {
@@ -15,11 +16,13 @@ import {
   findTextObjectIndicesForSpan,
   removeTextObjectsByIndex,
   setTextObjectByIndex,
+  getPageObjectMatrix,
 } from '../../../core/pdfium-helpers';
 import { FontCharsetIndex, extractBaseFontFamily } from '../font-charset-index';
-import { isColorEqual, sanitizePdfText } from '../utils';
+import { isColorEqual, sanitizePdfText, parseColor } from '../utils';
 import { detectParagraphs } from './paragraph-detector';
 import { resolveStandardFont } from './draw-text';
+import { UNICODE_TRAILING_WS_REGEX, UNICODE_LEADING_WS_REGEX, findBestMatchingOrigLine } from '../../../utils/text-range-utils';
 
 /**
  * Result metrics returned after reflowing a paragraph.
@@ -80,6 +83,10 @@ export function wrapTextToWidth(
   fontName: StandardFontName
 ): string[] {
   const effectiveWidth = Math.max(30, maxWidth);
+  // Typographic advance tolerance: character ink bounding boxes are narrower than
+  // font advance metrics by glyph sidebearings. Add tolerance so that normal
+  // advance width discrepancies never prematurely word-wrap the last word of a line.
+  const advanceTolerance = Math.max(4, fontSize * 0.35);
   const rawParagraphs = text.split(/\r?\n/);
   const resultLines: string[] = [];
 
@@ -91,7 +98,7 @@ export function wrapTextToWidth(
     }
 
     const fullLineWidth = calculateTextWidth(trimmedPara, fontSize, fontName);
-    if (fullLineWidth <= effectiveWidth) {
+    if (fullLineWidth <= effectiveWidth + advanceTolerance) {
       resultLines.push(trimmedPara);
       continue;
     }
@@ -106,25 +113,28 @@ export function wrapTextToWidth(
     const words: string[] = [];
     for (const w of rawWords) {
       const wWidth = calculateTextWidth(w, fontSize, fontName);
-      if (wWidth > effectiveWidth) {
+      if (wWidth > effectiveWidth + advanceTolerance) {
         words.push(...breakLongWord(w, effectiveWidth, fontSize, fontName));
       } else {
         words.push(w);
       }
     }
 
+    const spaceWidth = calculateTextWidth(' ', fontSize, fontName);
     let currentLine = words[0];
+    let currentLineWidth = calculateTextWidth(words[0], fontSize, fontName);
 
     for (let i = 1; i < words.length; i++) {
       const nextWord = words[i];
-      const testLine = `${currentLine} ${nextWord}`;
-      const testWidth = calculateTextWidth(testLine, fontSize, fontName);
+      const nextWordWidth = calculateTextWidth(nextWord, fontSize, fontName);
 
-      if (testWidth <= effectiveWidth) {
-        currentLine = testLine;
+      if (currentLineWidth + spaceWidth + nextWordWidth <= effectiveWidth + advanceTolerance) {
+        currentLine = `${currentLine} ${nextWord}`;
+        currentLineWidth += spaceWidth + nextWordWidth;
       } else {
         resultLines.push(currentLine);
         currentLine = nextWord;
+        currentLineWidth = nextWordWidth;
       }
     }
 
@@ -180,15 +190,84 @@ export function reflowAndReplaceParagraph(
   const firstLineTextLeft = targetParagraph.lines && targetParagraph.lines.length > 0
     ? targetParagraph.lines[0].left
     : (isTargetBullet ? targetParagraph.bulletWord!.right + 6 : targetLeft);
+  const firstLineIndent = Math.max(0, firstLineTextLeft - targetLeft);
 
-  const wrapWidth = isTargetBullet
-    ? Math.max(20, targetParagraph.width - Math.max(0, firstLineTextLeft - targetParagraph.left))
-    : targetParagraph.width;
+  const isSingleLineText =
+    !targetParagraph.isParagraph &&
+    (!targetParagraph.lines || targetParagraph.lines.length <= 1) &&
+    !updatedText.includes('\n');
+
+  let wrapWidth: number;
+  if (isTargetBullet) {
+    wrapWidth = Math.max(20, targetParagraph.width - Math.max(0, firstLineTextLeft - targetParagraph.left));
+  } else if (isSingleLineText) {
+    const pageWidth = mod.FPDF_GetPageWidthF(pageHandle);
+    const maxAvailableWidth = Math.max(targetParagraph.width, Math.min(pageWidth - targetParagraph.left - 36, 500));
+    wrapWidth = maxAvailableWidth;
+  } else {
+    const wrapBuffer = Math.max(6, updatedFontSize * 0.5);
+    wrapWidth = targetParagraph.width + wrapBuffer;
+  }
 
   // 1. Wrap text into lines fitting column width
-  const reflowedLines = isDeletion
-    ? []
-    : wrapTextToWidth(updatedText, wrapWidth, updatedFontSize, standardFontName);
+  interface ReflowedLineItem {
+    text: string;
+    sourceLine?: TextLine;
+    isContinuation: boolean;
+  }
+  let reflowedItems: ReflowedLineItem[];
+  const firstLineWidth = Math.max(20, wrapWidth - firstLineIndent);
+  if (isDeletion) {
+    reflowedItems = [];
+  } else if (options.lines && options.lines.length > 0) {
+    reflowedItems = [];
+    for (let idx = 0; idx < options.lines.length; idx++) {
+      const l = options.lines[idx];
+      const lineText = l.text ? l.text.replace(/[\r\n]+/g, ' ').trim() : '';
+      if (!lineText) continue;
+      const lineWrapW = idx === 0 ? firstLineWidth : wrapWidth;
+      const wrapped = wrapTextToWidth(lineText, lineWrapW, updatedFontSize, standardFontName).filter((s) => s.trim().length > 0);
+      for (let wIdx = 0; wIdx < wrapped.length; wIdx++) {
+        reflowedItems.push({
+          text: wrapped[wIdx],
+          sourceLine: l,
+          isContinuation: wIdx > 0,
+        });
+      }
+    }
+  } else if (updatedText.includes('\n')) {
+    reflowedItems = [];
+    const rawSegments = updatedText.split(/\r?\n/);
+    for (let idx = 0; idx < rawSegments.length; idx++) {
+      const trimmedSegment = rawSegments[idx].trim();
+      if (!trimmedSegment) continue;
+      const lineWrapW = idx === 0 ? firstLineWidth : wrapWidth;
+      const wrapped = wrapTextToWidth(trimmedSegment, lineWrapW, updatedFontSize, standardFontName).filter((s) => s.trim().length > 0);
+      const srcLine = findBestMatchingOrigLine(trimmedSegment, targetParagraph.lines, idx) || targetParagraph.lines?.[Math.min(idx, (targetParagraph.lines?.length || 1) - 1)];
+      for (let wIdx = 0; wIdx < wrapped.length; wIdx++) {
+        reflowedItems.push({
+          text: wrapped[wIdx],
+          sourceLine: srcLine,
+          isContinuation: wIdx > 0,
+        });
+      }
+    }
+  } else {
+    reflowedItems = [];
+    const initialWrapped = wrapTextToWidth(updatedText.trim(), firstLineWidth, updatedFontSize, standardFontName).filter((s) => s.trim().length > 0);
+    const srcLine = targetParagraph.lines?.[0];
+    if (initialWrapped.length > 1) {
+      reflowedItems.push({ text: initialWrapped[0], sourceLine: srcLine, isContinuation: false });
+      const restText = initialWrapped.slice(1).join(' ');
+      const restWrapped = wrapTextToWidth(restText, wrapWidth, updatedFontSize, standardFontName).filter((s) => s.trim().length > 0);
+      for (const w of restWrapped) {
+        reflowedItems.push({ text: w, sourceLine: srcLine, isContinuation: true });
+      }
+    } else if (initialWrapped.length === 1) {
+      reflowedItems.push({ text: initialWrapped[0], sourceLine: srcLine, isContinuation: false });
+    }
+  }
+  const reflowedLines: string[] = reflowedItems.map((item) => item.text);
 
   // 2. Compute height and line change
   const targetLines: Array<{
@@ -235,10 +314,27 @@ export function reflowAndReplaceParagraph(
     (options.lines && options.lines.some((l) => Math.abs(l.fontSize - options.lines![0].fontSize) > 0.2)) ||
     (options.lines && options.lines.some((l) => l.words && l.words.some((w) => Math.abs(w.fontSize - l.words[0].fontSize) > 0.2)));
 
-  // -- IN-PLACE SUBSET PRESERVATION PATH --
-  // If font properties are unchanged, no mixed font sizes, and line count matches, try in-place edit using embedded font
+  // Check if options lines contain words with distinct styles (weights, styles, colors)
+  const hasMixedStyleWords = Boolean(
+    options.lines &&
+    options.lines.some(
+      (l) =>
+        l.words &&
+        l.words.some(
+          (w) =>
+            (w.fontWeight && w.fontWeight !== (targetParagraph.fontWeight || 'normal')) ||
+            (w.fontStyle && w.fontStyle !== (targetParagraph.fontStyle || 'normal')) ||
+            (w.color && !isColorEqual(w.color, targetParagraph.color)) ||
+            Boolean(w.backgroundColor)
+        )
+    )
+  );
+
+  // In-place subset preservation path
+  // If font properties are unchanged, no mixed font sizes or styles, and line count matches, try in-place edit using embedded font
   const isOnlyTextChanged =
     !hasMixedFontSize &&
+    !hasMixedStyleWords &&
     (options.fontSize === undefined || Math.abs(options.fontSize - targetParagraph.fontSize) < 0.1) &&
     (options.fontFamily === undefined ||
       options.fontFamily === targetParagraph.fontFamily ||
@@ -263,7 +359,7 @@ export function reflowAndReplaceParagraph(
           engine, mod, pageHandle,
           line.left, line.baselineY, line.width, line.fontSize
         );
-        if (lineIndices.length === 0) {
+        if (lineIndices.length !== 1) {
           allUpdated = false;
           break;
         }
@@ -300,9 +396,10 @@ export function reflowAndReplaceParagraph(
       const isBelow = s.top >= targetParagraph.top + targetParagraph.height - 4.0 || s.baselineY < targetParagraph.baselineY - (oldLineCount - 1) * lineHeight - 4.0;
       if (!isBelow) return false;
 
-      // Column overlap check
+      // Column overlap check: require positive overlap and substantial width coverage
+      const minColWidth = Math.min(s.width, targetParagraph.width);
       const overlap = Math.min(s.left + s.width, targetParagraph.left + targetParagraph.width) - Math.max(s.left, targetParagraph.left);
-      return overlap > -25.0;
+      return overlap > 15.0 && overlap > minColWidth * 0.25;
     })
     .sort((a, b) => a.top - b.top);
 
@@ -349,84 +446,135 @@ export function reflowAndReplaceParagraph(
 
   // 5. Insert reflowed replacement lines for target paragraph
   let fontHandle = 0;
+  const newObjectHandles = new Set<number>();
   try {
     if (!isDeletion && reflowedLines.length > 0) {
       fontHandle = mod.FPDFText_LoadStandardFont(docHandle, standardFontName);
       if (!fontHandle) fontHandle = mod.FPDFText_LoadStandardFont(docHandle, 'Helvetica');
 
-      for (let i = 0; i < reflowedLines.length; i++) {
-        const lineText = reflowedLines[i];
+      const standardFontCache = new Map<string, number>();
+      if (standardFontName && fontHandle) {
+        standardFontCache.set(standardFontName, fontHandle);
+      }
+      const getStandardFontHandle = (name: string): number => {
+        let h = standardFontCache.get(name);
+        if (!h) {
+          h = mod.FPDFText_LoadStandardFont(docHandle, name) || fontHandle;
+          standardFontCache.set(name, h);
+        }
+        return h;
+      };
+
+      let renderedLineIdx = 0;
+      for (let i = 0; i < reflowedItems.length; i++) {
+        const item = reflowedItems[i];
+        const lineText = item.text;
         if (lineText.trim().length === 0) continue;
 
         // Use direct PDF baseline coordinates
-        const lineBaselineY = targetParagraph.baselineY - i * lineHeight;
+        const lineBaselineY = targetParagraph.baselineY - renderedLineIdx * lineHeight;
 
-        const origLine = options.lines?.[i] || (targetParagraph.lines && targetParagraph.lines[i] ? targetParagraph.lines[i] : undefined);
+        const origLine = item.sourceLine || findBestMatchingOrigLine(lineText, options.lines || targetParagraph.lines, renderedLineIdx) || options.lines?.[renderedLineIdx] || (targetParagraph.lines && targetParagraph.lines[renderedLineIdx] ? targetParagraph.lines[renderedLineIdx] : undefined);
+        renderedLineIdx++;
 
         let lineLeft = targetLeft;
-        if (isTargetBullet) {
+        if (isTargetBullet && renderedLineIdx === 1) {
           lineLeft = firstLineTextLeft;
         } else if (options.left !== undefined) {
           lineLeft = options.left;
+        } else if (origLine && origLine.left !== undefined) {
+          lineLeft = origLine.left;
         } else {
           lineLeft = targetLeft;
         }
 
-        const hasMultiStyleWords =
-          origLine &&
-          origLine.words &&
-          origLine.words.length > 1 &&
-          origLine.words.some(
-            (w) =>
-              Math.abs(w.fontSize - origLine.words[0].fontSize) > 0.2 ||
-              (w.fontWeight && w.fontWeight !== origLine.words[0].fontWeight) ||
-              (w.color && origLine.words[0].color && !isColorEqual(w.color, origLine.words[0].color))
-          );
+        const isExactLineWords = Boolean(origLine?.words && !item.isContinuation && origLine.text === lineText);
+        const wordsToRender = isExactLineWords
+          ? origLine?.words
+          : (origLine?.words ? origLine.words.filter((w: TextWord) => lineText.includes(w.text)) : undefined);
 
-        if (hasMultiStyleWords && origLine.words) {
+        const hasMultiStyleWords =
+          Boolean(wordsToRender &&
+          wordsToRender.length > 1 &&
+          wordsToRender.some(
+            (w: TextWord) =>
+              Math.abs(w.fontSize - wordsToRender[0].fontSize) > 0.2 ||
+              (w.fontWeight && w.fontWeight !== wordsToRender[0].fontWeight) ||
+              (w.fontStyle && w.fontStyle !== wordsToRender[0].fontStyle) ||
+              (w.color && wordsToRender[0].color && !isColorEqual(w.color, wordsToRender[0].color))
+          ));
+
+        if (hasMultiStyleWords && wordsToRender) {
           // Draw individual styled words to preserve multiple distinct font sizes and colors on the line
           let currentWordX = lineLeft;
-          for (let wIdx = 0; wIdx < origLine.words.length; wIdx++) {
-            const word = origLine.words[wIdx];
-            if (wIdx > 0) {
-              const prevWord = origLine.words[wIdx - 1];
-              const gap = word.left - prevWord.right;
-              const minFs = Math.min(prevWord.fontSize, word.fontSize);
-              if (gap >= minFs * 0.18) {
-                const spaceW = calculateTextWidth(' ', word.fontSize, standardFontName);
-                currentWordX += spaceW;
-              }
-            }
+          let lastRenderedWord: TextWord | null = null;
+          for (let wIdx = 0; wIdx < wordsToRender.length; wIdx++) {
+            const word = wordsToRender[wIdx];
             const cleanWord = sanitizePdfText(word.text);
             if (!cleanWord || cleanWord.length === 0) continue;
+
+            let needsSpace = false;
+            if (lastRenderedWord) {
+              const gap = word.left - lastRenderedWord.right;
+              const minFs = Math.min(lastRenderedWord.fontSize, word.fontSize);
+              const endsWithWs = UNICODE_TRAILING_WS_REGEX.test(lastRenderedWord.text);
+              const startsWithWs = UNICODE_LEADING_WS_REGEX.test(cleanWord);
+              needsSpace =
+                !endsWithWs &&
+                !startsWithWs &&
+                (Boolean(word.hasPrecedingSpace) || gap >= minFs * 0.12 || gap >= 0.5);
+            }
 
             const wordFontSize = options.fontSize !== undefined && Math.abs(options.fontSize - targetParagraph.fontSize) > 0.1
               ? Math.max(1, word.fontSize * (options.fontSize / targetParagraph.fontSize))
               : word.fontSize;
 
             const wordFontName = resolveStandardFont(
-              word.fontFamily || origLine.fontFamily || rawFontName,
-              word.rawFontFamily || origLine.rawFontFamily || targetParagraph.rawFontFamily,
-              (word.fontWeight as 'bold' | 'normal') || (origLine.fontWeight as 'bold' | 'normal') || options.fontWeight || (targetParagraph.fontWeight as 'bold' | 'normal'),
-              (word.fontStyle as 'italic' | 'normal') || (origLine.fontStyle as 'italic' | 'normal') || options.fontStyle || (targetParagraph.fontStyle as 'italic' | 'normal')
+              word.fontFamily || origLine?.fontFamily || rawFontName,
+              word.rawFontFamily || origLine?.rawFontFamily || targetParagraph.rawFontFamily,
+              (word.fontWeight as 'bold' | 'normal') || (origLine?.fontWeight as 'bold' | 'normal') || options.fontWeight || (targetParagraph.fontWeight as 'bold' | 'normal'),
+              (word.fontStyle as 'italic' | 'normal') || (origLine?.fontStyle as 'italic' | 'normal') || options.fontStyle || (targetParagraph.fontStyle as 'italic' | 'normal')
             );
-            let wordFontHandle = mod.FPDFText_LoadStandardFont(docHandle, wordFontName);
-            if (!wordFontHandle) wordFontHandle = fontHandle;
+            const wordFontHandle = getStandardFontHandle(wordFontName);
 
-            const wordBuf = encodeUtf16Le(engine, cleanWord);
+            // Prepend space glyph to encoded string when space is needed so PDFium creates explicit space character in stream
+            const spaceW = needsSpace ? calculateTextWidth(' ', wordFontSize, wordFontName) : 0;
+            const textToRender = needsSpace ? ` ${cleanWord}` : cleanWord;
+            const fullRenderedWidth = calculateTextWidth(textToRender, wordFontSize, wordFontName);
+            const wordWidthOnly = calculateTextWidth(cleanWord, wordFontSize, wordFontName);
+
+            const wordBgColorStr = word.backgroundColor || options.backgroundColor;
+            if (wordBgColorStr) {
+              const bgCol = parseColor(wordBgColorStr);
+              if (bgCol.a > 0) {
+                const rectBottom = Math.max(0, lineBaselineY - wordFontSize * 0.25);
+                const rectH = wordFontSize * 1.25;
+                const bgRect = mod.FPDFPageObj_CreateNewRect(currentWordX + spaceW, rectBottom, wordWidthOnly, rectH);
+                if (bgRect) {
+                  mod.FPDFPageObj_SetFillColor(bgRect, bgCol.r, bgCol.g, bgCol.b, bgCol.a);
+                  mod.FPDFPath_SetDrawMode(bgRect, 1, false);
+                  mod.FPDFPage_InsertObject(pageHandle, bgRect);
+                  newObjectHandles.add(bgRect);
+                }
+              }
+            }
+
+            const wordBuf = encodeUtf16Le(engine, textToRender);
             try {
               const wordObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, wordFontHandle, wordFontSize);
               if (wordObjHandle) {
                 mod.FPDFText_SetText(wordObjHandle, wordBuf.ptr);
-                const wCol = word.color || origLine.color || updatedColor;
+                const wCol = word.color || origLine?.color || updatedColor;
                 mod.FPDFPageObj_SetFillColor(wordObjHandle, wCol.r, wCol.g, wCol.b, wCol.a);
                 setPageObjectMatrix(engine, mod, wordObjHandle, translationMatrix(currentWordX, lineBaselineY));
                 mod.FPDFPage_InsertObject(pageHandle, wordObjHandle);
+                newObjectHandles.add(wordObjHandle);
               }
             } finally {
               wordBuf.dispose();
             }
-            currentWordX += calculateTextWidth(cleanWord, wordFontSize, wordFontName);
+            currentWordX += fullRenderedWidth;
+            lastRenderedWord = word;
           }
         } else {
           // Draw uniform single-style line
@@ -440,8 +588,24 @@ export function reflowAndReplaceParagraph(
             (origLine?.fontWeight as 'bold' | 'normal') || options.fontWeight || (targetParagraph.fontWeight as 'bold' | 'normal'),
             (origLine?.fontStyle as 'italic' | 'normal') || options.fontStyle || (targetParagraph.fontStyle as 'italic' | 'normal')
           );
-          let lineFontHandle = mod.FPDFText_LoadStandardFont(docHandle, lineFontName);
-          if (!lineFontHandle) lineFontHandle = fontHandle;
+          const lineFontHandle = getStandardFontHandle(lineFontName);
+
+          const lineBgColorStr = origLine?.backgroundColor || options.backgroundColor;
+          if (lineBgColorStr) {
+            const bgCol = parseColor(lineBgColorStr);
+            if (bgCol.a > 0) {
+              const lineWidth = calculateTextWidth(lineText, lineFontSize, lineFontName);
+              const rectBottom = Math.max(0, lineBaselineY - lineFontSize * 0.25);
+              const rectH = lineFontSize * 1.25;
+              const bgRect = mod.FPDFPageObj_CreateNewRect(lineLeft, rectBottom, lineWidth, rectH);
+              if (bgRect) {
+                mod.FPDFPageObj_SetFillColor(bgRect, bgCol.r, bgCol.g, bgCol.b, bgCol.a);
+                mod.FPDFPath_SetDrawMode(bgRect, 1, false);
+                mod.FPDFPage_InsertObject(pageHandle, bgRect);
+                newObjectHandles.add(bgRect);
+              }
+            }
+          }
 
           const textBuf = encodeUtf16Le(engine, lineText);
           try {
@@ -452,6 +616,7 @@ export function reflowAndReplaceParagraph(
               mod.FPDFPageObj_SetFillColor(textObjHandle, lineCol.r, lineCol.g, lineCol.b, lineCol.a);
               setPageObjectMatrix(engine, mod, textObjHandle, translationMatrix(lineLeft, lineBaselineY));
               mod.FPDFPage_InsertObject(pageHandle, textObjHandle);
+              newObjectHandles.add(textObjHandle);
             }
           } finally {
             textBuf.dispose();
@@ -462,6 +627,8 @@ export function reflowAndReplaceParagraph(
 
     // 6. Shift downstream spans in-place by adjusting transform matrix
     if (needsDownstreamShift) {
+      const handlesToShift = new Set<number>();
+
       for (const dSpan of downstreamSpans) {
         const dLines = dSpan.lines && dSpan.lines.length > 0
           ? dSpan.lines
@@ -475,34 +642,41 @@ export function reflowAndReplaceParagraph(
             }];
 
         for (const line of dLines) {
-          const shiftedBaselineY = Math.max(10, line.baselineY - deltaY);
-
-          // Shift downstream text objects in-place
+          // Find text objects for downstream line
           const indices = findTextObjectIndicesForSpan(
             engine, mod, pageHandle,
             line.left, line.baselineY, line.width, line.fontSize
           );
           for (const idx of indices) {
             const objHandle = mod.FPDFPage_GetObject(pageHandle, idx);
-            if (objHandle) {
-              setPageObjectMatrix(engine, mod, objHandle, translationMatrix(line.left, shiftedBaselineY));
+            if (objHandle && !newObjectHandles.has(objHandle)) {
+              handlesToShift.add(objHandle);
             }
           }
 
           // Shift downstream bullet object in-place
           if (line.hasBulletPrefix && line.bulletWord) {
-            const shiftedBulletBaselineY = Math.max(10, (line.bulletWord.baselineY || line.baselineY) - deltaY);
             const bIndices = findTextObjectIndicesForSpan(
               engine, mod, pageHandle,
               line.bulletWord.left, line.bulletWord.baselineY || line.baselineY, line.bulletWord.width + 4, line.bulletWord.fontSize
             );
             for (const bIdx of bIndices) {
               const bObjHandle = mod.FPDFPage_GetObject(pageHandle, bIdx);
-              if (bObjHandle) {
-                setPageObjectMatrix(engine, mod, bObjHandle, translationMatrix(line.bulletWord.left, shiftedBulletBaselineY));
+              if (bObjHandle && !newObjectHandles.has(bObjHandle)) {
+                handlesToShift.add(bObjHandle);
               }
             }
           }
+        }
+      }
+
+      for (const objHandle of handlesToShift) {
+        const currentMatrix = getPageObjectMatrix(engine, mod, objHandle);
+        if (currentMatrix) {
+          setPageObjectMatrix(engine, mod, objHandle, {
+            ...currentMatrix,
+            f: currentMatrix.f - deltaY,
+          });
         }
       }
     }
