@@ -502,3 +502,254 @@ export function extractPageCharacters(
 
         const angleRad =
           typeof mod.FPDFText_GetCharAngle === 'function'
+            ? mod.FPDFText_GetCharAngle(textPageHandle, i)
+            : 0;
+        const angleDeg = normalizeAngleDeg(angleRad);
+        const rotation = getCardinalRotation(angleDeg);
+        const isVertical = isVerticalRotation(rotation);
+
+        const heapF64 = mod.pdfium.HEAPF64;
+        const left = heapF64[leftPtr >> 3] || 0;
+        const top = heapF64[topPtr >> 3] || 0;
+        let right = heapF64[rightPtr >> 3] || 0;
+        const bottom = heapF64[bottomPtr >> 3] || 0;
+        const originX = heapF64[xPtr >> 3] || 0;
+        const originY = heapF64[yPtr >> 3] || 0;
+
+        const isNewline = charStr === '\n' || charStr === '\r';
+        if (isNewline) continue;
+
+        if (right <= left) {
+          if (isZeroWidthOrInvisible(charCode)) {
+            right = left;
+          } else {
+            right = left + fontSize * 0.28;
+          }
+        }
+
+        let domTop: number;
+        let domBottom: number;
+        let domLeft: number;
+        let domRight: number;
+        let domBaseline: number;
+
+        if (cropInfo.rotation !== 0) {
+          const bounds = pdfBoxToDomBounds(left, bottom, right, top, cropInfo);
+          const origin = pdfToDomCoords(originX, originY, cropInfo);
+          domLeft = bounds.left;
+          domRight = bounds.right;
+          domTop = bounds.top;
+          domBottom = bounds.bottom;
+          domBaseline = origin.y;
+        } else if (isVertical) {
+          domTop = Math.max(0, heightPts - (Math.max(top, bottom) - cropInfo.cropBottom));
+          domBottom = Math.max(0, heightPts - (Math.min(top, bottom) - cropInfo.cropBottom));
+          domLeft = Math.min(left, right) - cropInfo.cropLeft;
+          domRight = Math.max(left, right) - cropInfo.cropLeft;
+          domBaseline = originX - cropInfo.cropLeft;
+        } else {
+          domBaseline = heightPts - (originY - cropInfo.cropBottom);
+          domLeft = Math.min(left, right) - cropInfo.cropLeft;
+          domRight = Math.max(left, right) - cropInfo.cropLeft;
+          domTop = Math.max(0, heightPts - (Math.max(top, bottom) - cropInfo.cropBottom));
+          domBottom = Math.max(0, heightPts - (Math.min(top, bottom) - cropInfo.cropBottom));
+
+          if (domBottom <= domTop) {
+            domTop = Math.max(0, domBaseline - fontSize * 0.85);
+            domBottom = domBaseline + fontSize * 0.25;
+          }
+        }
+
+        characters.push({
+          charIndex: i,
+          unicode: charStr,
+          fontSize,
+          left,
+          top,
+          right,
+          bottom,
+          originX,
+          originY,
+          domLeft,
+          domTop,
+          domRight,
+          domBottom,
+          domBaseline,
+          angle: angleDeg,
+          rotation,
+          isVertical,
+          orientation: isVertical ? 'vertical' : 'horizontal',
+        });
+      }
+    } finally {
+      engine.freeMemory(leftPtr);
+      engine.freeMemory(topPtr);
+      engine.freeMemory(rightPtr);
+      engine.freeMemory(bottomPtr);
+      engine.freeMemory(xPtr);
+      engine.freeMemory(yPtr);
+    }
+  } finally {
+    if (textPageHandle) {
+      mod.FPDFText_ClosePage(textPageHandle);
+    }
+  }
+
+  return characters;
+}
+
+/**
+ * Computes bounding rectangles for highlighting a range of characters.
+ * Groups characters by text line and returns rectangular regions.
+ *
+ * @param characters The array of all page characters.
+ * @param startIndex The starting character index (inclusive).
+ * @param endIndex The ending character index (inclusive).
+ * @return An array of HighlightRect objects, one for each line in the range.
+ */
+export function calculateHighlightRects(
+  characters: PageCharacter[],
+  startIndex: number,
+  endIndex: number
+): HighlightRect[] {
+  if (characters.length === 0) return [];
+
+  const minIndex = Math.min(startIndex, endIndex);
+  const maxIndex = Math.max(startIndex, endIndex);
+
+  // Filter characters in the range
+  const selectedChars = characters.filter(
+    (c) => c.charIndex >= minIndex && c.charIndex <= maxIndex
+  );
+
+  if (selectedChars.length === 0) return [];
+
+  // Group characters by line and orientation
+  const lines: PageCharacter[][] = [];
+  let currentLine: PageCharacter[] = [];
+
+  for (let i = 0; i < selectedChars.length; i++) {
+    const char = selectedChars[i];
+    if (currentLine.length === 0) {
+      currentLine.push(char);
+      continue;
+    }
+
+    const prevChar = currentLine[currentLine.length - 1];
+    const isRotChanged = char.rotation !== prevChar.rotation || char.isVertical !== prevChar.isVertical;
+
+    if (isRotChanged) {
+      lines.push(currentLine);
+      currentLine = [char];
+      continue;
+    }
+
+    if (char.isVertical) {
+      const xDiff = Math.abs(char.domLeft - prevChar.domLeft);
+      const verticalGap = Math.abs(char.domTop - prevChar.domBottom);
+
+      if (xDiff > 4.0 || verticalGap > char.fontSize * 1.5) {
+        lines.push(currentLine);
+        currentLine = [char];
+      } else {
+        currentLine.push(char);
+      }
+    } else {
+      const baselineDiff = Math.abs(char.domBaseline - prevChar.domBaseline);
+      const topDiff = Math.abs(char.domTop - prevChar.domTop);
+
+      if (baselineDiff > 4.0 || topDiff > 6.0) {
+        lines.push(currentLine);
+        currentLine = [char];
+      } else {
+        currentLine.push(char);
+      }
+    }
+  }
+
+  if (currentLine.length > 0) {
+    lines.push(currentLine);
+  }
+
+  // Create bounding box for each line
+  const rects: HighlightRect[] = [];
+  for (const line of lines) {
+    if (line.length === 0) continue;
+
+    const firstChar = line[0];
+    const isVert = firstChar.isVertical || firstChar.rotation === 90 || firstChar.rotation === 270;
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let maxFontSize = 0;
+    let sumBaseline = 0;
+
+    for (const c of line) {
+      if (c.domLeft < minX) minX = c.domLeft;
+      if (c.domRight > maxX) maxX = c.domRight;
+      if (c.domTop < minY) minY = c.domTop;
+      if (c.domBottom > maxY) maxY = c.domBottom;
+      if (c.fontSize > maxFontSize) maxFontSize = c.fontSize;
+      sumBaseline += c.domBaseline;
+    }
+
+    if (isVert) {
+      const width = Math.max(maxFontSize * 1.15, maxX - minX);
+      const height = Math.max(0, maxY - minY);
+      if (width > 0 && height > 0) {
+        rects.push({
+          x: minX,
+          y: minY,
+          width,
+          height,
+        });
+      }
+    } else {
+      const avgBaseline = sumBaseline / line.length;
+      const top = Math.max(0, avgBaseline - maxFontSize * 0.85);
+      const height = maxFontSize * 1.15;
+      const width = Math.max(0, maxX - minX);
+
+      if (width > 0 && height > 0) {
+        rects.push({
+          x: minX,
+          y: top,
+          width,
+          height,
+        });
+      }
+    }
+  }
+
+  return rects;
+}
+
+/**
+ * Finds a character at or near the given DOM page coordinates.
+ *
+ * @param characters The array of all page characters.
+ * @param x Horizontal page coordinate.
+ * @param y Vertical page coordinate.
+ * @param toleranceX Horizontal tolerance padding.
+ * @param toleranceY Vertical tolerance padding.
+ * @return The matched PageCharacter or null if no character is near.
+ */
+export function findCharacterAt(
+  characters: PageCharacter[],
+  x: number,
+  y: number,
+  toleranceX: number = 4,
+  toleranceY: number = 4
+): PageCharacter | null {
+  if (characters.length === 0) return null;
+
+  let bestMatch: PageCharacter | null = null;
+  let minDistanceSq = Infinity;
+
+  for (const c of characters) {
+    const inX = x >= c.domLeft - toleranceX && x <= c.domRight + toleranceX;
+    const inY = y >= c.domTop - toleranceY && y <= c.domBottom + toleranceY;
+
+    if (inX && inY) {
