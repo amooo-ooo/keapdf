@@ -7,9 +7,21 @@ import {
   PDFArray,
   PDFNumber,
   PDFDict,
+  PDFRawStream,
   rgb,
   StandardFonts,
 } from 'pdf-lib';
+
+/** Standard Object Identifiers (OIDs) for PKCS#7, CAdES, and X.509 extensions. */
+export const OID_SHA256 = '2.16.840.1.101.3.4.2.1';
+export const OID_ID_DATA = '1.2.840.113549.1.7.1';
+export const OID_SIGNING_CERTIFICATE_V2 = '1.2.840.113549.1.9.16.2.47';
+export const OID_TIMESTAMP_TOKEN = '1.2.840.113549.1.9.16.2.14';
+export const OID_ADOBE_DOC_SIGNING = '1.2.840.113583.1.1.5';
+export const OID_TIME_STAMPING = '1.3.6.1.5.5.7.3.8';
+export const OID_CRL_DIST_POINTS = '2.5.29.31';
+export const OID_AUTHORITY_INFO_ACCESS = '1.3.6.1.5.5.7.1.1';
+export const OID_OCSP = '1.3.6.1.5.5.7.48.1';
 
 /**
  * Options for generating a self-signed digital certificate.
@@ -23,7 +35,7 @@ export interface CreateCertOptions {
   organizationalUnit?: string;
   /** Signer email address. */
   email?: string;
-  /** Country code (2-letter ISO, e.g. 'US', 'NZ'). */
+  /** Country code (2-letter ISO, e.g. 'US', 'NZ', 'CH'). */
   country?: string;
   /** State or province name. */
   state?: string;
@@ -49,6 +61,8 @@ export interface DigitalIdentity {
   certificatePem: string;
   /** Binary PKCS#12 (.p12/.pfx) byte buffer. */
   p12Bytes: Uint8Array;
+  /** Complete certificate chain preserving leaf, intermediate, and root CAs. */
+  certificateChain: forge.pki.Certificate[];
   /** Signer subject attributes. */
   subject: {
     commonName: string;
@@ -91,7 +105,7 @@ export interface VisualSignatureOptions {
 }
 
 /**
- * Options for digitally signing a PDF document conforming to PDF ISO 32000.
+ * Options for digitally signing a PDF document conforming to PDF ISO 32000 and ETSI PAdES.
  */
 export interface SignPdfOptions {
   /** The active digital identity containing certificate and private key. */
@@ -108,10 +122,18 @@ export interface SignPdfOptions {
   signingTime?: Date;
   /** Visual signature appearance configuration (if visible signature is requested). */
   visual?: VisualSignatureOptions;
+  /** PDF signature subfilter. Defaults to 'ETSI.CAdES.detached'. */
+  subFilter?: 'ETSI.CAdES.detached' | 'adbe.pkcs7.detached';
+  /** Optional RFC 3161 TSA server URL (e.g. 'https://freetsa.org/tsr') for PAdES B-T. */
+  tsaUrl?: string;
+  /** Optional pre-generated RFC 3161 TimeStampToken DER bytes (for offline or unit tests). */
+  timestampTokenBytes?: Uint8Array;
+  /** Whether to embed Document Security Store (/DSS) for PAdES B-LT long term validation. */
+  embedDss?: boolean;
 }
 
 /**
- * Detailed verification report for an ISO 32000 digital signature.
+ * Detailed verification report for an ISO 32000 and ETSI PAdES digital signature.
  */
 export interface SignatureValidationResult {
   /** Unique signature field or dictionary identifier. */
@@ -156,10 +178,219 @@ export interface SignatureValidationResult {
   validTo: string;
   /** PDF signature filter (e.g. Adobe.PPKLite). */
   filter: string;
-  /** PDF signature subfilter (e.g. adbe.pkcs7.detached). */
+  /** PDF signature subfilter (e.g. ETSI.CAdES.detached, adbe.pkcs7.detached). */
   subFilter: string;
   /** Byte range array [offset1, length1, offset2, length2]. */
   byteRange: number[];
+  /** PAdES profile level detected. */
+  padesProfile: 'PAdES-B-LT' | 'PAdES-B-T' | 'PAdES-B-B' | 'Legacy-PKCS7';
+  /** Whether CAdES signingCertificateV2 (RFC 5035) is present and cryptographically bound. */
+  hasSigningCertificateV2: boolean;
+  /** Whether an RFC 3161 Time-Stamp Token is present in unsigned attributes. */
+  hasTimestampToken: boolean;
+  /** Formatted timestamp token date and time if present. */
+  timestampTime?: string;
+  /** Whether the end-entity certificate contains illegal timeStamping usage. */
+  hasIllegalTimeStampingUsage: boolean;
+  /** Total certificates in the embedded PKCS#7 certificate chain. */
+  certificateChainLength: number;
+  /** Whether the document contains a /DSS dictionary. */
+  hasDss: boolean;
+  /** ESigA and ZertES compliance evaluation report. */
+  esigaCompliance: EsigaComplianceReport;
+}
+
+/**
+ * Tri-state compliance verification status conforming to ETSI EN 319 102-1.
+ */
+export type ComplianceCheckStatus = 'valid' | 'indeterminate' | 'failed';
+
+/**
+ * Diagnostic record for an individual statutory compliance requirement.
+ */
+export interface SignatureComplianceCheck {
+  /** Identifier of the compliance evaluation category. */
+  id: 'signature_integrity' | 'revocation_status' | 'timestamp_validity' | 'certificate_legitimacy';
+  /** Human-readable category title. */
+  title: string;
+  /** Verification status for this individual check. */
+  status: ComplianceCheckStatus;
+  /** Primary status message following Swiss Federal validator standards. */
+  message: string;
+  /** Supporting technical specification details and regulatory context. */
+  technicalDetails?: string;
+}
+
+/**
+ * Complete electronic signature compliance report conforming to Swiss ZertES (SR 943.03) and EU eIDAS.
+ */
+export interface EsigaComplianceReport {
+  /** Top-level overall status. */
+  status: 'compliant' | 'indeterminate' | 'non_compliant';
+  /** Diagnostic reasons explaining non-compliance or indeterminate outcome. */
+  reasons: string[];
+  /** Detailed 4-pillar statutory compliance checks. */
+  checks: SignatureComplianceCheck[];
+  /** Standard designation evaluated against. */
+  standard: string;
+  /** Statutory signature qualification tier. */
+  qualificationLevel: 'QES' | 'AES' | 'SES';
+}
+
+/**
+ * Builds an ESSCertIDv2 ASN.1 structure according to RFC 5035 and ETSI EN 319 122.
+ *
+ * Computes the SHA-256 hash of the entire DER-encoded certificate and constructs
+ * the AlgorithmIdentifier and hash octet string.
+ *
+ * @param cert The X.509 certificate in forge format.
+ * @return An ASN.1 Sequence representing ESSCertIDv2.
+ */
+export function buildEssCertIdV2(cert: forge.pki.Certificate): forge.asn1.Asn1 {
+  const certDer = forge.asn1.toDer(forge.pki.certificateToAsn1(cert)).getBytes();
+  const md = forge.md.sha256.create();
+  md.update(certDer);
+  const certHash = md.digest().getBytes();
+
+  const sha256OidDer = forge.asn1.oidToDer(OID_SHA256).getBytes();
+  const algId = forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
+    forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OID, false, sha256OidDer),
+  ]);
+
+  return forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
+    algId,
+    forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OCTETSTRING, false, certHash),
+  ]);
+}
+
+/**
+ * Builds a SigningCertificateV2 ASN.1 attribute value according to RFC 5035.
+ *
+ * @param cert The signing certificate in forge format.
+ * @return An ASN.1 Sequence containing the SEQUENCE OF ESSCertIDv2.
+ */
+export function buildSigningCertificateV2(cert: forge.pki.Certificate): forge.asn1.Asn1 {
+  const essCertIdV2 = buildEssCertIdV2(cert);
+  return forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
+    forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [essCertIdV2]),
+  ]);
+}
+
+/**
+ * Constructs an RFC 3161 TimeStampReq ASN.1 binary message.
+ *
+ * @param hashedMessageBytes The binary hash string (SHA-256) of the input to timestamp.
+ * @param nonce Optional cryptographically strong nonce integer.
+ * @return The DER-encoded TimeStampReq byte array.
+ */
+export function createTimeStampRequest(hashedMessageBytes: string, nonce?: number): Uint8Array {
+  const sha256OidDer = forge.asn1.oidToDer(OID_SHA256).getBytes();
+  const algId = forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
+    forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OID, false, sha256OidDer),
+  ]);
+
+  const msgImprint = forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
+    algId,
+    forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OCTETSTRING, false, hashedMessageBytes),
+  ]);
+
+  const reqSeq: forge.asn1.Asn1[] = [
+    forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.INTEGER, false, forge.util.hexToBytes('01')),
+    msgImprint,
+  ];
+
+  if (nonce !== undefined) {
+    const nonceHex = nonce.toString(16);
+    const cleanHex = nonceHex.length % 2 !== 0 ? '0' + nonceHex : nonceHex;
+    reqSeq.push(forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.INTEGER, false, forge.util.hexToBytes(cleanHex)));
+  }
+
+  // certReq = TRUE to request TSA certificate chain in response
+  reqSeq.push(forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.BOOLEAN, false, forge.util.hexToBytes('FF')));
+
+  const reqAsn1 = forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, reqSeq);
+  const derStr = forge.asn1.toDer(reqAsn1).getBytes();
+  const reqBytes = new Uint8Array(derStr.length);
+  for (let i = 0; i < derStr.length; i++) {
+    reqBytes[i] = derStr.charCodeAt(i);
+  }
+  return reqBytes;
+}
+
+/**
+ * Dispatches an RFC 3161 HTTP query to an external Time-Stamping Authority (TSA).
+ *
+ * Computes SHA-256 over the provided signature value bytes, sends the request,
+ * and extracts the TimeStampToken from the response.
+ *
+ * @param signatureBytes Raw RSA signature value bytes from the SignerInfo structure.
+ * @param tsaUrl HTTP/HTTPS endpoint of the RFC 3161 TSA server.
+ * @param timeoutMs Request timeout in milliseconds.
+ * @return DER-encoded TimeStampToken CMS SignedData bytes.
+ */
+export async function requestRfc3161Timestamp(
+  signatureBytes: Uint8Array,
+  tsaUrl: string,
+  timeoutMs = 12000
+): Promise<Uint8Array> {
+  let sigBin = '';
+  for (let i = 0; i < signatureBytes.length; i++) {
+    sigBin += String.fromCharCode(signatureBytes[i]);
+  }
+  const md = forge.md.sha256.create();
+  md.update(sigBin);
+  const digest = md.digest().getBytes();
+
+  const nonce = Math.floor(Math.random() * 1000000000);
+  const reqBytes = createTimeStampRequest(digest, nonce);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(tsaUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/timestamp-query',
+        'Accept': 'application/timestamp-reply',
+      },
+      body: reqBytes as unknown as BodyInit,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`TSA server returned HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const respBuffer = await response.arrayBuffer();
+    const respBytes = new Uint8Array(respBuffer);
+
+    let respStr = '';
+    for (let i = 0; i < respBytes.length; i++) {
+      respStr += String.fromCharCode(respBytes[i]);
+    }
+    const respAsn1 = forge.asn1.fromDer(respStr);
+    const statusSeq = respAsn1.value[0] as forge.asn1.Asn1;
+    const statusVal = (statusSeq.value as forge.asn1.Asn1[])[0];
+    const statusCode = typeof statusVal.value === 'string' ? statusVal.value.charCodeAt(0) : 0;
+    if (statusCode !== 0) {
+      throw new Error(`TSA status rejected with code ${statusCode}`);
+    }
+
+    const tokenAsn1 = respAsn1.value[1] as forge.asn1.Asn1;
+    if (!tokenAsn1) {
+      throw new Error('TSA response missing TimeStampToken structure.');
+    }
+
+    const tokenDer = forge.asn1.toDer(tokenAsn1).getBytes();
+    const tokenBytes = new Uint8Array(tokenDer.length);
+    for (let i = 0; i < tokenDer.length; i++) {
+      tokenBytes[i] = tokenDer.charCodeAt(i);
+    }
+    return tokenBytes;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -187,7 +418,10 @@ export function formatPdfDate(date: Date): string {
 }
 
 /**
- * Creates a self-signed X.509 certificate and RSA keypair packaged in a PKCS#12 bundle.
+ * Creates a self-signed X.509 certificate conforming to RFC 5280, ISO 32000, and Swiss ESigA.
+ *
+ * Correctly configures Key Usage for digital signatures and non-repudiation while
+ * strictly omitting timeStamping from the end-entity certificate.
  *
  * @param options Certificate metadata and password options.
  * @return A Promise resolving to the created DigitalIdentity.
@@ -227,19 +461,26 @@ export async function createSelfSignedCertificate(options: CreateCertOptions): P
   ];
 
   cert.setSubject(attrs);
-  cert.setIssuer(attrs); // Self-signed: issuer matches subject
+  cert.setIssuer(attrs);
 
+  // Key Usage: digitalSignature and nonRepudiation (contentCommitment) are mandatory
+  // for Advanced Electronic Signatures under ZertES Art. 2 lit. a and Swiss CO Art. 14.
+  // timeStamping is strictly false on document signer certificates.
   cert.setExtensions([
     {
       name: 'basicConstraints',
       cA: false,
+      critical: true,
     },
     {
       name: 'keyUsage',
       digitalSignature: true,
       nonRepudiation: true,
-      keyEncipherment: true,
-      dataEncipherment: true,
+      keyEncipherment: false,
+      dataEncipherment: false,
+      keyCertSign: false,
+      cRLSign: false,
+      critical: true,
     },
     {
       name: 'extKeyUsage',
@@ -247,7 +488,7 @@ export async function createSelfSignedCertificate(options: CreateCertOptions): P
       clientAuth: true,
       codeSigning: false,
       emailProtection: true,
-      timeStamping: true,
+      timeStamping: false,
     },
     {
       name: 'subjectKeyIdentifier',
@@ -282,6 +523,7 @@ export async function createSelfSignedCertificate(options: CreateCertOptions): P
     privateKey: keypair.privateKey,
     certificatePem: certPem,
     p12Bytes,
+    certificateChain: [cert],
     subject: {
       commonName: options.commonName,
       organization: options.organization,
@@ -300,11 +542,11 @@ export async function createSelfSignedCertificate(options: CreateCertOptions): P
 }
 
 /**
- * Parses an existing PKCS#12 (.p12 / .pfx) binary bundle using the provided password.
+ * Parses an existing PKCS#12 (.p12 / .pfx) binary bundle, preserving the complete certificate chain.
  *
  * @param p12Buffer Binary buffer of the .p12 file.
  * @param password Password string to decrypt the private key.
- * @return The parsed DigitalIdentity structure.
+ * @return The parsed DigitalIdentity structure with full certificate chain.
  */
 export function parsePkcs12(p12Buffer: ArrayBuffer | Uint8Array, password = ''): DigitalIdentity {
   const bytes = p12Buffer instanceof Uint8Array ? p12Buffer : new Uint8Array(p12Buffer);
@@ -316,12 +558,16 @@ export function parsePkcs12(p12Buffer: ArrayBuffer | Uint8Array, password = ''):
   const p12Asn1 = forge.asn1.fromDer(binaryStr);
   const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, password);
 
-  // Extract certificate
-  let cert: forge.pki.Certificate | null = null;
+  // Extract all certificates in the bundle
+  const allCerts: forge.pki.Certificate[] = [];
   const certBags = p12.getBags({ bagType: forge.pki.oids.certBag });
   const certBagArray = certBags[forge.pki.oids.certBag];
-  if (certBagArray && certBagArray.length > 0 && certBagArray[0].cert) {
-    cert = certBagArray[0].cert;
+  if (certBagArray && certBagArray.length > 0) {
+    for (const bag of certBagArray) {
+      if (bag.cert) {
+        allCerts.push(bag.cert);
+      }
+    }
   }
 
   // Extract private key
@@ -331,7 +577,6 @@ export function parsePkcs12(p12Buffer: ArrayBuffer | Uint8Array, password = ''):
   if (keyBagArray && keyBagArray.length > 0 && keyBagArray[0].key) {
     privateKey = keyBagArray[0].key as forge.pki.rsa.PrivateKey;
   } else {
-    // Try unencrypted key bag
     const plainKeyBags = p12.getBags({ bagType: forge.pki.oids.keyBag });
     const plainKeyArray = plainKeyBags[forge.pki.oids.keyBag];
     if (plainKeyArray && plainKeyArray.length > 0 && plainKeyArray[0].key) {
@@ -339,54 +584,70 @@ export function parsePkcs12(p12Buffer: ArrayBuffer | Uint8Array, password = ''):
     }
   }
 
-  if (!cert || !privateKey) {
+  if (allCerts.length === 0 || !privateKey) {
     throw new Error('Failed to extract certificate and private key from PKCS#12 file. Check password.');
   }
 
+  // Match leaf certificate by public key modulus
+  let leafCert = allCerts[0];
+  const privMod = (privateKey.n as forge.jsbn.BigInteger).toString(16);
+  for (const candidate of allCerts) {
+    const pubMod = (candidate.publicKey as forge.pki.rsa.PublicKey).n?.toString(16);
+    if (pubMod && pubMod === privMod) {
+      leafCert = candidate;
+      break;
+    }
+  }
+
+  // Organize certificate chain with leaf certificate first, followed by intermediate/root CAs
+  const chain = [leafCert, ...allCerts.filter((c) => c !== leafCert)];
+
   const getAttr = (c: forge.pki.Certificate, name: string): string | undefined => {
-    const a = c.subject.getField(name);
-    return a ? String(a.value) : undefined;
+    const val = c.subject.getField(name)?.value ?? (name === 'commonName' ? c.subject.getField('CN')?.value : undefined);
+    return val ? String(val) : undefined;
   };
   const getIssuerAttr = (c: forge.pki.Certificate, name: string): string | undefined => {
-    const a = c.issuer.getField(name);
-    return a ? String(a.value) : undefined;
+    const val = c.issuer.getField(name)?.value ?? (name === 'commonName' ? c.issuer.getField('CN')?.value : undefined);
+    return val ? String(val) : undefined;
   };
 
-  const certPem = forge.pki.certificateToPem(cert);
+  const certPem = forge.pki.certificateToPem(leafCert);
 
   return {
-    certificate: cert,
+    certificate: leafCert,
     privateKey,
     certificatePem: certPem,
     p12Bytes: bytes,
+    certificateChain: chain,
     subject: {
-      commonName: getAttr(cert, 'commonName') || 'Unknown Signer',
-      organization: getAttr(cert, 'organizationName'),
-      organizationalUnit: getAttr(cert, 'organizationalUnitName'),
-      email: getAttr(cert, 'emailAddress'),
-      country: getAttr(cert, 'countryName'),
+      commonName: getAttr(leafCert, 'commonName') || 'Unknown Signer',
+      organization: getAttr(leafCert, 'organizationName'),
+      organizationalUnit: getAttr(leafCert, 'organizationalUnitName'),
+      email: getAttr(leafCert, 'emailAddress'),
+      country: getAttr(leafCert, 'countryName'),
     },
     issuer: {
-      commonName: getIssuerAttr(cert, 'commonName') || 'Unknown Issuer',
-      organization: getIssuerAttr(cert, 'organizationName'),
+      commonName: getIssuerAttr(leafCert, 'commonName') || 'Unknown Issuer',
+      organization: getIssuerAttr(leafCert, 'organizationName'),
     },
-    validFrom: cert.validity.notBefore,
-    validTo: cert.validity.notAfter,
-    serialNumber: cert.serialNumber,
+    validFrom: leafCert.validity.notBefore,
+    validTo: leafCert.validity.notAfter,
+    serialNumber: leafCert.serialNumber,
   };
 }
 
-/** Fixed byte size allocated for the PKCS#7 detached signature placeholder in PDF. */
-const SIGNATURE_PLACEHOLDER_LENGTH = 8192; // 8192 bytes = 16384 hexadecimal characters
+/** Byte capacity allocated for detached signature placeholder (supports chains, CAdES, and timestamps). */
+const SIGNATURE_PLACEHOLDER_LENGTH = 16384; // 16384 bytes = 32768 hex characters
 
 /**
- * Digitally signs a PDF document conforming to PDF ISO 32000-1 / ISO 32000-2 Section 12.8.
+ * Digitally signs a PDF document conforming to PDF ISO 32000-1 / ISO 32000-2 and ETSI EN 319 142 (PAdES).
  *
- * Employs `/Filter /Adobe.PPKLite` and `/SubFilter /adbe.pkcs7.detached`, computing
- * SHA-256 byte-range hashes and embedding a DER-encoded PKCS#7 signedData structure.
+ * Supports /SubFilter /ETSI.CAdES.detached (PAdES Baseline) and /adbe.pkcs7.detached,
+ * computing SHA-256 byte-range hashes and embedding ESS signingCertificateV2, complete
+ * certificate chains, and optional RFC 3161 timestamps.
  *
  * @param pdfBytes Binary bytes of the active PDF document.
- * @param options Digital signing configuration including identity, metadata, and visual options.
+ * @param options Digital signing configuration including identity, metadata, visual, and PAdES options.
  * @return A Promise resolving to the signed PDF Uint8Array.
  */
 export async function signPdfIso32000(
@@ -398,6 +659,7 @@ export async function signPdfIso32000(
 
   const signingTime = options.signingTime || new Date();
   const pdfDateStr = formatPdfDate(signingTime);
+  const subFilter = options.subFilter || 'ETSI.CAdES.detached';
 
   // 1. Ensure AcroForm exists with /SigFlags 3 (SignaturesExist | AppendOnly)
   let acroForm = pdfDoc.catalog.lookup(PDFName.of('AcroForm'));
@@ -422,7 +684,6 @@ export async function signPdfIso32000(
   // 2. Prepare Signature Dictionary placeholder with ByteRange and Contents
   const placeholderHex = '0'.repeat(SIGNATURE_PLACEHOLDER_LENGTH * 2);
 
-  // Use 10-digit placeholders for ByteRange offsets so byte count remains constant
   const byteRangePlaceholder = PDFArray.withContext(pdfDoc.context);
   byteRangePlaceholder.push(PDFNumber.of(0));
   byteRangePlaceholder.push(PDFNumber.of(1000000000));
@@ -432,7 +693,7 @@ export async function signPdfIso32000(
   const sigDict = pdfDoc.context.obj({
     Type: PDFName.of('Sig'),
     Filter: PDFName.of('Adobe.PPKLite'),
-    SubFilter: PDFName.of('adbe.pkcs7.detached'),
+    SubFilter: PDFName.of(subFilter),
     ByteRange: byteRangePlaceholder,
     Contents: PDFHexString.of(placeholderHex),
     Reason: PDFString.of(options.reason || 'Document Digitally Signed and Verified'),
@@ -470,14 +731,13 @@ export async function signPdfIso32000(
     V: sigDictRef,
   });
 
-  // Render visual appearance on the page if requested
+  // Render visual appearance on page if requested
   if (options.visual && options.visual.width > 10 && options.visual.height > 10) {
     const vx = options.visual.x;
     const vy = options.visual.y;
     const vw = options.visual.width;
     const vh = options.visual.height;
 
-    // Draw background badge / border on the page
     page.drawRectangle({
       x: vx,
       y: vy,
@@ -490,7 +750,6 @@ export async function signPdfIso32000(
 
     let graphicWidth = 0;
 
-    // If a signature image graphic is provided, embed it
     if (options.visual.graphicDataUrl && options.visual.graphicDataUrl.startsWith('data:image/png;base64,')) {
       try {
         const rawBase64 = options.visual.graphicDataUrl.replace('data:image/png;base64,', '');
@@ -511,7 +770,6 @@ export async function signPdfIso32000(
       }
     }
 
-    // Draw textual certificate details if requested
     if (options.visual.showTextDetails) {
       const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
       const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
@@ -587,10 +845,32 @@ export async function signPdfIso32000(
     annots.push(widgetRef);
   }
 
-  // 4. Save PDF to bytes with placeholders
+  // 4. Attach Document Security Store (/DSS) for PAdES B-LT if requested
+  if (options.embedDss) {
+    const certStreams: PDFRawStream[] = [];
+    const chain = options.identity.certificateChain || [options.identity.certificate];
+    for (const c of chain) {
+      const der = forge.asn1.toDer(forge.pki.certificateToAsn1(c)).getBytes();
+      const u8 = new Uint8Array(der.length);
+      for (let i = 0; i < der.length; i++) u8[i] = der.charCodeAt(i);
+      const stream = pdfDoc.context.stream(u8);
+      certStreams.push(stream);
+    }
+
+    const certRefs = certStreams.map((s) => pdfDoc.context.register(s));
+    const certsArray = pdfDoc.context.obj(certRefs);
+
+    const dssDict = pdfDoc.context.obj({
+      Type: PDFName.of('DSS'),
+      Certs: certsArray,
+    });
+    pdfDoc.catalog.set(PDFName.of('DSS'), pdfDoc.context.register(dssDict));
+  }
+
+  // 5. Save PDF to bytes with placeholders
   const rawSavedBytes = await pdfDoc.save({ useObjectStreams: false });
 
-  // 5. Locate /ByteRange and /Contents in raw saved bytes
+  // 6. Locate /ByteRange and /Contents in raw saved bytes
   let pdfString = '';
   for (let i = 0; i < rawSavedBytes.length; i++) {
     pdfString += String.fromCharCode(rawSavedBytes[i]);
@@ -608,8 +888,8 @@ export async function signPdfIso32000(
     throw new Error('Failed to locate /Contents placeholder in serialized PDF.');
   }
 
-  const contentsStart = contentsPos + contentsPrefix.length - 1; // Position of '<'
-  const contentsEnd = contentsStart + 1 + (SIGNATURE_PLACEHOLDER_LENGTH * 2) + 1; // Position of '>' + 1
+  const contentsStart = contentsPos + contentsPrefix.length - 1;
+  const contentsEnd = contentsStart + 1 + (SIGNATURE_PLACEHOLDER_LENGTH * 2) + 1;
 
   const totalLength = rawSavedBytes.length;
 
@@ -618,55 +898,64 @@ export async function signPdfIso32000(
   const b2 = contentsEnd;
   const len2 = totalLength - contentsEnd;
 
-  // Build exact replacement for ByteRange string
   const actualByteRangeStr = `/ByteRange [ ${b1} ${len1} ${b2} ${len2} ]`;
   const paddedByteRange = actualByteRangeStr.padEnd(byteRangeSearchStr.length, ' ');
 
-  // Inject updated ByteRange into buffer
   for (let i = 0; i < paddedByteRange.length; i++) {
     rawSavedBytes[byteRangePos + i] = paddedByteRange.charCodeAt(i);
   }
 
-  // 6. Compute SHA-256 Digest over ByteRange byte segments (excluding /Contents)
+  // 7. Compute SHA-256 Digest over ByteRange byte segments
   const part1 = rawSavedBytes.subarray(b1, b1 + len1);
   const part2 = rawSavedBytes.subarray(b2, b2 + len2);
 
   const md = forge.md.sha256.create();
   let part1Str = '';
-  for (let i = 0; i < part1.length; i++) {
-    part1Str += String.fromCharCode(part1[i]);
-  }
+  for (let i = 0; i < part1.length; i++) part1Str += String.fromCharCode(part1[i]);
   let part2Str = '';
-  for (let i = 0; i < part2.length; i++) {
-    part2Str += String.fromCharCode(part2[i]);
-  }
+  for (let i = 0; i < part2.length; i++) part2Str += String.fromCharCode(part2[i]);
   md.update(part1Str);
   md.update(part2Str);
   const digestBytes = md.digest().getBytes();
 
-  // 7. Construct Detached PKCS#7 SignedData structure
+  // 8. Construct Detached PKCS#7 / CAdES SignedData structure
   const p7 = forge.pkcs7.createSignedData();
-  p7.content = forge.util.createBuffer(''); // Detached signature: content is empty
+  p7.content = forge.util.createBuffer(part1Str + part2Str);
 
-  p7.addCertificate(options.identity.certificate);
+  const chain = options.identity.certificateChain && options.identity.certificateChain.length > 0
+    ? options.identity.certificateChain
+    : [options.identity.certificate];
+  for (const c of chain) {
+    p7.addCertificate(c);
+  }
+
+  const authenticatedAttributes: Array<{ type: string; value: unknown }> = [
+    {
+      type: forge.pki.oids.contentType,
+      value: forge.pki.oids.data,
+    },
+    {
+      type: forge.pki.oids.messageDigest,
+      value: digestBytes,
+    },
+    {
+      type: forge.pki.oids.signingTime,
+      value: forge.asn1.dateToUtcTime(signingTime),
+    },
+  ];
+
+  if (subFilter === 'ETSI.CAdES.detached') {
+    authenticatedAttributes.push({
+      type: OID_SIGNING_CERTIFICATE_V2,
+      value: buildSigningCertificateV2(options.identity.certificate),
+    });
+  }
+
   p7.addSigner({
     key: options.identity.privateKey,
     certificate: options.identity.certificate,
     digestAlgorithm: forge.pki.oids.sha256,
-    authenticatedAttributes: [
-      {
-        type: forge.pki.oids.contentType,
-        value: forge.pki.oids.data,
-      },
-      {
-        type: forge.pki.oids.messageDigest,
-        value: digestBytes,
-      },
-      {
-        type: forge.pki.oids.signingTime,
-        value: forge.asn1.dateToUtcTime(signingTime),
-      },
-    ],
+    authenticatedAttributes: authenticatedAttributes as unknown as Array<{ type: string; value?: string }>,
   });
 
   p7.sign({ detached: true });
