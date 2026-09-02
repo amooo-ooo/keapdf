@@ -250,3 +250,255 @@ export function replaceTextSpan(
       removeTextObjectsByIndex(mod, pageHandle, Array.from(allIndicesToRemove));
     } else {
       // Fallback: spatial removal when precise matching found nothing
+      removeTextObjectsInBounds(
+        engine, mod, pageHandle,
+        targetSpan.left, targetSpan.baselineY,
+        targetSpan.width, updatedFontSize
+      );
+    }
+
+    const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+    const pdfTargetLeft = targetLeft + cropInfo.cropLeft;
+
+    // Compute adjusted baseline for the replacement object
+    let targetBaselineY = targetSpan.baselineY;
+    if (options.top !== undefined) {
+      targetBaselineY = heightPts - options.top - updatedFontSize * 0.15 + cropInfo.cropBottom;
+    } else if (updatedFontSize !== targetSpan.fontSize) {
+      const sizeDiff = updatedFontSize - targetSpan.fontSize;
+      targetBaselineY = Math.max(0, targetSpan.baselineY - sizeDiff * 0.1);
+    }
+
+    // Insert the replacement text object
+    let insertedObjHandle: number | null = null;
+    if (!isDeletion) {
+      if (options.backgroundColor) {
+        const bgCol = parseColor(options.backgroundColor);
+        if (bgCol.a > 0) {
+          const rectW = calculatedNewWidth || targetSpan.width;
+          const rectH = updatedFontSize * 1.25;
+          const rectBottom = Math.max(0, targetBaselineY - updatedFontSize * 0.25);
+          const bgRect = mod.FPDFPageObj_CreateNewRect(pdfTargetLeft, rectBottom, rectW, rectH);
+          if (bgRect) {
+            mod.FPDFPageObj_SetFillColor(bgRect, bgCol.r, bgCol.g, bgCol.b, bgCol.a);
+            mod.FPDFPath_SetDrawMode(bgRect, 1, false);
+            mod.FPDFPage_InsertObject(pageHandle, bgRect);
+          }
+        }
+      }
+
+      fontHandle = mod.FPDFText_LoadStandardFont(docHandle, standardFontName);
+      if (!fontHandle) fontHandle = mod.FPDFText_LoadStandardFont(docHandle, 'Helvetica');
+
+      const textBuf = encodeUtf16Le(engine, updatedText);
+
+      try {
+        const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, fontHandle, updatedFontSize);
+        if (textObjHandle) {
+          mod.FPDFText_SetText(textObjHandle, textBuf.ptr);
+          mod.FPDFPageObj_SetFillColor(textObjHandle, updatedColor.r, updatedColor.g, updatedColor.b, updatedColor.a);
+          
+          setPageObjectMatrix(engine, mod, textObjHandle, translationMatrix(pdfTargetLeft, targetBaselineY));
+          mod.FPDFPage_InsertObject(pageHandle, textObjHandle);
+          insertedObjHandle = textObjHandle;
+        }
+      } finally {
+        textBuf.dispose();
+      }
+    }
+
+    // Shift subsequent spans horizontally (in-place)
+    if (needsReflow) {
+      const handlesToShift = new Set<number>();
+      for (const subSpan of lineSubsequentSpans) {
+        const subIndices = findTextObjectIndicesForSpan(
+          engine, mod, pageHandle,
+          subSpan.left, subSpan.baselineY, subSpan.width, subSpan.fontSize
+        );
+        for (const idx of subIndices) {
+          const objHandle = mod.FPDFPage_GetObject(pageHandle, idx);
+          if (objHandle && objHandle !== insertedObjHandle) {
+            handlesToShift.add(objHandle);
+          }
+        }
+      }
+
+      for (const objHandle of handlesToShift) {
+        const currentMatrix = getPageObjectMatrix(engine, mod, objHandle);
+        if (currentMatrix) {
+          currentMatrix.e += deltaX;
+          setPageObjectMatrix(engine, mod, objHandle, currentMatrix);
+        }
+      }
+    }
+
+    mod.FPDFPage_GenerateContent(pageHandle);
+  } finally {
+    // Standard fonts should not be closed
+  }
+}
+
+
+
+/**
+ * Completely remove an identified text span from the page content stream.
+ * Uses center-containment matching to identify only the span's own objects,
+ * preventing collateral removal of neighboring text in crowded regions.
+ *
+ * @param engine The PDFium engine instance.
+ * @param pageHandle The active page handle.
+ * @param targetSpan The exact dimensions and location of the text to destroy.
+ */
+export function deleteTextSpan(
+  engine: PdfiumEngine,
+  docHandle: number,
+  pageIndex: number,
+  pageHandle: number,
+  targetSpan: EditableTextSpan
+): void {
+  // When deleting a paragraph, reflow with empty string to automatically shift downstream lines up
+  if (targetSpan.isParagraph || (targetSpan.lines && targetSpan.lines.length > 0)) {
+    reflowAndReplaceParagraph(engine, docHandle, pageIndex, pageHandle, targetSpan, { text: '' });
+    return;
+  }
+
+  const mod = engine.getModule();
+  const objectIndices = findTextObjectIndicesForSpan(
+    engine,
+    mod,
+    pageHandle,
+    targetSpan.left,
+    targetSpan.baselineY,
+    targetSpan.width,
+    targetSpan.fontSize
+  );
+
+  if (objectIndices.length > 0) {
+    removeTextObjectsByIndex(mod, pageHandle, objectIndices);
+  } else {
+    removeTextObjectsInBounds(
+      engine,
+      mod,
+      pageHandle,
+      targetSpan.left,
+      targetSpan.baselineY,
+      targetSpan.width,
+      targetSpan.fontSize
+    );
+  }
+  mod.FPDFPage_GenerateContent(pageHandle);
+}
+
+/**
+ * Update a text span with a new transformation matrix and text value.
+ * Used for retaining original font subset when burning canvas edits.
+ * Targets only the span's backing text objects to avoid affecting surrounding text.
+ *
+ * @param engine The PDFium engine instance.
+ * @param pageHandle The active page handle.
+ * @param targetSpan The exact dimensions and location of the target text span.
+ * @param newText The updated text content.
+ * @param matrix The new transformation matrix.
+ * @return True if at least one object was updated.
+ */
+export function updateTextSpanTransform(
+  engine: PdfiumEngine,
+  pageHandle: number,
+  targetSpan: EditableTextSpan,
+  newText: string,
+  matrix: import('../../../core/types').PdfMatrix
+): boolean {
+  const mod = engine.getModule();
+  const objectIndices = findTextObjectIndicesForSpan(
+    engine,
+    mod,
+    pageHandle,
+    targetSpan.left,
+    targetSpan.baselineY,
+    targetSpan.width,
+    targetSpan.fontSize
+  );
+
+  if (objectIndices.length === 0) {
+    const didSet = setTextObjectInBounds(
+      engine,
+      mod,
+      pageHandle,
+      targetSpan.left,
+      targetSpan.baselineY,
+      targetSpan.width,
+      targetSpan.fontSize,
+      newText,
+      matrix
+    );
+    if (didSet) {
+      mod.FPDFPage_GenerateContent(pageHandle);
+    }
+    return didSet;
+  }
+
+  const didSet = setTextObjectByIndex(
+    engine,
+    mod,
+    pageHandle,
+    objectIndices[0],
+    newText,
+    matrix
+  );
+
+  if (didSet) {
+    for (let k = 1; k < objectIndices.length; k++) {
+      setTextObjectByIndex(engine, mod, pageHandle, objectIndices[k], ' ');
+    }
+    mod.FPDFPage_GenerateContent(pageHandle);
+  }
+  return didSet;
+}
+
+/**
+ * Extracts all individual character metrics and bounding boxes from a page.
+ *
+ * @param engine The PDFium engine instance.
+ * @param pageIndex Zero-based page index.
+ * @param pageHandle The active page handle.
+ * @return An array of PageCharacter objects representing all glyphs on the page.
+ */
+export function extractPageCharacters(
+  engine: PdfiumEngine,
+  _pageIndex: number,
+  pageHandle: number
+): PageCharacter[] {
+  const mod = engine.getModule();
+  const characters: PageCharacter[] = [];
+
+  let textPageHandle = 0;
+  try {
+    textPageHandle = mod.FPDFText_LoadPage(pageHandle);
+    if (!textPageHandle) return [];
+
+    const totalChars = mod.FPDFText_CountChars(textPageHandle);
+    if (totalChars <= 0) return [];
+
+    const heightPts = mod.FPDF_GetPageHeightF(pageHandle);
+    const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+
+    const leftPtr = engine.allocateMemory(8);
+    const topPtr = engine.allocateMemory(8);
+    const rightPtr = engine.allocateMemory(8);
+    const bottomPtr = engine.allocateMemory(8);
+    const xPtr = engine.allocateMemory(8);
+    const yPtr = engine.allocateMemory(8);
+
+    try {
+      for (let i = 0; i < totalChars; i++) {
+        const charCode = mod.FPDFText_GetUnicode(textPageHandle, i);
+        if (charCode === 0 || isControlOrUnidentified(charCode)) continue;
+
+        const charStr = String.fromCodePoint(charCode);
+        const fontSize = mod.FPDFText_GetFontSize(textPageHandle, i) || 12;
+
+        mod.FPDFText_GetCharBox(textPageHandle, i, leftPtr, rightPtr, bottomPtr, topPtr);
+        mod.FPDFText_GetCharOrigin(textPageHandle, i, xPtr, yPtr);
+
+        const angleRad =
+          typeof mod.FPDFText_GetCharAngle === 'function'
