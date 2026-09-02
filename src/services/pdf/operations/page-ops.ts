@@ -56,6 +56,26 @@ export interface RenderOptions {
    * Default: 4,000,000 (~4 megapixels)
    */
   maxPixelArea?: number;
+  /**
+   * Optional target canvas to reuse instead of creating a new one.
+   * If provided, the canvas dimensions and style are updated in-place.
+   */
+  targetCanvas?: HTMLCanvasElement;
+}
+
+/**
+ * Scratch ImageData and aligned buffer reused across sequential render passes
+ * to avoid allocating multi-megabyte Uint8ClampedArray buffers on every frame.
+ */
+let scratchImageData: ImageData | null = null;
+let scratchAlignedBuffer: ArrayBuffer | null = null;
+
+/**
+ * Releases cached scratch rendering buffers to free heap memory.
+ */
+export function clearRenderScratchBuffers(): void {
+  scratchImageData = null;
+  scratchAlignedBuffer = null;
 }
 
 /**
@@ -102,33 +122,55 @@ export function render(
     const bufferPtr = mod.FPDFBitmap_GetBuffer(bitmapHandle);
     const pixelCount = pixelWidth * pixelHeight;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = pixelWidth;
-    canvas.height = pixelHeight;
+    const canvas = options?.targetCanvas ?? document.createElement('canvas');
+    if (canvas.width !== pixelWidth) {
+      canvas.width = pixelWidth;
+    }
+    if (canvas.height !== pixelHeight) {
+      canvas.height = pixelHeight;
+    }
 
-    canvas.style.width = `${Math.round(widthPts * scale)}px`;
-    canvas.style.height = `${Math.round(heightPts * scale)}px`;
+    if (canvas.style) {
+      const cssWidth = `${Math.round(widthPts * scale)}px`;
+      const cssHeight = `${Math.round(heightPts * scale)}px`;
+      if (canvas.style.width !== cssWidth) {
+        canvas.style.width = cssWidth;
+      }
+      if (canvas.style.height !== cssHeight) {
+        canvas.style.height = cssHeight;
+      }
+    }
 
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Failed to obtain canvas context.');
 
-    const imgData = ctx.createImageData(pixelWidth, pixelHeight);
+    // Reuse scratch ImageData if dimensions match, avoiding multi-megabyte heap churn
+    let imgData: ImageData;
+    if (scratchImageData && scratchImageData.width === pixelWidth && scratchImageData.height === pixelHeight) {
+      imgData = scratchImageData;
+    } else {
+      imgData = ctx.createImageData(pixelWidth, pixelHeight);
+      scratchImageData = imgData;
+    }
     
     let src32: Uint32Array;
     if (bufferPtr % 4 === 0) {
       src32 = new Uint32Array(mod.pdfium.HEAPU8.buffer, bufferPtr, pixelCount);
     } else {
-      // Copy to aligned buffer when FPDFBitmap_GetBuffer returns unaligned pointer.
-      const rawBytes = new Uint8Array(mod.pdfium.HEAPU8.buffer, bufferPtr, pixelCount * 4);
-      const alignedBuffer = new ArrayBuffer(pixelCount * 4);
-      new Uint8Array(alignedBuffer).set(rawBytes);
-      src32 = new Uint32Array(alignedBuffer);
+      // Reuse scratch aligned buffer when FPDFBitmap_GetBuffer returns an unaligned pointer.
+      const requiredBytes = pixelCount * 4;
+      if (!scratchAlignedBuffer || scratchAlignedBuffer.byteLength < requiredBytes) {
+        scratchAlignedBuffer = new ArrayBuffer(requiredBytes);
+      }
+      const rawBytes = new Uint8Array(mod.pdfium.HEAPU8.buffer, bufferPtr, requiredBytes);
+      new Uint8Array(scratchAlignedBuffer, 0, requiredBytes).set(rawBytes);
+      src32 = new Uint32Array(scratchAlignedBuffer, 0, pixelCount);
     }
     const dst32 = new Uint32Array(imgData.data.buffer);
 
     for (let i = 0; i < pixelCount; i++) {
       const px = src32[i];
-      dst32[i] = (px & 0xff00ff00) | ((px & 0xff) << 16) | ((px >> 16) & 0xff);
+      dst32[i] = (px & 0xff00ff00) | ((px & 0x000000ff) << 16) | ((px & 0x00ff0000) >> 16);
     }
 
     ctx.putImageData(imgData, 0, 0);
