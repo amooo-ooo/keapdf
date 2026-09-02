@@ -9,7 +9,16 @@ import {
   readCharFontName,
   readCharFillColor,
   mapStandardFontName,
+  getPageCropInfo,
+  pdfBoxToDomBounds,
+  pdfToDomCoords,
 } from '../../../core/pdfium-helpers';
+import {
+  isUnicodeWhitespace,
+  isZeroWidthOrInvisible,
+  isControlOrUnidentified,
+  sanitizePdfText,
+} from '../utils';
 
 /**
  * Raw character metrics extracted directly from PDFium text stream.
@@ -105,6 +114,7 @@ export function detectParagraphs(
     if (totalChars <= 0) return [];
 
     const heightPts = mod.FPDF_GetPageHeightF(pageHandle);
+    const cropInfo = getPageCropInfo(engine, mod, pageHandle);
 
     const leftPtr = engine.allocateMemory(8);
     const topPtr = engine.allocateMemory(8);
@@ -118,10 +128,10 @@ export function detectParagraphs(
     try {
       for (let i = 0; i < totalChars; i++) {
         const charCode = mod.FPDFText_GetUnicode(textPageHandle, i);
-        if (charCode === 0) continue;
+        if (charCode === 0 || isControlOrUnidentified(charCode)) continue;
 
         const rawFontName = readCharFontName(engine, mod, textPageHandle, i);
-        let charStr = String.fromCharCode(charCode);
+        let charStr = String.fromCodePoint(charCode);
         if (charCode === 0xf0b7) {
           charStr = '\u2022';
         } else if (charCode === 0xf0a7) {
@@ -155,7 +165,11 @@ export function detectParagraphs(
         const originY = heapF64[yPtr >> 3] || 0;
 
         if (right <= left) {
-          right = left + fontSize * 0.28;
+          if (isZeroWidthOrInvisible(charCode)) {
+            right = left;
+          } else {
+            right = left + fontSize * 0.28;
+          }
         }
 
         let domTop: number;
@@ -164,18 +178,26 @@ export function detectParagraphs(
         let domRight: number;
         let domBaseline: number;
 
-        if (isVertical) {
-          domTop = Math.max(0, heightPts - Math.max(top, bottom));
-          domBottom = Math.max(0, heightPts - Math.min(top, bottom));
-          domLeft = Math.min(left, right);
-          domRight = Math.max(left, right);
-          domBaseline = originX;
+        if (cropInfo.rotation !== 0) {
+          const bounds = pdfBoxToDomBounds(left, bottom, right, top, cropInfo);
+          const origin = pdfToDomCoords(originX, originY, cropInfo);
+          domLeft = bounds.left;
+          domRight = bounds.right;
+          domTop = bounds.top;
+          domBottom = bounds.bottom;
+          domBaseline = origin.y;
+        } else if (isVertical) {
+          domTop = Math.max(0, heightPts - (Math.max(top, bottom) - cropInfo.cropBottom));
+          domBottom = Math.max(0, heightPts - (Math.min(top, bottom) - cropInfo.cropBottom));
+          domLeft = Math.min(left, right) - cropInfo.cropLeft;
+          domRight = Math.max(left, right) - cropInfo.cropLeft;
+          domBaseline = originX - cropInfo.cropLeft;
         } else {
-          domBaseline = heightPts - originY;
-          domLeft = Math.min(left, right);
-          domRight = Math.max(left, right);
-          domTop = Math.max(0, heightPts - Math.max(top, bottom));
-          domBottom = Math.max(0, heightPts - Math.min(top, bottom));
+          domBaseline = heightPts - (originY - cropInfo.cropBottom);
+          domLeft = Math.min(left, right) - cropInfo.cropLeft;
+          domRight = Math.max(left, right) - cropInfo.cropLeft;
+          domTop = Math.max(0, heightPts - (Math.max(top, bottom) - cropInfo.cropBottom));
+          domBottom = Math.max(0, heightPts - (Math.min(top, bottom) - cropInfo.cropBottom));
 
           if (domBottom <= domTop) {
             domTop = Math.max(0, domBaseline - fontSize * 0.85);
@@ -330,6 +352,18 @@ function isBulletOrListItem(line: TextLine): boolean {
   return false;
 }
 
+function isAlphaNumeric(code: number): boolean {
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function hasAlphaNumericChar(str: string): boolean {
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (isAlphaNumeric(code)) return true;
+  }
+  return false;
+}
+
 /**
  * Computes the dominant font, weight, style, and color from a set of characters or words,
  * prioritizing alphanumeric body characters over bullet symbols or icons.
@@ -348,17 +382,8 @@ function getDominantTypography(items: Array<{
   fontWeight: 'bold' | 'normal';
   fontStyle: 'italic' | 'normal';
 } {
-  // Filter for alphanumeric body characters first
-  const bodyItems = items.filter((item) => {
-    const str = item.unicode || item.text || '';
-    const raw = item.rawFontFamily || '';
-    return /[a-zA-Z0-9]/.test(str) && !isSymbolFont(raw);
-  });
-
-  const nonSymbolItems = items.filter((item) => !isSymbolFont(item.rawFontFamily || ''));
-  const candidateItems = bodyItems.length > 0 ? bodyItems : (nonSymbolItems.length > 0 ? nonSymbolItems : items);
-
-  if (candidateItems.length === 0) {
+  const len = items.length;
+  if (len === 0) {
     return {
       fontFamily: 'Helvetica',
       rawFontFamily: 'Helvetica',
@@ -368,11 +393,61 @@ function getDominantTypography(items: Array<{
     };
   }
 
-  const fontCounts = new Map<string, { count: number; raw: string; detected: string; isBold: boolean }>();
-  const colorCounts = new Map<string, { count: number; color: ColorRgba }>();
+  // Fast path for single item: avoids all Map allocations
+  if (len === 1) {
+    const it = items[0];
+    const raw = it.rawFontFamily || 'Helvetica';
+    const detected = it.fontFamily || 'Helvetica';
+    const rawLower = raw.toLowerCase();
+    const isBold =
+      typeof it.fontWeight === 'number'
+        ? it.fontWeight >= 600 || rawLower.includes('bold')
+        : it.fontWeight === 'bold' || rawLower.includes('bold');
+    const isItalic = rawLower.includes('italic') || rawLower.includes('oblique');
+    return {
+      fontFamily: detected,
+      rawFontFamily: raw,
+      color: it.color ?? { r: 0, g: 0, b: 0, a: 255 },
+      fontWeight: isBold ? 'bold' : 'normal',
+      fontStyle: isItalic ? 'italic' : 'normal',
+    };
+  }
 
-  for (const item of candidateItems) {
+  // Determine if any alphanumeric body items exist without allocating filtered arrays
+  let hasBody = false;
+  let hasNonSymbol = false;
+  for (let i = 0; i < len; i++) {
+    const it = items[i];
+    const raw = it.rawFontFamily || '';
+    const isSym = isSymbolFont(raw);
+    if (!isSym) {
+      hasNonSymbol = true;
+      const str = it.unicode || it.text || '';
+      if (hasAlphaNumericChar(str)) {
+        hasBody = true;
+        break;
+      }
+    }
+  }
+
+  const fontCounts = new Map<string, { count: number; raw: string; detected: string; isBold: boolean }>();
+  // 32-bit integer key for RGBA colors: (r << 24) | (g << 16) | (b << 8) | a
+  const colorCounts = new Map<number, { count: number; color: ColorRgba }>();
+
+  for (let i = 0; i < len; i++) {
+    const item = items[i];
     const rawFont = item.rawFontFamily || 'Helvetica';
+    const isSym = isSymbolFont(rawFont);
+    const str = item.unicode || item.text || '';
+    const isAlpha = hasAlphaNumericChar(str);
+
+    if (hasBody && (isSym || !isAlpha)) {
+      continue;
+    }
+    if (!hasBody && hasNonSymbol && isSym) {
+      continue;
+    }
+
     const detectedFont = item.fontFamily || 'Helvetica';
     const rawLower = rawFont.toLowerCase();
     const isBold =
@@ -380,15 +455,22 @@ function getDominantTypography(items: Array<{
         ? item.fontWeight >= 600 || rawLower.includes('bold')
         : item.fontWeight === 'bold' || rawLower.includes('bold');
 
-    const entry = fontCounts.get(rawFont) || { count: 0, raw: rawFont, detected: detectedFont, isBold };
-    entry.count++;
-    fontCounts.set(rawFont, entry);
+    const entry = fontCounts.get(rawFont);
+    if (entry) {
+      entry.count++;
+    } else {
+      fontCounts.set(rawFont, { count: 1, raw: rawFont, detected: detectedFont, isBold });
+    }
 
     if (item.color) {
-      const colorKey = `${item.color.r},${item.color.g},${item.color.b},${item.color.a}`;
-      const colorEntry = colorCounts.get(colorKey) || { count: 0, color: item.color };
-      colorEntry.count++;
-      colorCounts.set(colorKey, colorEntry);
+      const c = item.color;
+      const colorKey = ((c.r & 0xff) << 24) | ((c.g & 0xff) << 16) | ((c.b & 0xff) << 8) | (c.a & 0xff);
+      const colorEntry = colorCounts.get(colorKey);
+      if (colorEntry) {
+        colorEntry.count++;
+      } else {
+        colorCounts.set(colorKey, { count: 1, color: c });
+      }
     }
   }
 
@@ -433,23 +515,38 @@ function getDominantTypography(items: Array<{
 function getDominantFontSize(
   items: Array<{ text?: string; unicode?: string; fontSize: number; rawFontFamily?: string }>
 ): number {
-  if (items.length === 0) return 12;
+  const len = items.length;
+  if (len === 0) return 12;
+  if (len === 1) return items[0].fontSize;
 
-  // Filter for alphanumeric body characters
-  const bodyItems = items.filter((item) => {
-    const str = item.text || item.unicode || '';
-    const raw = item.rawFontFamily || '';
-    return /[a-zA-Z0-9]/.test(str) && !isSymbolFont(raw);
-  });
-
-  const candidateItems = bodyItems.length > 0 ? bodyItems : items;
+  // Check if body items exist without allocating filtered arrays
+  let hasBody = false;
+  for (let i = 0; i < len; i++) {
+    const it = items[i];
+    const raw = it.rawFontFamily || '';
+    if (!isSymbolFont(raw)) {
+      const str = it.text || it.unicode || '';
+      if (hasAlphaNumericChar(str)) {
+        hasBody = true;
+        break;
+      }
+    }
+  }
 
   // Compute character-count weighted frequency of each font size (binned to 0.1pt)
   const sizeWeights = new Map<number, number>();
   let totalChars = 0;
   let weightedSum = 0;
 
-  for (const item of candidateItems) {
+  for (let i = 0; i < len; i++) {
+    const item = items[i];
+    const raw = item.rawFontFamily || '';
+    if (hasBody) {
+      if (isSymbolFont(raw)) continue;
+      const str = item.text || item.unicode || '';
+      if (!hasAlphaNumericChar(str)) continue;
+    }
+
     const charCount = (item.text || item.unicode || 'x').length;
     const roundedSize = Math.round(item.fontSize * 10) / 10;
     const currentWeight = sizeWeights.get(roundedSize) || 0;
@@ -487,6 +584,7 @@ function getDominantFontSize(
 function formWords(chars: RawChar[]): TextWord[] {
   const words: TextWord[] = [];
   let currentWordChars: RawChar[] = [];
+  let pendingPrecedingSpace = false;
 
   const flushWord = (): void => {
     if (currentWordChars.length === 0) return;
@@ -498,6 +596,7 @@ function formWords(chars: RawChar[]): TextWord[] {
     let maxBottom = -Infinity;
     let sumFontSize = 0;
     let sumOriginY = 0;
+    let sumDomBaseline = 0;
 
     for (const c of currentWordChars) {
       wordText += c.unicode;
@@ -507,16 +606,17 @@ function formWords(chars: RawChar[]): TextWord[] {
       if (c.domBottom > maxBottom) maxBottom = c.domBottom;
       sumFontSize += c.fontSize;
       sumOriginY += c.originY;
+      sumDomBaseline += c.domBaseline;
     }
 
-    const trimmed = wordText.trim();
-    if (trimmed.length > 0 && (minLeft < maxRight || minTop < maxBottom)) {
+    const sanitized = sanitizePdfText(wordText).trim();
+    const firstChar = currentWordChars[0];
+    if (sanitized.length > 0 && firstChar && (minLeft < maxRight || minTop < maxBottom || firstChar.isVertical)) {
       const typo = getDominantTypography(currentWordChars);
       const exactFontSize = Math.round((sumFontSize / currentWordChars.length) * 10) / 10;
-      const firstChar = currentWordChars[0];
 
       words.push({
-        text: trimmed,
+        text: sanitized,
         left: minLeft,
         top: minTop,
         right: maxRight,
@@ -525,8 +625,9 @@ function formWords(chars: RawChar[]): TextWord[] {
         height: Math.max(1, maxBottom - minTop),
         fontSize: exactFontSize,
         baselineY: firstChar.isVertical ? firstChar.originX : sumOriginY / currentWordChars.length,
+        domBaseline: firstChar.isVertical ? firstChar.domBaseline : sumDomBaseline / currentWordChars.length,
         charStartIndex: firstChar.charIndex,
-        charCount: currentWordChars.length,
+        charCount: sanitized.length,
         fontFamily: typo.fontFamily,
         rawFontFamily: typo.rawFontFamily,
         color: typo.color,
@@ -536,7 +637,9 @@ function formWords(chars: RawChar[]): TextWord[] {
         rotation: firstChar.rotation,
         isVertical: firstChar.isVertical,
         orientation: firstChar.isVertical ? 'vertical' : 'horizontal',
+        hasPrecedingSpace: words.length > 0 ? pendingPrecedingSpace : false,
       });
+      pendingPrecedingSpace = false;
     }
 
     currentWordChars = [];
@@ -544,10 +647,13 @@ function formWords(chars: RawChar[]): TextWord[] {
 
   for (let i = 0; i < chars.length; i++) {
     const c = chars[i];
-    const isWhitespace = c.unicode === ' ' || c.unicode === '\t' || c.unicode === '\n' || c.unicode === '\r';
-
-    if (isWhitespace) {
+    if (isUnicodeWhitespace(c.unicode)) {
       flushWord();
+      pendingPrecedingSpace = true;
+      continue;
+    }
+
+    if (isZeroWidthOrInvisible(c.unicode)) {
       continue;
     }
 
@@ -583,6 +689,9 @@ function formWords(chars: RawChar[]): TextWord[] {
           isFontChanged ||
           isWeightChanged
         ) {
+          if (verticalGap >= prev.fontSize * 0.25) {
+            pendingPrecedingSpace = true;
+          }
           flushWord();
         }
       } else {
@@ -600,6 +709,9 @@ function formWords(chars: RawChar[]): TextWord[] {
           isFontChanged ||
           isWeightChanged
         ) {
+          if (gap >= prev.fontSize * 0.25) {
+            pendingPrecedingSpace = true;
+          }
           flushWord();
         }
       }
@@ -612,12 +724,239 @@ function formWords(chars: RawChar[]): TextWord[] {
   return words;
 }
 
+interface LayoutBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+interface GutterInterval {
+  start: number;
+  end: number;
+  width: number;
+}
+
+/**
+ * Detects vertical whitespace gutters between text columns using a 1D projection histogram.
+ *
+ * @param boxes Bounding boxes of text elements within the region.
+ * @param region Bounding rectangle of the analysis region.
+ * @param minGutterWidth Minimum width in points to qualify as a column gutter.
+ * @return Array of detected vertical gutter intervals.
+ */
+function detectVerticalGutters(
+  boxes: LayoutBox[],
+  region: LayoutBox,
+  minGutterWidth: number
+): GutterInterval[] {
+  if (boxes.length === 0) return [];
+
+  const minX = Math.floor(region.left);
+  const maxX = Math.ceil(region.right);
+  const width = Math.max(1, maxX - minX);
+
+  const profile = new Uint16Array(width);
+
+  for (const box of boxes) {
+    const x0 = Math.max(0, Math.floor(box.left - minX));
+    const x1 = Math.min(width, Math.ceil(box.right - minX));
+    for (let x = x0; x < x1; x++) {
+      profile[x]++;
+    }
+  }
+
+  const gutters: GutterInterval[] = [];
+  const maxNoise = Math.min(2, Math.max(0, Math.floor(boxes.length * 0.015)));
+  let inValley = false;
+  let valleyStart = 0;
+
+  for (let x = 0; x < width; x++) {
+    if (profile[x] <= maxNoise) {
+      if (!inValley) {
+        inValley = true;
+        valleyStart = x;
+      }
+    } else {
+      if (inValley) {
+        inValley = false;
+        const valleyWidth = x - valleyStart;
+        if (valleyWidth >= minGutterWidth && valleyStart > 10 && x < width - 10) {
+          gutters.push({
+            start: minX + valleyStart,
+            end: minX + x,
+            width: valleyWidth,
+          });
+        }
+      }
+    }
+  }
+
+  if (inValley) {
+    const valleyWidth = width - valleyStart;
+    if (valleyWidth >= minGutterWidth && valleyStart > 10) {
+      gutters.push({
+        start: minX + valleyStart,
+        end: maxX,
+        width: valleyWidth,
+      });
+    }
+  }
+
+  return gutters;
+}
+
+/**
+ * Evaluates whether two adjacent words on the same baseline are typographically compatible
+ * to belong to the same text line, preventing merging of code blocks, captions, and body text.
+ *
+ * @param w1 Left word.
+ * @param w2 Right word.
+ * @param gap Horizontal gap in points between w1 and w2.
+ * @return True if typographically compatible for intra-line assembly.
+ */
+function isTypographicallyCompatible(w1: TextWord, w2: TextWord, gap: number): boolean {
+  if (Math.abs(w1.fontSize - w2.fontSize) > 1.8) {
+    return false;
+  }
+
+  const isMono1 = /mono|courier|cmtt|consolas|menlo/i.test(w1.fontFamily || w1.rawFontFamily || '');
+  const isMono2 = /mono|courier|cmtt|consolas|menlo/i.test(w2.fontFamily || w2.rawFontFamily || '');
+
+  if (isMono1 !== isMono2) {
+    const monoGapTolerance = Math.min(24, Math.max(10, w1.fontSize * 1.2));
+    if (gap > monoGapTolerance) {
+      return false;
+    }
+  }
+
+  const isBold1 = (w1.fontWeight && (w1.fontWeight === 'bold' || Number(w1.fontWeight) >= 600)) || /bold|black|medi/i.test(w1.fontFamily || w1.rawFontFamily || '');
+  const isBold2 = (w2.fontWeight && (w2.fontWeight === 'bold' || Number(w2.fontWeight) >= 600)) || /bold|black|medi/i.test(w2.fontFamily || w2.rawFontFamily || '');
+  if (isBold1 !== isBold2 && gap > 24.0) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Segments assembled horizontal text lines into layout bands and columns,
+ * enforcing natural column-first reading order within multi-column sections.
+ *
+ * @param lines Array of assembled horizontal text lines.
+ * @return Array of TextLine objects ordered column-first.
+ */
+function segmentLayoutColumns(lines: TextLine[]): TextLine[] {
+  if (lines.length <= 1) return lines;
+
+  const sortedLines = [...lines].sort((a, b) => a.top - b.top);
+
+  const minLeft = Math.min(...sortedLines.map((l) => l.left));
+  const maxRight = Math.max(...sortedLines.map((l) => l.right));
+  const contentWidth = maxRight - minLeft;
+
+  const spanningLines = new Set<TextLine>();
+  for (const line of sortedLines) {
+    if (line.width >= contentWidth * 0.72) {
+      spanningLines.add(line);
+    }
+  }
+
+  const bands: TextLine[][] = [];
+  let currentBand: TextLine[] = [sortedLines[0]];
+
+  for (let i = 1; i < sortedLines.length; i++) {
+    const prev = currentBand[currentBand.length - 1];
+    const curr = sortedLines[i];
+    const vGap = curr.top - prev.bottom;
+    const isSpanningChange = spanningLines.has(prev) !== spanningLines.has(curr);
+
+    if (vGap >= 14 || isSpanningChange) {
+      bands.push(currentBand);
+      currentBand = [curr];
+    } else {
+      currentBand.push(curr);
+    }
+  }
+  if (currentBand.length > 0) bands.push(currentBand);
+
+  const resultLines: TextLine[] = [];
+
+  for (const band of bands) {
+    const isSpanning = band.some((l) => spanningLines.has(l));
+    if (isSpanning || band.length < 3) {
+      band.sort((a, b) => a.top - b.top);
+      resultLines.push(...band);
+      continue;
+    }
+
+    const bandLeft = Math.min(...band.map((l) => l.left));
+    const bandRight = Math.max(...band.map((l) => l.right));
+    const bandTop = Math.min(...band.map((l) => l.top));
+    const bandBottom = Math.max(...band.map((l) => l.bottom));
+
+    const gutters = detectVerticalGutters(
+      band,
+      { left: bandLeft, right: bandRight, top: bandTop, bottom: bandBottom },
+      12
+    );
+
+    if (gutters.length === 0) {
+      band.sort((a, b) => a.top - b.top);
+      resultLines.push(...band);
+      continue;
+    }
+
+    gutters.sort((a, b) => a.start - b.start);
+    const colIntervals: Array<{ left: number; right: number }> = [];
+    let prevX = bandLeft;
+    for (const g of gutters) {
+      colIntervals.push({ left: prevX, right: g.start });
+      prevX = g.end;
+    }
+    colIntervals.push({ left: prevX, right: bandRight });
+
+    const columns: TextLine[][] = colIntervals.map(() => []);
+
+    for (const l of band) {
+      const lineCenter = (l.left + l.right) / 2;
+      let placed = false;
+      for (let c = 0; c < colIntervals.length; c++) {
+        if (lineCenter >= colIntervals[c].left && lineCenter <= colIntervals[c].right) {
+          columns[c].push(l);
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) {
+        let bestCol = 0;
+        let bestDist = Infinity;
+        for (let c = 0; c < colIntervals.length; c++) {
+          const dist = Math.abs(l.left - colIntervals[c].left);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestCol = c;
+          }
+        }
+        columns[bestCol].push(l);
+      }
+    }
+
+    for (const col of columns) {
+      col.sort((a, b) => a.top - b.top);
+      resultLines.push(...col);
+    }
+  }
+
+  return resultLines;
+}
+
 /**
  * Assembles horizontal words into ordered lines.
  *
  * @param words Array of extracted horizontal words.
  * @param rotation Cardinal rotation angle (0 or 180).
- * @return Array of TextLine objects sorted top-to-bottom.
+ * @return Array of TextLine objects sorted in column-first reading order.
  */
 function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[] {
   if (words.length === 0) return [];
@@ -672,9 +1011,12 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
 
       const prevWord = currentSubGroup[currentSubGroup.length - 1];
       const horizontalGap = word.left - prevWord.right;
-      const columnGutterThreshold = Math.max(32, prevWord.fontSize * 2.5);
+      const maxIntraLineGap = Math.min(32, Math.max(16, prevWord.fontSize * 1.8));
+      const minNegativeGap = -Math.max(6, prevWord.fontSize * 0.65);
 
-      if (horizontalGap > columnGutterThreshold) {
+      const isTypoMatch = isTypographicallyCompatible(prevWord, word, horizontalGap);
+
+      if (horizontalGap > maxIntraLineGap || horizontalGap < minNegativeGap || !isTypoMatch) {
         subGroups.push(currentSubGroup);
         currentSubGroup = [word];
       } else {
@@ -706,6 +1048,7 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
       let minTop = Infinity;
       let maxBottom = -Infinity;
       let sumBaselineY = 0;
+      let sumDomBaseline = 0;
       let fullLineText = '';
 
       for (let wIdx = 0; wIdx < textWords.length; wIdx++) {
@@ -713,7 +1056,7 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
         if (wIdx > 0) {
           const prev = textWords[wIdx - 1];
           const gap = w.left - prev.right;
-          if (gap >= Math.min(prev.fontSize, w.fontSize) * 0.18) {
+          if (w.hasPrecedingSpace || gap >= Math.min(prev.fontSize, w.fontSize) * 0.18) {
             fullLineText += ' ';
           }
         }
@@ -724,6 +1067,7 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
         if (w.top < minTop) minTop = w.top;
         if (w.bottom > maxBottom) maxBottom = w.bottom;
         sumBaselineY += w.baselineY;
+        if (w.domBaseline !== undefined) sumDomBaseline += w.domBaseline;
       }
 
       if (fullLineText.trim().length === 0) continue;
@@ -731,6 +1075,7 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
       const typo = getDominantTypography(textWords);
       const dominantLineFontSize = getDominantFontSize(textWords);
       const avgBaselineY = sumBaselineY / textWords.length;
+      const avgDomBaseline = sumDomBaseline > 0 ? sumDomBaseline / textWords.length : undefined;
       const lineHeight = dominantLineFontSize * 1.25;
 
       lines.push({
@@ -743,6 +1088,7 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
         height: Math.max(1, maxBottom - minTop),
         fontSize: dominantLineFontSize,
         baselineY: avgBaselineY,
+        domBaseline: avgDomBaseline,
         lineHeight,
         charStartIndex: textWords[0].charStartIndex,
         charCount: textWords.reduce((sum, w) => sum + w.charCount, 0),
@@ -761,7 +1107,7 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
     }
   }
 
-  return lines.sort((a, b) => a.top - b.top);
+  return segmentLayoutColumns(lines);
 }
 
 /**
@@ -857,6 +1203,7 @@ function assembleVerticalLines(words: TextWord[], rotation: number): TextLine[] 
       let minTop = Infinity;
       let maxBottom = -Infinity;
       let sumBaseline = 0;
+      let sumDomBaseline = 0;
       let fullLineText = '';
 
       for (let wIdx = 0; wIdx < textWords.length; wIdx++) {
@@ -864,7 +1211,7 @@ function assembleVerticalLines(words: TextWord[], rotation: number): TextLine[] 
         if (wIdx > 0) {
           const prev = textWords[wIdx - 1];
           const gap = w.top - prev.bottom;
-          if (gap >= Math.min(prev.fontSize, w.fontSize) * 0.18) {
+          if (w.hasPrecedingSpace || gap >= Math.min(prev.fontSize, w.fontSize) * 0.18) {
             fullLineText += ' ';
           }
         }
@@ -875,6 +1222,7 @@ function assembleVerticalLines(words: TextWord[], rotation: number): TextLine[] 
         if (w.top < minTop) minTop = w.top;
         if (w.bottom > maxBottom) maxBottom = w.bottom;
         sumBaseline += w.baselineY;
+        if (w.domBaseline !== undefined) sumDomBaseline += w.domBaseline;
       }
 
       if (fullLineText.trim().length === 0) continue;
@@ -882,6 +1230,7 @@ function assembleVerticalLines(words: TextWord[], rotation: number): TextLine[] 
       const typo = getDominantTypography(textWords);
       const dominantLineFontSize = getDominantFontSize(textWords);
       const avgBaseline = sumBaseline / textWords.length;
+      const avgDomBaseline = sumDomBaseline > 0 ? sumDomBaseline / textWords.length : undefined;
       const lineHeight = dominantLineFontSize * 1.25;
 
       lines.push({
@@ -894,6 +1243,7 @@ function assembleVerticalLines(words: TextWord[], rotation: number): TextLine[] 
         height: Math.max(1, maxBottom - minTop),
         fontSize: dominantLineFontSize,
         baselineY: avgBaseline,
+        domBaseline: avgDomBaseline,
         lineHeight,
         charStartIndex: textWords[0].charStartIndex,
         charCount: textWords.reduce((sum, w) => sum + w.charCount, 0),
@@ -912,7 +1262,7 @@ function assembleVerticalLines(words: TextWord[], rotation: number): TextLine[] 
     }
   }
 
-  return lines.sort((a, b) => a.left - b.left);
+  return lines;
 }
 
 /**
@@ -947,12 +1297,75 @@ function assembleLines(words: TextWord[]): TextLine[] {
 }
 
 /**
+ * Merges horizontally adjacent co-linear line fragments on the same baseline into single lines.
+ *
+ * @param lines Array of TextLine objects sorted in reading order.
+ * @return Array of TextLine objects with co-linear fragments unified.
+ */
+export function mergeColinearLines(lines: TextLine[]): TextLine[] {
+  if (lines.length <= 1) return lines;
+
+  const merged: TextLine[] = [];
+  let current = { ...lines[0] };
+
+  for (let i = 1; i < lines.length; i++) {
+    const next = lines[i];
+    const baselineDiff = Math.abs(current.baselineY - next.baselineY);
+    const avgFontSize = (current.fontSize + next.fontSize) / 2;
+
+    const isColinear =
+      baselineDiff <= 3.0 &&
+      next.left >= current.left - 2.0 &&
+      next.left <= current.right + Math.max(36.0, avgFontSize * 2.5) &&
+      Math.abs(current.fontSize - next.fontSize) <= 3.0;
+
+    if (isColinear) {
+      const minLeft = Math.min(current.left, next.left);
+      const maxRight = Math.max(current.right, next.right);
+      const minTop = Math.min(current.top, next.top);
+      const maxBottom = Math.max(current.bottom, next.bottom);
+      const nextWord = next.words && next.words.length > 0 ? next.words[0] : null;
+      const colinearGap = next.left - current.right;
+      const needsSpace = Boolean(nextWord?.hasPrecedingSpace) || colinearGap >= Math.min(current.fontSize, next.fontSize) * 0.18;
+      const combinedText = current.text + (needsSpace ? ' ' : '') + next.text;
+      const nextWordsCloned = (next.words || []).map((w, idx) => {
+        if (idx === 0 && needsSpace && !w.hasPrecedingSpace) {
+          return { ...w, hasPrecedingSpace: true };
+        }
+        return { ...w };
+      });
+      const combinedWords = [...(current.words || []).map((w) => ({ ...w })), ...nextWordsCloned];
+
+      current = {
+        ...current,
+        text: combinedText,
+        words: combinedWords,
+        left: minLeft,
+        right: maxRight,
+        top: minTop,
+        bottom: maxBottom,
+        width: maxRight - minLeft,
+        height: maxBottom - minTop,
+        charCount: combinedText.length,
+        charStartIndex: Math.min(current.charStartIndex, next.charStartIndex),
+        fontSize: Math.max(current.fontSize, next.fontSize),
+      };
+    } else {
+      merged.push(current);
+      current = next;
+    }
+  }
+  merged.push(current);
+  return merged;
+}
+
+/**
  * Clusters horizontal lines into semantic paragraph blocks.
  *
  * @param lines Sorted array of horizontal text lines.
  * @param pageIndex Zero-based page index.
- * @param rotation Cardinal rotation (0 or 180).
- * @return Array of EditableTextSpan objects.
+ * @param rotation Cardinal rotation angle (0 or 180).
+ * @return Array of EditableTextSpan objects representing paragraphs.
  */
 function clusterHorizontalParagraphs(
   lines: TextLine[],
@@ -961,12 +1374,13 @@ function clusterHorizontalParagraphs(
 ): EditableTextSpan[] {
   if (lines.length === 0) return [];
 
+  const unifiedLines = mergeColinearLines(lines);
   const paragraphClusters: TextLine[][] = [];
-  let currentCluster: TextLine[] = [lines[0]];
+  let currentCluster: TextLine[] = [unifiedLines[0]];
 
-  for (let i = 1; i < lines.length; i++) {
+  for (let i = 1; i < unifiedLines.length; i++) {
     const prevLine = currentCluster[currentCluster.length - 1];
-    const nextLine = lines[i];
+    const nextLine = unifiedLines[i];
 
     const isNextBullet = isBulletOrListItem(nextLine);
     const isPrevBullet = isBulletOrListItem(prevLine);
@@ -994,12 +1408,12 @@ function clusterHorizontalParagraphs(
       continue;
     }
 
-    // RULE 3: Regular paragraph clustering
+    // RULE 3: Regular body paragraph lines merge based on reading geometry
     const verticalGap = nextLine.top - prevLine.bottom;
-    const baselineDiff = Math.abs(prevLine.baselineY - nextLine.baselineY);
     const avgFontSize = (prevLine.fontSize + nextLine.fontSize) / 2;
+    const baselineDiff = Math.abs(nextLine.baselineY - prevLine.baselineY);
 
-    const isLeadingValid = verticalGap >= -avgFontSize * 0.4 && verticalGap <= avgFontSize * 1.35;
+    const isLeadingValid = verticalGap >= -avgFontSize * 0.35 && verticalGap <= avgFontSize * 1.35;
     const isBaselineValid = baselineDiff >= avgFontSize * 0.75 && baselineDiff <= avgFontSize * 2.2;
 
     const leftMarginDiff = Math.abs(nextLine.left - prevLine.left);
@@ -1010,14 +1424,17 @@ function clusterHorizontalParagraphs(
       prevLine.left - nextLine.left <= 36.0;
 
     const horizontalOverlap = Math.min(prevLine.right, nextLine.right) - Math.max(prevLine.left, nextLine.left);
-    const hasColumnOverlap = horizontalOverlap > -10.0;
+    const minLineWidth = Math.min(prevLine.width, nextLine.width);
+    const hasColumnOverlap = horizontalOverlap > Math.min(20.0, minLineWidth * 0.25);
 
-    const isSeparateColumn = nextLine.left > prevLine.right + 20.0 || nextLine.right < prevLine.left - 20.0;
+    const isSeparateColumn = nextLine.left > prevLine.right + 12.0 || nextLine.right < prevLine.left - 12.0;
     const isFontParity = Math.abs(nextLine.fontSize - prevLine.fontSize) <= 1.8;
 
-    const prevEndsWithPunctuation = /[.?!:]\s*$/.test(prevLine.text);
-    const isParagraphBreak = prevEndsWithPunctuation && verticalGap > avgFontSize * 0.45;
-    const isLargeBreak = verticalGap > avgFontSize * 0.75;
+    const prevEndsWithPunctuation = /[.?!:][\s\u200B-\u200F\uFEFF\u2060]*$/.test(prevLine.text);
+    const isIndentedNewParagraph = prevEndsWithPunctuation && nextLine.left >= prevLine.left + Math.max(10.0, avgFontSize * 0.8);
+    const isShortTerminalLine = prevEndsWithPunctuation && prevLine.right < nextLine.right - Math.max(25.0, avgFontSize * 2.5) && verticalGap > avgFontSize * 0.45;
+    const isParagraphBreak = isShortTerminalLine || isIndentedNewParagraph;
+    const isLargeBreak = verticalGap > Math.max(8.0, avgFontSize * 0.85);
 
     const isPrevHeading = prevLine.text.length < 35 && prevLine.fontSize > nextLine.fontSize + 1.5;
     const isLargeBreakAfterHeading = isPrevHeading && verticalGap > avgFontSize * 0.5;
@@ -1098,6 +1515,7 @@ function clusterHorizontalParagraphs(
       rawFontFamily: typo.rawFontFamily,
       color: typo.color,
       baselineY: firstLine.baselineY,
+      domBaseline: firstLine.domBaseline,
       charStartIndex: firstLine.charStartIndex,
       charCount: totalChars,
       lines: cluster,
@@ -1215,6 +1633,7 @@ function clusterVerticalParagraphs(
       rawFontFamily: typo.rawFontFamily,
       color: typo.color,
       baselineY: sumBaseline / cluster.length,
+      domBaseline: firstLine.domBaseline,
       charStartIndex: firstLine.charStartIndex,
       charCount: totalChars,
       lines: cluster,
