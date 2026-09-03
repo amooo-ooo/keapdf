@@ -804,13 +804,52 @@ export class PdfDocument {
 
       // Apply AcroForm fields
       if (pendingFields.length > 0) {
-        const form = pdfDoc.getForm();
+        // Ensure Chromium and PDF viewers refresh appearances from form values
+        form.acroForm.dict.set(PDFName.of('NeedAppearances'), PDFBool.True);
+        const usedFieldNames = new Set<string>();
 
         for (const { pageIndex, field } of pendingFields) {
           const page = pdfDoc.getPage(pageIndex);
-          const { height: pageHeight } = page.getSize();
+          const cropBox = page.getCropBox() || page.getMediaBox();
+          const cropX = cropBox.x ?? 0;
+          const cropY = cropBox.y ?? 0;
+          const cropW = cropBox.width;
+          const cropH = cropBox.height;
 
-          const pdfLibY = pageHeight - field.y - field.height;
+          const pageRot = ((page.getRotation().angle % 360) + 360) % 360 as 0 | 90 | 180 | 270;
+          const elemRot = (((Math.round((field.rotation ?? 0) / 90) * 90) % 360) + 360) % 360;
+          const effectiveRot = (elemRot === pageRot || elemRot === 0
+            ? pageRot
+            : (pageRot + elemRot) % 360) as 0 | 90 | 180 | 270;
+
+          const vx = field.x;
+          const vy = field.y;
+          const vw = field.width;
+          const vh = field.height;
+
+          let targetX = cropX + vx;
+          let targetY = cropY + cropH - vy - vh;
+
+          switch (pageRot) {
+            case 0:
+              targetX = cropX + vx;
+              targetY = cropY + cropH - vy - vh;
+              break;
+            case 90:
+              targetX = cropX + cropW - vy;
+              targetY = cropY + vx;
+              break;
+            case 180:
+              targetX = cropX + cropW - vx;
+              targetY = cropY + vy + vh;
+              break;
+            case 270:
+              targetX = cropX + vy;
+              targetY = cropY + cropH - vx;
+              break;
+          }
+
+          const fieldRotationDegrees = degrees(effectiveRot);
 
           const tooltipText = field.label || field.placeholder;
           const setTooltip = (acroField: PDFAcroField) => {
@@ -819,49 +858,194 @@ export class PdfDocument {
             }
           };
 
-          if (field.variant === 'text-input') {
-            const textField = form.createTextField(field.id);
-            textField.addToPage(page, { x: field.x, y: pdfLibY, width: field.width, height: field.height });
-            setTooltip(textField.acroField);
-            if (field.placeholder) {
-              textField.setText(field.placeholder);
+          const applyWidgetStyling = (acroTerminal: PDFAcroTerminal, f: FormFieldPlaceholderOptions = field) => {
+            const widgets = acroTerminal.getWidgets();
+            for (const w of widgets) {
+              const mk = w.getOrCreateAppearanceCharacteristics();
+              if (effectiveRot !== 0) {
+                mk.setRotation(effectiveRot);
+              }
+              if (f.backgroundColor) {
+                const rgb = parseColor(f.backgroundColor);
+                if (rgb && rgb.a > 0) {
+                  mk.setBackgroundColor([rgb.r / 255, rgb.g / 255, rgb.b / 255]);
+                }
+              }
+              if (f.borderColor) {
+                const rgb = parseColor(f.borderColor);
+                if (rgb && rgb.a > 0) {
+                  mk.setBorderColor([rgb.r / 255, rgb.g / 255, rgb.b / 255]);
+                }
+              }
+              if (f.borderWidth !== undefined || f.borderStyle) {
+                const bs = w.getOrCreateBorderStyle();
+                if (f.borderWidth !== undefined) {
+                  bs.setWidth(f.borderWidth);
+                }
+                if (f.borderStyle === 'dashed') {
+                  bs.dict.set(PDFName.of('S'), PDFName.of('D'));
+                  bs.dict.set(PDFName.of('D'), pdfDoc.context.obj([3, 3]));
+                } else if (f.borderStyle === 'solid') {
+                  bs.dict.set(PDFName.of('S'), PDFName.of('S'));
+                }
+              }
             }
+          };
+
+          if (field.variant === 'text-input') {
+            const baseName = resolveAcroFieldName(field);
+            const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
+            const textField = form.createTextField(fieldName);
+            textField.addToPage(page, {
+              x: targetX,
+              y: targetY,
+              width: vw,
+              height: vh,
+              rotate: fieldRotationDegrees,
+            });
+            setTooltip(textField.acroField);
+            if (field.fontSize) textField.setFontSize(field.fontSize);
+            if (field.readOnly) textField.enableReadOnly();
+            if (field.required) textField.enableRequired();
+            if (field.textAlign === 'center') textField.setAlignment(TextAlignment.Center);
+            else if (field.textAlign === 'right') textField.setAlignment(TextAlignment.Right);
+            else textField.setAlignment(TextAlignment.Left);
+            if (field.value !== undefined && field.value !== '') {
+              textField.setText(String(field.value));
+            }
+            applyWidgetStyling(textField.acroField, field);
           } else if (field.variant === 'checkbox') {
-            const checkbox = form.createCheckBox(field.id);
-            checkbox.addToPage(page, { x: field.x, y: pdfLibY, width: field.width, height: field.height });
+            const baseName = resolveAcroFieldName(field);
+            const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
+            const checkbox = form.createCheckBox(fieldName);
+            checkbox.addToPage(page, {
+              x: targetX,
+              y: targetY,
+              width: vw,
+              height: vh,
+              rotate: fieldRotationDegrees,
+            });
             setTooltip(checkbox.acroField);
+            if (field.readOnly) checkbox.enableReadOnly();
+            if (field.required) checkbox.enableRequired();
+            const isChecked = field.value === true ||
+              field.value === 'true' ||
+              field.value === 'checked' ||
+              field.value === '1' ||
+              field.value === 'yes';
+            if (isChecked) {
+              checkbox.check();
+            } else {
+              checkbox.uncheck();
+            }
+            applyWidgetStyling(checkbox.acroField, field);
           } else if (field.variant === 'radio') {
-            let radioGroup;
+            const groupName = resolveAcroFieldName(field);
+            let radioGroup: PDFRadioGroup;
             try {
-              radioGroup = form.getRadioGroup(field.id);
+              radioGroup = form.getRadioGroup(groupName);
               if (!radioGroup) {
-                radioGroup = form.createRadioGroup(field.id);
+                radioGroup = form.createRadioGroup(groupName);
+                usedFieldNames.add(groupName);
               }
             } catch {
-              radioGroup = form.createRadioGroup(field.id);
+              radioGroup = form.createRadioGroup(groupName);
+              usedFieldNames.add(groupName);
             }
-            radioGroup.addOptionToPage(field.id + '_opt', page, { x: field.x, y: pdfLibY, width: field.width, height: field.height });
+            const existingOptions = radioGroup.getOptions();
+            let optName = field.options && field.options.length > 0 ? field.options[0] : '';
+            if (!optName) {
+              if (field.value && typeof field.value === 'string' && field.value !== 'true' && field.value !== 'false') {
+                optName = field.value;
+              } else {
+                optName = field.label || `${groupName}_opt_${existingOptions.length + 1}`;
+              }
+            }
+            let uniqueOpt = optName;
+            let optCounter = 1;
+            while (existingOptions.includes(uniqueOpt)) {
+              uniqueOpt = `${optName}_${optCounter}`;
+              optCounter++;
+            }
+            radioGroup.addOptionToPage(uniqueOpt, page, {
+              x: targetX,
+              y: targetY,
+              width: vw,
+              height: vh,
+              rotate: fieldRotationDegrees,
+            });
             setTooltip(radioGroup.acroField);
+            if (field.readOnly) radioGroup.enableReadOnly();
+            if (field.required) radioGroup.enableRequired();
+            const isSelected = field.value === true ||
+              field.value === 'true' ||
+              field.value === 'checked' ||
+              field.value === '1' ||
+              field.value === uniqueOpt ||
+              field.value === optName;
+            if (isSelected) {
+              try {
+                radioGroup.select(uniqueOpt);
+              } catch {}
+            }
+            applyWidgetStyling(radioGroup.acroField, field);
           } else if (field.variant === 'dropdown') {
-            const dropdown = form.createDropdown(field.id);
-            dropdown.addToPage(page, { x: field.x, y: pdfLibY, width: field.width, height: field.height });
+            const baseName = resolveAcroFieldName(field);
+            const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
+            const dropdown = form.createDropdown(fieldName);
+            dropdown.addToPage(page, {
+              x: targetX,
+              y: targetY,
+              width: vw,
+              height: vh,
+              rotate: fieldRotationDegrees,
+            });
             setTooltip(dropdown.acroField);
-            if (field.placeholder) {
+            if (field.fontSize) dropdown.setFontSize(field.fontSize);
+            if (field.readOnly) dropdown.enableReadOnly();
+            if (field.required) dropdown.enableRequired();
+            if (field.options && field.options.length > 0) {
+              dropdown.addOptions(field.options);
+              if (field.value && field.options.includes(String(field.value))) {
+                dropdown.select(String(field.value));
+              } else if (field.placeholder && field.options.includes(field.placeholder)) {
+                dropdown.select(field.placeholder);
+              }
+            } else if (field.placeholder) {
               dropdown.addOptions([field.placeholder]);
               dropdown.select(field.placeholder);
             }
+            applyWidgetStyling(dropdown.acroField, field);
           } else if (field.variant === 'signature' || field.variant === 'attachment') {
-            const textField = form.createTextField(field.id);
-            textField.setText(field.variant === 'signature' ? 'Signature' : 'Attachment');
-            textField.addToPage(page, { x: field.x, y: pdfLibY, width: field.width, height: field.height });
+            const baseName = resolveAcroFieldName(field);
+            const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
+            const textField = form.createTextField(fieldName);
+            textField.addToPage(page, {
+              x: targetX,
+              y: targetY,
+              width: vw,
+              height: vh,
+              rotate: fieldRotationDegrees,
+            });
             setTooltip(textField.acroField);
+            if (field.fontSize) textField.setFontSize(field.fontSize);
+            if (field.readOnly) textField.enableReadOnly();
+            if (field.required) textField.enableRequired();
+            if (field.value !== undefined && field.value !== '') {
+              textField.setText(String(field.value));
+            } else {
+              textField.setText(field.variant === 'signature' ? 'Signature' : 'Attachment');
+            }
+            applyWidgetStyling(textField.acroField, field);
           }
         }
       }
 
-      pdfiumBytes = await pdfDoc.save();
+      pdfiumBytes = await pdfDoc.save({ useObjectStreams: false });
     }
 
+    this.pendingAcroFormFieldsByPage.clear();
+    this.removedAcroFormFieldNames.clear();
     return pdfiumBytes;
   }
 
@@ -891,6 +1075,55 @@ export class PdfDocument {
     const rawBytes = await this.saveAsync(pageTransforms);
     const { sanitizedBytes, summary } = await sanitizePdf(rawBytes, options);
     return { bytes: sanitizedBytes, summary };
+  }
+
+  /**
+   * Inspects the current document for compression characteristics.
+   *
+   * @param pageTransforms Optional active visual transforms to bake before inspecting.
+   * @return A promise resolving to compression inspection details.
+   */
+  public async inspectCompression(
+    pageTransforms?: Record<number, PageTransform>
+  ): Promise<CompressionInspection> {
+    const rawBytes = await this.saveAsync(pageTransforms);
+    return await inspectPdfForCompression(rawBytes);
+  }
+
+  /**
+   * Compresses the current document according to specified options.
+   *
+   * @param options Compression preset and fine-tuning options.
+   * @param pageTransforms Optional active visual transforms to bake before compressing.
+   * @return A promise resolving to compressed bytes and a summary of savings.
+   */
+  public async compress(
+    options: CompressOptions,
+    pageTransforms?: Record<number, PageTransform>
+  ): Promise<{ bytes: Uint8Array; summary: CompressSummary }> {
+    const rawBytes = await this.saveAsync(pageTransforms);
+
+    let pageRasterizer: PageRasterizer | undefined = undefined;
+    if (options.level === 'flat_image') {
+      pageRasterizer = async (pageIndex: number, scale: number, quality: number) => {
+        const page = this.getPage(pageIndex);
+        const { widthPts, heightPts } = page.getDimensions();
+        const rendered = page.render(scale, { applyDpr: false });
+        const blob = await exportAsBlob(rendered.canvas, 'jpeg', quality);
+        const buf = await blob.arrayBuffer();
+        return {
+          bytes: new Uint8Array(buf),
+          widthPts,
+          heightPts,
+        };
+      };
+    }
+
+    const result = await compressPdf(rawBytes, options, pageRasterizer);
+    return {
+      bytes: result.compressedBytes,
+      summary: result.summary,
+    };
   }
 
   /**
@@ -924,6 +1157,380 @@ export class PdfDocument {
     const rawBytes = await this.saveAsync(pageTransforms);
     return verifyPdfSignatures(rawBytes);
   }
-}
 
+  /**
+   * Asynchronously extracts all AcroForm field definitions and widget bounds across the document.
+   * Caches results per-page to provide high-performance span access.
+   *
+   * @param rawBuffer Optional explicit binary buffer to parse.
+   * @return A promise resolving to a Map of page index to EditableFormFieldSpan array.
+   */
+  public async initAcroFormFieldSpans(
+    rawBuffer?: ArrayBuffer | Uint8Array
+  ): Promise<Map<number, EditableFormFieldSpan[]>> {
+    if (this._cachedAcroFormFieldSpans) {
+      return this._cachedAcroFormFieldSpans;
+    }
+    if (this._acroFormInitPromise) {
+      return this._acroFormInitPromise;
+    }
+
+    const buf = rawBuffer ?? this._rawBuffer;
+    if (!buf || buf.byteLength === 0) {
+      const emptyMap = new Map<number, EditableFormFieldSpan[]>();
+      this._cachedAcroFormFieldSpans = emptyMap;
+      return emptyMap;
+    }
+
+    this._acroFormInitPromise = (async () => {
+      try {
+        const {
+          PDFDocument,
+          PDFTextField,
+          PDFCheckBox,
+          PDFRadioGroup,
+          PDFDropdown,
+          PDFSignature,
+          PDFButton,
+        } = await import('pdf-lib');
+
+        const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+        const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+        const form = pdfDoc.getForm();
+        const fields = form.getFields();
+
+        const pages = pdfDoc.getPages();
+        const pageMap = new Map<unknown, number>();
+        pages.forEach((p, idx) => pageMap.set(p.ref, idx));
+
+        const byPage = new Map<number, EditableFormFieldSpan[]>();
+
+        for (const field of fields) {
+          const name = field.getName();
+          let variant: FormFieldVariantType = 'text-input';
+          if (field instanceof PDFTextField) variant = 'text-input';
+          else if (field instanceof PDFCheckBox) variant = 'checkbox';
+          else if (field instanceof PDFRadioGroup) variant = 'radio';
+          else if (field instanceof PDFDropdown) variant = 'dropdown';
+          else if (field instanceof PDFSignature) variant = 'signature';
+          else if (field instanceof PDFButton) variant = 'text-input';
+
+          let value: string | boolean | undefined;
+          if (field instanceof PDFTextField) value = field.getText() || undefined;
+          else if (field instanceof PDFCheckBox) value = field.isChecked();
+          else if (field instanceof PDFRadioGroup) value = field.getSelected() || undefined;
+          else if (field instanceof PDFDropdown) value = field.getSelected()?.[0] || undefined;
+
+          let options: string[] | undefined;
+          if (field instanceof PDFRadioGroup || field instanceof PDFDropdown) {
+            options = field.getOptions();
+          }
+
+          const readOnly = field.isReadOnly();
+          const required = field.isRequired();
+          const widgets = field.acroField.getWidgets();
+
+          for (let wIdx = 0; wIdx < widgets.length; wIdx++) {
+            const widget = widgets[wIdx];
+            const rect = widget.getRectangle();
+            const pRef = widget.P();
+            let pageIndex = pRef ? pageMap.get(pRef) : undefined;
+            if (pageIndex === undefined) {
+              for (let p = 0; p < pages.length; p++) {
+                const annots = pages[p].node.Annots();
+                if (annots) {
+                  for (let a = 0; a < annots.size(); a++) {
+                    const widgetRef = (widget as { ref?: unknown }).ref ?? pdfDoc.context.getObjectRef(widget.dict);
+                    if (annots.get(a) === widget.dict || annots.lookup(a) === widget.dict || (widgetRef !== undefined && annots.get(a) === widgetRef)) {
+                      pageIndex = p;
+                      break;
+                    }
+                  }
+                }
+                if (pageIndex !== undefined) break;
+              }
+            }
+
+            if (pageIndex !== undefined) {
+              const targetPage = pages[pageIndex];
+              const cropBox = targetPage.getCropBox() || targetPage.getMediaBox();
+              const cropX = cropBox.x ?? 0;
+              const cropY = cropBox.y ?? 0;
+              const cropW = cropBox.width;
+              const cropH = cropBox.height;
+              const pageRotation = ((targetPage.getRotation().angle % 360) + 360) % 360 as 0 | 90 | 180 | 270;
+
+              const rawX1 = rect.x;
+              const rawY1 = rect.y;
+              const rawX2 = rect.x + rect.width;
+              const rawY2 = rect.y + rect.height;
+              const pdfXMin = Math.min(rawX1, rawX2);
+              const pdfXMax = Math.max(rawX1, rawX2);
+              const pdfYMin = Math.min(rawY1, rawY2);
+              const pdfYMax = Math.max(rawY1, rawY2);
+              const width = Math.round((pdfXMax - pdfXMin) * 10) / 10;
+              const height = Math.round((pdfYMax - pdfYMin) * 10) / 10;
+
+              const unrotLeft = Math.round((pdfXMin - cropX) * 10) / 10;
+              const unrotTop = Math.round((cropY + cropH - pdfYMax) * 10) / 10;
+
+              let left = unrotLeft;
+              let top = unrotTop;
+              let rotation = 0;
+
+              if (pageRotation !== 0) {
+                const cx = unrotLeft + width / 2;
+                const cy = unrotTop + height / 2;
+                const newCenter = transformPointForPageRotation(
+                  { x: cx, y: cy },
+                  pageRotation,
+                  cropW,
+                  cropH
+                );
+                left = Math.round((newCenter.x - width / 2) * 10) / 10;
+                top = Math.round((newCenter.y - height / 2) * 10) / 10;
+                rotation = pageRotation;
+              }
+
+              let backgroundColor: string | undefined;
+              let borderColor: string | undefined;
+              let borderWidth: number | undefined;
+              let borderStyle: 'solid' | 'dashed' | 'dotted' | 'none' | undefined;
+              let textAlign: 'left' | 'center' | 'right' | undefined;
+
+              const mk = widget.getAppearanceCharacteristics();
+              if (mk) {
+                const bgRgb = mk.getBackgroundColor();
+                if (bgRgb && bgRgb.length >= 3) {
+                  backgroundColor = `rgb(${Math.round(bgRgb[0] * 255)}, ${Math.round(bgRgb[1] * 255)}, ${Math.round(bgRgb[2] * 255)})`;
+                }
+                const bcRgb = mk.getBorderColor();
+                if (bcRgb && bcRgb.length >= 3) {
+                  borderColor = `rgb(${Math.round(bcRgb[0] * 255)}, ${Math.round(bcRgb[1] * 255)}, ${Math.round(bcRgb[2] * 255)})`;
+                }
+              }
+
+              const bs = widget.getBorderStyle();
+              if (bs) {
+                borderWidth = bs.getWidth();
+                const styleEntry = bs.dict?.get(PDFName.of('S'));
+                if (styleEntry) {
+                  const styleName = styleEntry.toString();
+                  if (styleName.includes('D')) borderStyle = 'dashed';
+                  else borderStyle = 'solid';
+                }
+              }
+
+              const qEntry = field.acroField.dict.get(PDFName.of('Q'));
+              if (qEntry) {
+                const qObj = qEntry as { asNumber?: () => number };
+                const qVal = typeof qObj.asNumber === 'function' ? qObj.asNumber() : Number(qEntry);
+                if (qVal === 1) textAlign = 'center';
+                else if (qVal === 2) textAlign = 'right';
+                else if (qVal === 0) textAlign = 'left';
+              }
+
+              if (!byPage.has(pageIndex)) {
+                byPage.set(pageIndex, []);
+              }
+
+              byPage.get(pageIndex)!.push({
+                id: `form_field_${pageIndex}_${name}_${wIdx}`,
+                type: 'form-field',
+                pageIndex,
+                fieldId: name,
+                fieldName: name,
+                variant,
+                left,
+                top,
+                width,
+                height,
+                rotation,
+                value,
+                options,
+                readOnly,
+                required,
+                backgroundColor,
+                borderColor,
+                borderWidth,
+                borderStyle,
+                textAlign,
+              });
+            }
+          }
+        }
+
+        this._cachedAcroFormFieldSpans = byPage;
+        return byPage;
+      } catch (err) {
+        console.warn('Failed to extract AcroForm fields with pdf-lib:', err);
+        const fallback = new Map<number, EditableFormFieldSpan[]>();
+        this._cachedAcroFormFieldSpans = fallback;
+        return fallback;
+      }
+    })();
+
+    return this._acroFormInitPromise;
+  }
+
+  /**
+   * Retrieves extracted AcroForm fields as editable spans for the given page index.
+   *
+   * @param pageIndex Zero-based page index.
+   * @return Array of EditableFormFieldSpan objects.
+   */
+  public extractFormFieldSpans(pageIndex: number): EditableFormFieldSpan[] {
+    if (this._cachedAcroFormFieldSpans) {
+      return this._cachedAcroFormFieldSpans.get(pageIndex) || [];
+    }
+    if (!this._acroFormInitPromise && this._rawBuffer) {
+      this.initAcroFormFieldSpans(this._rawBuffer).catch((err: unknown) => {
+        console.warn('Lazy AcroForm extraction error:', err);
+      });
+    }
+
+    try {
+      const page = this.getPage(pageIndex);
+      const annots = page.getAnnotations();
+      const dims = page.getDimensions();
+      const widgetSpans: EditableFormFieldSpan[] = [];
+      let idx = 0;
+      for (const annot of annots) {
+        if (annot.subtype === 'Widget') {
+          const w = annot.rect.right - annot.rect.left;
+          const h = annot.rect.top - annot.rect.bottom;
+          const left = annot.rect.left;
+          const top = dims.heightPts - annot.rect.top;
+          widgetSpans.push({
+            id: `form_field_${pageIndex}_widget_${idx}`,
+            type: 'form-field',
+            pageIndex,
+            fieldId: `widget_${idx}`,
+            fieldName: annot.contents && annot.contents !== '(No text content)' ? annot.contents : `Field ${idx + 1}`,
+            variant: 'text-input',
+            left,
+            top,
+            width: w,
+            height: h,
+            rotation: 0,
+          });
+          idx++;
+        }
+      }
+      return widgetSpans;
+    } catch {
+      return [];
+    }
+  }
+
+  public replaceTextSpan(
+    pageIndex: number,
+    targetSpan: EditableTextSpan,
+    options: TextMutationOptions
+  ): void {
+    const page = this.getPage(pageIndex);
+    page.replaceTextSpan(targetSpan, options, this._fontCharsetIndex);
+    this.invalidatePage(pageIndex);
+  }
+
+  public positionTextSpan(
+    pageIndex: number,
+    targetSpan: EditableTextSpan,
+    left: number,
+    top: number
+  ): void {
+    this.replaceTextSpan(pageIndex, targetSpan, {
+      ...targetSpan,
+      left,
+      top,
+    });
+  }
+
+  public deleteTextSpan(pageIndex: number, targetSpan: EditableTextSpan): void {
+    const page = this.getPage(pageIndex);
+    page.deleteTextSpan(targetSpan);
+    this.invalidatePage(pageIndex);
+  }
+
+  public extractTextSpans(pageIndex: number): EditableTextSpan[] {
+    return this.getPage(pageIndex).extractTextSpans();
+  }
+
+  public extractCharacters(pageIndex: number): PageCharacter[] {
+    return this.getPage(pageIndex).extractCharacters();
+  }
+
+  public redactTextRange(pageIndex: number, startIndex: number, endIndex: number): void {
+    const page = this.getPage(pageIndex);
+    page.redactTextRange(startIndex, endIndex);
+    this.invalidatePage(pageIndex);
+  }
+
+  public deleteTextInRects(pageIndex: number, rects: HighlightRect[]): void {
+    const page = this.getPage(pageIndex);
+    page.deleteTextInRects(rects);
+    this.invalidatePage(pageIndex);
+  }
+
+  public rotatePage(pageIndex: number, degreesDelta: 90 | 180 | 270): void {
+    const page = this.getPage(pageIndex);
+    const prevDims = page.getDimensions();
+    page.rotate(degreesDelta);
+    this.invalidatePage(pageIndex);
+
+    if (this._cachedAcroFormFieldSpans?.has(pageIndex)) {
+      const spans = this._cachedAcroFormFieldSpans.get(pageIndex);
+      if (spans) {
+        for (const span of spans) {
+          const cx = span.left + span.width / 2;
+          const cy = span.top + span.height / 2;
+          const newCenter = transformPointForPageRotation(
+            { x: cx, y: cy },
+            degreesDelta,
+            prevDims.widthPts,
+            prevDims.heightPts
+          );
+          span.left = Math.round((newCenter.x - span.width / 2) * 10) / 10;
+          span.top = Math.round((newCenter.y - span.height / 2) * 10) / 10;
+          span.rotation = (((span.rotation || 0) + degreesDelta) % 360 + 360) % 360;
+        }
+      }
+    }
+
+    if (this.pendingAcroFormFieldsByPage.has(pageIndex)) {
+      const pendingFields = this.pendingAcroFormFieldsByPage.get(pageIndex);
+      if (pendingFields) {
+        for (const field of pendingFields) {
+          const cx = field.x + field.width / 2;
+          const cy = field.y + field.height / 2;
+          const newCenter = transformPointForPageRotation(
+            { x: cx, y: cy },
+            degreesDelta,
+            prevDims.widthPts,
+            prevDims.heightPts
+          );
+          field.x = Math.round((newCenter.x - field.width / 2) * 10) / 10;
+          field.y = Math.round((newCenter.y - field.height / 2) * 10) / 10;
+          field.rotation = (((field.rotation || 0) + degreesDelta) % 360 + 360) % 360;
+        }
+      }
+    }
+  }
+
+  public flattenPage(pageIndex: number): void {
+    const page = this.getPage(pageIndex);
+    page.flatten();
+    this.invalidatePage(pageIndex);
+  }
+
+  public getPageDimensions(pageIndex: number): { widthPts: number; heightPts: number } {
+    const cached = this._pageDimensionsCache.get(pageIndex);
+    if (cached) {
+      return cached;
+    }
+    const page = this.getPage(pageIndex);
+    const dims = page.getDimensions();
+    this._pageDimensionsCache.set(pageIndex, dims);
+    return dims;
+  }
 
