@@ -1,3 +1,24 @@
+import type { Command, CommandContext } from '../../core/command';
+import type {
+  EditableFormFieldSpan,
+  EditableImageSpan,
+  EditableShapeSpan,
+  EditableTextSpan,
+  FormFieldVariantType,
+  HighlightRect,
+  PageCharacter,
+  TextMutationOptions,
+} from '../../core/types';
+import { transformPointForPageRotation } from '../../utils/geometry';
+import { parseColor } from './utils';
+import type {
+  ShapeOptions,
+  PathOptions,
+  ImageOptions,
+  TextOptions,
+} from './operations/types';
+import type { NoteAnnotationOptions } from './operations/add-annotations';
+import { degrees, PDFName, PDFHexString, PDFBool, type PDFAcroTerminal, type PDFRadioGroup, type PDFForm } from 'pdf-lib';
 import type { PdfiumEngine } from '../../core/pdfium-engine';
 import { PdfPage } from './pdf-page';
 import { FontCharsetIndex } from './font-charset-index';
@@ -9,21 +30,162 @@ import type {
   SanitizeOptions,
   SanitizeSummary,
   SanitizationInspection,
+  CompressOptions,
+  CompressSummary,
+  CompressionInspection,
+  PageRasterizer,
 } from '../../core/types';
 import type { PDFAcroField } from 'pdf-lib';
 import * as docOps from './operations/document-ops';
 import * as metadataOps from './operations/metadata-ops';
+import * as outlineOps from './operations/outline-ops';
+import { exportAsBlob } from './operations/page-ops';
 import { inspectPdfForSanitization, sanitizePdf } from './operations/sanitize-ops';
+import { inspectPdfForCompression, compressPdf } from './operations/compress-ops';
 import { signPdfIso32000, verifyPdfSignatures, type SignPdfOptions, type SignatureValidationResult } from './operations/signature-ops';
 import type { FormFieldPlaceholderOptions } from './operations/types';
 import type { PageTransform } from '../../stores/types';
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isGeneratedInternalId(id?: string): boolean {
+  if (!id) return false;
+  return (
+    id.startsWith('elem_') ||
+    id.startsWith('form_field_') ||
+    id.startsWith('element_') ||
+    UUID_REGEX.test(id)
+  );
+}
+
+/**
+ * Resolves an AcroForm field name prioritizing native source name, then explicit id, then label.
+ */
+function resolveAcroFieldName(field: FormFieldPlaceholderOptions): string {
+  if (field.sourceFieldName && field.sourceFieldName.trim().length > 0) {
+    return field.sourceFieldName.trim();
+  }
+  if (field.id && !isGeneratedInternalId(field.id)) {
+    return field.id.trim();
+  }
+  if (field.label && field.label.trim().length > 0) {
+    return field.label.trim();
+  }
+  return field.id || 'field';
+}
+
+/**
+ * Derives a unique, collision-free field name within the current PDF document form.
+ */
+function getUniqueAcroFieldName(form: PDFForm, baseName: string, usedNames: Set<string>): string {
+  let candidate = baseName;
+  let counter = 1;
+  while (usedNames.has(candidate) || form.getFieldMaybe(candidate) !== undefined) {
+    candidate = `${baseName}_${counter}`;
+    counter++;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
 
 /**
  * High-level facade for interacting with a PDF document via PDFium.
  * Handles page lifecycle management and document-level operations.
  */
 export class PdfDocument {
+  /**
+   * Cached extracted AcroForm field spans mapped by zero-based page index.
+   */
+  private _cachedAcroFormFieldSpans: Map<number, EditableFormFieldSpan[]> | null = null;
+  private _acroFormInitPromise: Promise<Map<number, EditableFormFieldSpan[]>> | null = null;
+  private _rawBuffer: ArrayBuffer | Uint8Array | null = null;
+  private _cachedMetadata: DocumentMetadata | null = null;
+  private removedAcroFormFieldNames = new Set<string>();
+  private pendingAcroFormFieldsByPage = new Map<number, FormFieldPlaceholderOptions[]>();
+
+  /**
+   * Cached physical page dimensions in points, mapped by page index.
+   * Invariant across zooms and viewport scrolling; cleared on mutations.
+   */
+  private _pageDimensionsCache: Map<number, { widthPts: number; heightPts: number }> = new Map();
+
+  /**
+   * Cached extracted overlay spans and objects mapped by page index.
+   */
+  private _pageSpansCache: Map<
+    number,
+    {
+      textSpans: EditableTextSpan[];
+      pageCharacters?: PageCharacter[];
+      images: EditableImageSpan[];
+      shapes: EditableShapeSpan[];
+      formFields: EditableFormFieldSpan[];
+    }
+  > = new Map();
+
+  public setRawBuffer(buffer: ArrayBuffer | Uint8Array | null): void {
+    this._rawBuffer = buffer;
+    this._cachedMetadata = null;
+    this._cachedAcroFormFieldSpans = null;
+    this._acroFormInitPromise = null;
+    this.removedAcroFormFieldNames.clear();
+    this.pendingAcroFormFieldsByPage.clear();
+    this._pageDimensionsCache.clear();
+    this._pageSpansCache.clear();
+    if (buffer) {
+      this.initAcroFormFieldSpans(buffer).catch((err: unknown) => {
+        console.warn('Background AcroForm extraction failed:', err);
+      });
+    }
+  }
+
+  public addPendingAcroFormField(pageIndex: number, field: FormFieldPlaceholderOptions): void {
+    let fields = this.pendingAcroFormFieldsByPage.get(pageIndex);
+    if (!fields) {
+      fields = [];
+      this.pendingAcroFormFieldsByPage.set(pageIndex, fields);
+    }
+    fields.push(field);
+  }
+
+  public getPendingAcroFormFieldsForPage(pageIndex: number): FormFieldPlaceholderOptions[] {
+    return this.pendingAcroFormFieldsByPage.get(pageIndex) || [];
+  }
+
+  public getAllPendingAcroFormFields(): Array<{ pageIndex: number; field: FormFieldPlaceholderOptions }> {
+    const result: Array<{ pageIndex: number; field: FormFieldPlaceholderOptions }> = [];
+    for (const [pageIndex, fields] of this.pendingAcroFormFieldsByPage.entries()) {
+      for (const field of fields) {
+        result.push({ pageIndex, field });
+      }
+    }
+    return result;
+  }
+
+  public markAcroFormFieldRemoved(fieldName: string): void {
+    this.removedAcroFormFieldNames.add(fieldName);
+    if (this._cachedAcroFormFieldSpans) {
+      for (const [pageIdx, spans] of this._cachedAcroFormFieldSpans.entries()) {
+        const filtered = spans.filter(s => s.fieldName !== fieldName && s.fieldId !== fieldName);
+        this._cachedAcroFormFieldSpans.set(pageIdx, filtered);
+      }
+    }
+  }
+
+  public unmarkAcroFormFieldRemoved(fieldName: string): void {
+    this.removedAcroFormFieldNames.delete(fieldName);
+  }
+
+  public getRemovedAcroFormFieldNames(): string[] {
+    return Array.from(this.removedAcroFormFieldNames);
+  }
+
+  public clearRemovedAcroFormFields(): void {
+    this.removedAcroFormFieldNames.clear();
+  }
+
   private static readonly MAX_CACHED_PAGES = 10;
+  private static readonly MAX_CACHED_SPANS = 15;
 
   /**
    * Cached LRU map of loaded pages to prevent WASM page handle memory leaks.
@@ -39,7 +201,7 @@ export class PdfDocument {
    * Initializes a new PdfDocument.
    * @param engine The underlying PDFium engine instance.
    */
-  constructor(private engine: PdfiumEngine) {
+  constructor(private engine: PdfiumEngine, private getDocHandleFn?: () => number) {
     this._fontCharsetIndex = new FontCharsetIndex(engine, () => this.getDocHandle());
   }
 
@@ -57,6 +219,9 @@ export class PdfDocument {
    * @throws If no document is currently loaded.
    */
   private getDocHandle(): number {
+    if (this.getDocHandleFn) {
+      return this.getDocHandleFn();
+    }
     const handle = this.engine.getDocumentHandle();
     if (!handle) throw new Error('No active document handle.');
     return handle;
@@ -91,9 +256,15 @@ export class PdfDocument {
       const oldestKey = this.pages.keys().next().value;
       if (oldestKey !== undefined) {
         const oldPage = this.pages.get(oldestKey)!;
-        oldPage.generateContent();
-        mod.FPDF_ClosePage(oldPage.pageHandle);
-        this.pages.delete(oldestKey);
+        try {
+          oldPage.generateContent();
+        } catch {
+          // Ignore error to ensure disposal
+        } finally {
+          oldPage.dispose();
+          mod.FPDF_ClosePage(oldPage.pageHandle);
+          this.pages.delete(oldestKey);
+        }
       }
     }
 
@@ -101,8 +272,16 @@ export class PdfDocument {
     const pageHandle = mod.FPDF_LoadPage(docHandle, pageIndex);
     if (!pageHandle) throw new Error(`Failed to load page at index ${pageIndex}.`);
 
-    const page = new PdfPage(this.engine, pageIndex, docHandle, pageHandle);
+    const page = new PdfPage(this.engine, this, pageIndex, docHandle, pageHandle);
     this.pages.set(pageIndex, page);
+    if (!this._pageDimensionsCache.has(pageIndex)) {
+      try {
+        const dims = page.getDimensions();
+        this._pageDimensionsCache.set(pageIndex, dims);
+      } catch {
+        // Safe fallback
+      }
+    }
     return page;
   }
 
@@ -116,10 +295,13 @@ export class PdfDocument {
     if (existing) {
       const mod = this.engine.getModule();
       existing.generateContent();
+      existing.dispose();
       mod.FPDF_ClosePage(existing.pageHandle);
       this.pages.delete(pageIndex);
     }
     this._fontCharsetIndex.invalidate();
+    this._pageDimensionsCache.delete(pageIndex);
+    this._pageSpansCache.delete(pageIndex);
   }
 
   /**
@@ -129,6 +311,7 @@ export class PdfDocument {
     const mod = this.engine.getModule();
     for (const page of this.pages.values()) {
       page.generateContent();
+      page.dispose();
       mod.FPDF_ClosePage(page.pageHandle);
     }
     this.pages.clear();
@@ -141,6 +324,11 @@ export class PdfDocument {
    */
   public merge(buffer: ArrayBuffer, atIndex: number): void {
     this.closeAllPages();
+    this._cachedAcroFormFieldSpans = null;
+    this._fontCharsetIndex.invalidate();
+    this._pageDimensionsCache.clear();
+    this._pageSpansCache.clear();
+    this.pendingAcroFormFieldsByPage.clear();
     docOps.mergePdfBuffer(this.engine, this.getDocHandle(), buffer, atIndex);
   }
 
@@ -161,6 +349,11 @@ export class PdfDocument {
    */
   public addBlankPage(atIndex: number, widthPts?: number, heightPts?: number): void {
     this.closeAllPages();
+    this._cachedAcroFormFieldSpans = null;
+    this._fontCharsetIndex.invalidate();
+    this._pageDimensionsCache.clear();
+    this._pageSpansCache.clear();
+    this.pendingAcroFormFieldsByPage.clear();
     docOps.addBlankPage(this.engine, this.getDocHandle(), atIndex, widthPts, heightPts);
   }
 
@@ -170,6 +363,11 @@ export class PdfDocument {
    */
   public duplicatePage(pageIndex: number): void {
     this.closeAllPages();
+    this._cachedAcroFormFieldSpans = null;
+    this._fontCharsetIndex.invalidate();
+    this._pageDimensionsCache.clear();
+    this._pageSpansCache.clear();
+    this.pendingAcroFormFieldsByPage.clear();
     docOps.duplicatePage(this.engine, this.getDocHandle(), pageIndex);
   }
 
@@ -180,6 +378,11 @@ export class PdfDocument {
    */
   public reorderPages(fromIndices: number[], toIndex: number): void {
     this.closeAllPages();
+    this._cachedAcroFormFieldSpans = null;
+    this._fontCharsetIndex.invalidate();
+    this._pageDimensionsCache.clear();
+    this._pageSpansCache.clear();
+    this.pendingAcroFormFieldsByPage.clear();
     docOps.reorderPages(this.engine, this.getDocHandle(), fromIndices, toIndex);
   }
 
@@ -189,13 +392,11 @@ export class PdfDocument {
    */
   public deletePage(pageIndex: number): void {
     this.closeAllPages();
-    const existing = this.pages.get(pageIndex);
-    if (existing) {
-      const mod = this.engine.getModule();
-      existing.generateContent();
-      mod.FPDF_ClosePage(existing.pageHandle);
-      this.pages.delete(pageIndex);
-    }
+    this._cachedAcroFormFieldSpans = null;
+    this._fontCharsetIndex.invalidate();
+    this._pageDimensionsCache.clear();
+    this._pageSpansCache.clear();
+    this.pendingAcroFormFieldsByPage.clear();
     docOps.deletePage(this.engine, this.getDocHandle(), pageIndex);
   }
 
@@ -207,6 +408,10 @@ export class PdfDocument {
    */
   public async importImageAsPage(imageBuffer: ArrayBuffer, mimeType: string, atIndex: number): Promise<void> {
     this.closeAllPages();
+    this._cachedAcroFormFieldSpans = null;
+    this._fontCharsetIndex.invalidate();
+    this._pageDimensionsCache.clear();
+    this._pageSpansCache.clear();
     await docOps.importImageAsPage(this.engine, this.getDocHandle(), imageBuffer, mimeType, atIndex);
   }
 
@@ -219,6 +424,92 @@ export class PdfDocument {
   }
 
   /**
+   * Adds or updates an outline item (bookmark) in the document.
+   *
+   * @param options The outline item configuration.
+   * @return A promise resolving to the modified PDF byte array.
+   */
+  public async addOutlineItem(options: outlineOps.AddOrUpdateOutlineOptions): Promise<Uint8Array> {
+    const rawBytes = await this.saveAsync();
+    const updatedBytes = await outlineOps.addOrUpdateOutlineItem(rawBytes, options);
+    this.setRawBuffer(updatedBytes);
+    return updatedBytes;
+  }
+
+  /**
+   * Sets the document outline explicitly from a list of flat outline items.
+   *
+   * @param items Flat list of outline items.
+   * @return A promise resolving to the modified PDF byte array.
+   */
+  public async setOutline(items: outlineOps.OutlineItemFlat[]): Promise<Uint8Array> {
+    const rawBytes = await this.saveAsync();
+    const updatedBytes = await outlineOps.setOutlineItems(rawBytes, items);
+    this.setRawBuffer(updatedBytes);
+    return updatedBytes;
+  }
+
+  /**
+   * Reorders outline items by moving elements from fromIndices to toIndex.
+   *
+   * @param fromIndices Source indices to move.
+   * @param toIndex Target insertion index.
+   * @return A promise resolving to the modified PDF byte array.
+   */
+  public async reorderOutline(fromIndices: number[], toIndex: number): Promise<Uint8Array> {
+    const rawBytes = await this.saveAsync();
+    const currentNodes = this.getOutline();
+    const flatItems = outlineOps.flattenOutlineTree(currentNodes);
+    const reordered = outlineOps.reorderOutlineItems(flatItems, fromIndices, toIndex);
+    const updatedBytes = await outlineOps.setOutlineItems(rawBytes, reordered);
+    this.setRawBuffer(updatedBytes);
+    return updatedBytes;
+  }
+
+  /**
+   * Sorts the document outline in natural top-to-bottom reading order.
+   *
+   * @return A promise resolving to the modified PDF byte array.
+   */
+  public async sortOutlineTopToBottom(): Promise<Uint8Array> {
+    const rawBytes = await this.saveAsync();
+    const currentNodes = this.getOutline();
+    const flatItems = outlineOps.flattenOutlineTree(currentNodes);
+    const sorted = outlineOps.sortOutlineTopToBottom(flatItems);
+    const updatedBytes = await outlineOps.setOutlineItems(rawBytes, sorted);
+    this.setRawBuffer(updatedBytes);
+    return updatedBytes;
+  }
+
+  /**
+   * Updates the heading level of an outline item at a given flat index.
+   *
+   * @param index Flat index of outline item.
+   * @param newLevel Desired heading level (1 to 6).
+   * @return A promise resolving to the modified PDF byte array.
+   */
+  public async updateOutlineItemLevel(index: number, newLevel: number): Promise<Uint8Array> {
+    const rawBytes = await this.saveAsync();
+    const updatedBytes = await outlineOps.updateOutlineItemLevel(rawBytes, index, newLevel);
+    this.setRawBuffer(updatedBytes);
+    return updatedBytes;
+  }
+
+  /**
+   * Removes an outline item (bookmark) by title from the document.
+   *
+   * @param title The title of the outline item to remove.
+   * @param pageIndex Optional page index constraint.
+   * @return A promise resolving to the modified PDF byte array.
+   */
+  public async removeOutlineItem(title: string, pageIndex?: number): Promise<Uint8Array> {
+    const rawBytes = await this.saveAsync();
+    const updatedBytes = await outlineOps.removeOutlineItemFromPdf(rawBytes, title, pageIndex);
+    this.setRawBuffer(updatedBytes);
+    return updatedBytes;
+  }
+
+  /**
    * Retrieves basic file information such as file size and name.
    * @param fileName The name of the file.
    * @param sizeBytes The size of the file in bytes.
@@ -226,25 +517,6 @@ export class PdfDocument {
    */
   public getInfo(fileName: string, sizeBytes: number): DocumentInfo {
     return metadataOps.getDocumentInfo(this.engine, this.getDocHandle(), fileName, sizeBytes);
-  }
-
-  /**
-   * Internal reference to the active document binary payload for rich metadata inspection.
-   */
-  private _rawBuffer: ArrayBuffer | Uint8Array | null = null;
-
-  /**
-   * Cached full metadata object.
-   */
-  private _cachedMetadata: DocumentMetadata | null = null;
-
-  /**
-   * Sets the active raw binary buffer for extended metadata parsing.
-   * @param buffer The binary buffer.
-   */
-  public setRawBuffer(buffer: ArrayBuffer | Uint8Array): void {
-    this._rawBuffer = buffer;
-    this._cachedMetadata = null;
   }
 
   /**
@@ -331,6 +603,48 @@ export class PdfDocument {
   }
 
   /**
+   * Permanently purges an AcroForm field by name from the PDFDocument instance,
+   * removing all associated widget annotations from page annotation arrays and unregistering the field.
+   *
+   * @param pdfDoc The pdf-lib PDFDocument instance.
+   * @param fieldName The name of the field to purge.
+   * @returns true if field was found and purged, false otherwise.
+   */
+  private purgeAcroFormField(pdfDoc: import('pdf-lib').PDFDocument, fieldName: string): boolean {
+    try {
+      const form = pdfDoc.getForm();
+      const field = form.getFieldMaybe(fieldName);
+      if (!field) return false;
+
+      const widgets = field.acroField.getWidgets();
+      for (const page of pdfDoc.getPages()) {
+        const annots = page.node.Annots();
+        if (annots) {
+          for (let i = annots.size() - 1; i >= 0; i--) {
+            const annotDict = annots.lookup(i);
+            const annotRef = annots.get(i);
+            const matches =
+              annotDict === field.acroField.dict ||
+              annotRef === field.acroField.ref ||
+              widgets.some(w => {
+                const wRef = (w as { ref?: unknown }).ref ?? pdfDoc.context.getObjectRef(w.dict);
+                return annotDict === w.dict || (wRef !== undefined && annotRef === wRef);
+              });
+            if (matches) {
+              annots.remove(i);
+            }
+          }
+        }
+      }
+      form.acroForm.removeField(field.acroField);
+      return true;
+    } catch (err) {
+      console.warn(`Failed to purge AcroForm field "${fieldName}":`, err);
+      return false;
+    }
+  }
+
+  /**
    * Saves the current document state to a byte array.
    * Ensures all opened pages are properly flushed and closed before saving to prevent memory leaks.
    * @returns A Uint8Array containing the serialized PDF file.
@@ -370,18 +684,14 @@ export class PdfDocument {
    * Ensures all opened pages are properly flushed and closed before saving to prevent memory leaks.
    * @returns A Promise resolving to a Uint8Array containing the serialized PDF file.
    */
-  public async saveAsync(pageTransforms?: Record<number, PageTransform>): Promise<Uint8Array> {
+    public async saveAsync(pageTransforms?: Record<number, PageTransform>): Promise<Uint8Array> {
     const mod = this.engine.getModule();
     const docHandle = this.getDocHandle();
-    const pendingFields: { pageIndex: number; field: FormFieldPlaceholderOptions }[] = [];
-
     for (const page of this.pages.values()) {
       page.generateContent();
-      const fields = page.getPendingAcroFormFields();
-      if (fields && fields.length > 0) {
-        pendingFields.push(...fields.map(f => ({ pageIndex: page.getIndex(), field: f })));
-      }
     }
+    const pendingFields = this.getAllPendingAcroFormFields();
+    const hasRemovedFields = this.removedAcroFormFieldNames.size > 0;
     this.closeAllPages();
 
     const writerPtr = mod.PDFiumExt_OpenFileWriter();
@@ -410,21 +720,30 @@ export class PdfDocument {
       t => t && (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1)
     );
 
-    if (pendingFields.length > 0 || hasTransforms) {
+    if (pendingFields.length > 0 || hasTransforms || hasRemovedFields) {
       const {
         PDFDocument,
-        PDFName,
-        PDFHexString,
-        PDFContentStream,
-        degrees,
-        pushGraphicsState,
-        popGraphicsState,
-        concatTransformationMatrix
+        TextAlignment,
       } = await import('pdf-lib');
-      const pdfDoc = await PDFDocument.load(pdfiumBytes);
 
-      // Apply page transforms (rotation and scaling)
-      if (hasTransforms && pageTransforms) {
+      const pdfDoc = await PDFDocument.load(pdfiumBytes, { ignoreEncryption: true });
+
+      // Purge removed AcroForm fields
+      for (const fieldName of this.removedAcroFormFieldNames) {
+        this.purgeAcroFormField(pdfDoc, fieldName);
+      }
+
+      // Also purge any source fields or replacement fields about to be re-added
+      for (const { field } of pendingFields) {
+        if (field.sourceFieldName) {
+          this.purgeAcroFormField(pdfDoc, field.sourceFieldName);
+        }
+        if (field.id) {
+          this.purgeAcroFormField(pdfDoc, field.id);
+        }
+      }
+
+      if (pageTransforms) {
         const pageCount = pdfDoc.getPageCount();
         for (let i = 0; i < pageCount; i++) {
           const transform = pageTransforms[i];
@@ -434,83 +753,51 @@ export class PdfDocument {
 
           const page = pdfDoc.getPage(i);
           const existingAngle = page.getRotation().angle;
-          const rawSize = page.getSize();
-          const rawW = rawSize.width;
-          const rawH = rawSize.height;
-
           const normalizedR = ((rotation % 360) + 360) % 360;
           const roundedOrthogonal = (Math.round(normalizedR / 90) * 90) % 360;
-          const isOrthogonal =
-            Math.abs(normalizedR - roundedOrthogonal) < 0.5 ||
-            Math.abs(normalizedR - roundedOrthogonal) > 359.5;
+          const finalAngle = ((existingAngle + roundedOrthogonal) % 360 + 360) % 360;
+          page.setRotation(degrees(finalAngle));
 
           const isScaleIdentity = Math.abs(scaleX - 1) < 0.001 && Math.abs(scaleY - 1) < 0.001;
+          if (!isScaleIdentity) {
+            const rawSize = page.getSize();
+            page.setSize(rawSize.width * scaleX, rawSize.height * scaleY);
+          }
+        }
+      }
 
-          if (isOrthogonal && isScaleIdentity) {
-            // Clean native PDF page rotation: updates /Rotate dictionary entry
-            const finalAngle = ((existingAngle + roundedOrthogonal) % 360 + 360) % 360;
-            page.setRotation(degrees(finalAngle));
-          } else if (isOrthogonal && !isScaleIdentity) {
-            // Orthogonal rotation with scaling
-            const finalAngle = ((existingAngle + roundedOrthogonal) % 360 + 360) % 360;
-            page.setRotation(degrees(finalAngle));
+      // Synchronize /MK /R on existing native AcroForm widgets when page is rotated
+      const form = pdfDoc.getForm();
+      const pages = pdfDoc.getPages();
+      const pageMap = new Map<unknown, number>();
+      pages.forEach((p, idx) => pageMap.set(p.ref, idx));
 
-            const isFinalLandscape = finalAngle === 90 || finalAngle === 270;
-            if (isFinalLandscape) {
-              page.setSize(rawW * scaleY, rawH * scaleX);
-            } else {
-              page.setSize(rawW * scaleX, rawH * scaleY);
+      for (const f of form.getFields()) {
+        for (const w of f.acroField.getWidgets()) {
+          const pRef = w.P();
+          let pIndex = pRef ? pageMap.get(pRef) : undefined;
+          if (pIndex === undefined) {
+            for (let p = 0; p < pages.length; p++) {
+              const annots = pages[p].node.Annots();
+              if (annots) {
+                for (let a = 0; a < annots.size(); a++) {
+                  const wRef = (w as { ref?: unknown }).ref ?? pdfDoc.context.getObjectRef(w.dict);
+                  if (annots.get(a) === w.dict || annots.lookup(a) === w.dict || (wRef !== undefined && annots.get(a) === wRef)) {
+                    pIndex = p;
+                    break;
+                  }
+                }
+              }
+              if (pIndex !== undefined) break;
             }
-
-            const start = PDFContentStream.of(
-              pdfDoc.context.obj({}),
-              [pushGraphicsState(), concatTransformationMatrix(scaleX, 0, 0, scaleY, 0, 0)]
-            );
-            const startRef = pdfDoc.context.register(start);
-            const end = PDFContentStream.of(
-              pdfDoc.context.obj({}),
-              [popGraphicsState()]
-            );
-            const endRef = pdfDoc.context.register(end);
-
-            page.node.normalize();
-            page.node.wrapContentStreams(startRef, endRef);
-          } else {
-            // Non-orthogonal arbitrary angle rotation and/or scaling
-            const totalR = ((existingAngle + normalizedR) % 360 + 360) % 360;
-            const rad = (totalR * Math.PI) / 180;
-            const cos = Math.cos(rad);
-            const sin = Math.sin(rad);
-            const absCos = Math.abs(cos);
-            const absSin = Math.abs(sin);
-
-            const scaledW = rawW * scaleX;
-            const scaledH = rawH * scaleY;
-            const W_new = scaledW * absCos + scaledH * absSin;
-            const H_new = scaledW * absSin + scaledH * absCos;
-
-            const a = scaleX * cos;
-            const b = -scaleX * sin;
-            const c = scaleY * sin;
-            const d = scaleY * cos;
-            const e = W_new / 2 - a * (rawW / 2) - c * (rawH / 2);
-            const f = H_new / 2 - b * (rawW / 2) - d * (rawH / 2);
-
-            const start = PDFContentStream.of(
-              pdfDoc.context.obj({}),
-              [pushGraphicsState(), concatTransformationMatrix(a, b, c, d, e, f)]
-            );
-            const startRef = pdfDoc.context.register(start);
-            const end = PDFContentStream.of(
-              pdfDoc.context.obj({}),
-              [popGraphicsState()]
-            );
-            const endRef = pdfDoc.context.register(end);
-
-            page.node.normalize();
-            page.node.wrapContentStreams(startRef, endRef);
-            page.setRotation(degrees(0));
-            page.setSize(W_new, H_new);
+          }
+          if (pIndex !== undefined) {
+            const targetPage = pages[pIndex];
+            const pAngle = ((targetPage.getRotation().angle % 360) + 360) % 360;
+            if (pAngle !== 0) {
+              const mk = w.getOrCreateAppearanceCharacteristics();
+              mk.setRotation(pAngle);
+            }
           }
         }
       }
