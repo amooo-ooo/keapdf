@@ -1,8 +1,8 @@
 import type { PdfiumEngine } from '../../core/pdfium-engine';
 import type { TextOptions, ShapeOptions, ImageOptions, FormFieldPlaceholderOptions } from './operations/types';
-import type { EditableTextSpan, TextMutationOptions, AnnotationItem, EditableImageSpan, EditableShapeSpan, PageCharacter } from '../../core/types';
+import type { EditableTextSpan, EditableFormFieldSpan, TextMutationOptions, AnnotationItem, EditableImageSpan, EditableShapeSpan, PageCharacter, PageCropInfo } from '../../core/types';
 import type { FontCharsetIndex } from './font-charset-index';
-import { getPageObjectMatrix } from '../../core/pdfium-helpers';
+import { getPageObjectMatrix, getPageCropInfo, pdfBoxToDomBounds, pdfToDomCoords } from '../../core/pdfium-helpers';
 
 import { drawText } from './operations/draw-text';
 import { drawRectangle, drawCircle, drawLine, drawArrow, drawPath } from './operations/draw-shapes';
@@ -13,6 +13,7 @@ import * as pageOps from './operations/page-ops';
 import * as textEditOps from './operations/text-edit-ops';
 import * as metadataOps from './operations/metadata-ops';
 import { addHighlightAnnotation, addInkAnnotation, addTextAnnotation, type NoteAnnotationOptions } from './operations/add-annotations';
+import type { ContentBounds } from './operations/crop-ops';
 
 /**
  * High-level facade for interacting with a specific page within a PDF document.
@@ -26,14 +27,26 @@ export class PdfPage {
    * @param docHandle The handle of the parent document.
    * @param pageHandle The handle for this specific page.
    */
+  public isDisposed = false;
+
+  private assertNotDisposed(): void {
+    if (this.isDisposed) throw new Error('Cannot operate on a disposed PdfPage');
+  }
+
   constructor(
     private engine: PdfiumEngine,
+    private document: import('./pdf-document').PdfDocument,
     private pageIndex: number,
     private docHandle: number,
     public readonly pageHandle: number
   ) {}
 
-  private pendingAcroFormFields: FormFieldPlaceholderOptions[] = [];
+  /**
+   * Marks this page instance as disposed.
+   */
+  public dispose(): void {
+    this.isDisposed = true;
+  }
 
   /**
    * Queues an AcroForm field to be added to the page when the document is saved.
@@ -41,7 +54,7 @@ export class PdfPage {
    * @returns The current PdfPage instance for chaining.
    */
   public addAcroFormField(options: FormFieldPlaceholderOptions): this {
-    this.pendingAcroFormFields.push(options);
+    this.document.addPendingAcroFormField(this.pageIndex, options);
     return this;
   }
 
@@ -50,7 +63,7 @@ export class PdfPage {
    * @returns An array of FormFieldPlaceholderOptions.
    */
   public getPendingAcroFormFields(): FormFieldPlaceholderOptions[] {
-    return this.pendingAcroFormFields;
+    return this.document.getPendingAcroFormFieldsForPage(this.pageIndex);
   }
 
   /**
@@ -67,6 +80,7 @@ export class PdfPage {
    * @returns The current PdfPage instance for chaining.
    */
   public generateContent(): this {
+    this.assertNotDisposed();
     const mod = this.engine.getModule();
     mod.FPDFPage_GenerateContent(this.pageHandle);
     return this;
@@ -77,6 +91,7 @@ export class PdfPage {
    * @returns An object containing the widthPts and heightPts.
    */
   public getDimensions(): { widthPts: number; heightPts: number } {
+    this.assertNotDisposed();
     return pageOps.getDimensions(this.engine, this.pageHandle);
   }
 
@@ -86,7 +101,9 @@ export class PdfPage {
    * @param options Additional render options (applyDpr, maxPixelArea).
    * @returns An object containing the rendered canvas and its point dimensions.
    */
-  public render(scale: number = 1.0, options?: pageOps.RenderOptions): { widthPts: number; heightPts: number; canvas: HTMLCanvasElement } {
+  public render(scale: number = 1.0, options?: pageOps.RenderOptions): {
+    widthPts: number; heightPts: number; canvas: HTMLCanvasElement } {
+    this.assertNotDisposed();
     return pageOps.render(this.engine, this.pageHandle, scale, options);
   }
 
@@ -96,6 +113,7 @@ export class PdfPage {
    * @returns The current PdfPage instance for chaining.
    */
   public rotate(degreesDelta: 90 | 180 | 270): this {
+    this.assertNotDisposed();
     pageOps.rotate(this.engine, this.pageHandle, degreesDelta);
     return this;
   }
@@ -106,6 +124,7 @@ export class PdfPage {
    * @returns The current PdfPage instance for chaining.
    */
   public flatten(): this {
+    this.assertNotDisposed();
     pageOps.flatten(this.engine, this.pageHandle);
     return this;
   }
@@ -117,6 +136,7 @@ export class PdfPage {
    * @returns A promise resolving to the generated image Blob.
    */
   public async exportAsBlob(format: 'png' | 'jpeg', scale: number = 1.0): Promise<Blob> {
+    this.assertNotDisposed();
     const rendered = this.render(scale);
     return pageOps.exportAsBlob(rendered.canvas, format);
   }
@@ -126,6 +146,7 @@ export class PdfPage {
    * @returns An array of AnnotationItem objects.
    */
   public getAnnotations(): AnnotationItem[] {
+    this.assertNotDisposed();
     return metadataOps.getPageAnnotations(this.engine, this.pageHandle);
   }
 
@@ -134,7 +155,17 @@ export class PdfPage {
    * @returns An array of EditableTextSpan objects.
    */
   public extractTextSpans(): EditableTextSpan[] {
+    this.assertNotDisposed();
     return textEditOps.extractEditableSpans(this.engine, this.pageIndex, this.pageHandle);
+  }
+
+  /**
+   * Extracts existing native AcroForm fields on this page as editable overlay spans.
+   * @returns An array of EditableFormFieldSpan objects.
+   */
+  public extractFormFieldSpans(): EditableFormFieldSpan[] {
+    this.assertNotDisposed();
+    return this.document.extractFormFieldSpans(this.pageIndex);
   }
 
   /**
@@ -143,6 +174,7 @@ export class PdfPage {
    * @return An array of PageCharacter objects.
    */
   public extractCharacters(): PageCharacter[] {
+    this.assertNotDisposed();
     return textEditOps.extractPageCharacters(this.engine, this.pageIndex, this.pageHandle);
   }
 
@@ -158,6 +190,7 @@ export class PdfPage {
     options: TextMutationOptions,
     charsetIndex?: FontCharsetIndex
   ): this {
+    this.assertNotDisposed();
     textEditOps.replaceTextSpan(this.engine, this.docHandle, this.pageIndex, this.pageHandle, targetSpan, options, charsetIndex);
     return this;
   }
@@ -168,6 +201,7 @@ export class PdfPage {
    * @returns The current PdfPage instance for chaining.
    */
   public deleteTextSpan(targetSpan: EditableTextSpan): this {
+    this.assertNotDisposed();
     textEditOps.deleteTextSpan(this.engine, this.docHandle, this.pageIndex, this.pageHandle, targetSpan);
     return this;
   }
@@ -180,6 +214,7 @@ export class PdfPage {
    * @return The current PdfPage instance for chaining.
    */
   public deleteTextInRects(rects: import('../../core/types').HighlightRect[]): this {
+    this.assertNotDisposed();
     textEditOps.removeTextInRects(this.engine, this.pageHandle, rects);
     return this;
   }
@@ -193,6 +228,7 @@ export class PdfPage {
    * @return The current PdfPage instance for chaining.
    */
   public redactTextRange(startIndex: number, endIndex: number): this {
+    this.assertNotDisposed();
     textEditOps.redactTextRange(
       this.engine,
       this.docHandle,
@@ -212,6 +248,7 @@ export class PdfPage {
    * @returns boolean true if successfully updated, false otherwise.
    */
   public updateTextSpanTransform(targetSpan: EditableTextSpan, newText: string, matrix: import('../../core/types').PdfMatrix): boolean {
+    this.assertNotDisposed();
     return textEditOps.updateTextSpanTransform(this.engine, this.pageHandle, targetSpan, newText, matrix);
   }
 
@@ -221,8 +258,20 @@ export class PdfPage {
    * @returns The current PdfPage instance for chaining.
    */
   public hideTextSpan(targetSpan: EditableTextSpan): this {
+    this.assertNotDisposed();
     textEditOps.hideTextSpan(this.engine, this.pageHandle, targetSpan);
     return this;
+  }
+
+  /**
+   * Returns the count of page objects currently present on this page.
+   */
+  public getObjectCount(): number {
+    this.assertNotDisposed();
+    const mod = this.engine.getModule();
+    return typeof mod.FPDFPage_CountObjects === 'function'
+      ? mod.FPDFPage_CountObjects(this.pageHandle)
+      : 0;
   }
 
   /**
@@ -231,10 +280,26 @@ export class PdfPage {
    * @returns The current PdfPage instance for chaining.
    */
   public removeObject(objectIndex: number): this {
+    this.assertNotDisposed();
     const mod = this.engine.getModule();
     const obj = mod.FPDFPage_GetObject(this.pageHandle, objectIndex);
     if (obj) {
       mod.FPDFPage_RemoveObject(this.pageHandle, obj);
+      mod.FPDFPageObj_Destroy(obj);
+    }
+    return this;
+  }
+
+  /**
+   * Removes a native PDF annotation from the page by its index.
+   * @param annotIndex The zero-based index of the annotation on the page.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public removeAnnotation(annotIndex: number): this {
+    this.assertNotDisposed();
+    const mod = this.engine.getModule();
+    if (typeof mod.FPDFPage_RemoveAnnot === 'function') {
+      mod.FPDFPage_RemoveAnnot(this.pageHandle, annotIndex);
     }
     return this;
   }
@@ -243,7 +308,9 @@ export class PdfPage {
    * Analyzes the page content stream to extract editable objects (images, shapes).
    * @returns An object containing arrays of EditableImageSpan and EditableShapeSpan.
    */
-  public extractObjects(): { images: EditableImageSpan[], shapes: EditableShapeSpan[] } {
+  public extractObjects(): {
+    images: EditableImageSpan[], shapes: EditableShapeSpan[] } {
+    this.assertNotDisposed();
     const mod = this.engine.getModule();
     const objectCount = mod.FPDFPage_CountObjects(this.pageHandle);
     
@@ -261,6 +328,7 @@ export class PdfPage {
     try {
       const heapF32 = mod.pdfium.HEAPF32;
       const heightPts = mod.FPDF_GetPageHeightF(this.pageHandle);
+      const cropInfo = getPageCropInfo(this.engine, mod, this.pageHandle);
 
       for (let i = 0; i < objectCount; i++) {
         const objHandle = mod.FPDFPage_GetObject(this.pageHandle, i);
@@ -279,10 +347,23 @@ export class PdfPage {
           const objTop = heapF32[topPtr >> 2];
 
           // Convert PDF coordinates (origin at bottom-left) to DOM coordinates (origin at top-left)
-          const left = objLeft;
-          const top = heightPts - objTop;
-          const width = objRight - objLeft;
-          const height = objTop - objBottom;
+          let left: number;
+          let top: number;
+          let width: number;
+          let height: number;
+
+          if (cropInfo.rotation !== 0) {
+            const bounds = pdfBoxToDomBounds(objLeft, objBottom, objRight, objTop, cropInfo);
+            left = bounds.left;
+            top = bounds.top;
+            width = bounds.right - bounds.left;
+            height = bounds.bottom - bounds.top;
+          } else {
+            left = objLeft - cropInfo.cropLeft;
+            top = heightPts - (objTop - cropInfo.cropBottom);
+            width = objRight - objLeft;
+            height = objTop - objBottom;
+          }
           
           if (width <= 0 || height <= 0) continue;
 
@@ -326,233 +407,3 @@ export class PdfPage {
                                   imgData.data[dstIdx + 3] = format === 4 ? rawBytes[srcIdx + 3] : 255; // A
                                 } else if (format === 2) { // BGR (3 bytes per pixel)
                                   imgData.data[dstIdx] = rawBytes[srcIdx + 2];     // R
-                                  imgData.data[dstIdx + 1] = rawBytes[srcIdx + 1]; // G
-                                  imgData.data[dstIdx + 2] = rawBytes[srcIdx];     // B
-                                  imgData.data[dstIdx + 3] = 255;
-                                } else if (format === 1) { // Grayscale
-                                  imgData.data[dstIdx] = rawBytes[srcIdx];
-                                  imgData.data[dstIdx + 1] = rawBytes[srcIdx];
-                                  imgData.data[dstIdx + 2] = rawBytes[srcIdx];
-                                  imgData.data[dstIdx + 3] = 255;
-                                }
-                              }
-                            }
-                            ctx.putImageData(imgData, 0, 0);
-                            src = canvas.toDataURL('image/png');
-                        }
-                    }
-                  }
-                } catch (e) {
-                  console.error('Failed to extract image bitmap', e);
-                } finally {
-                  if (typeof mod.FPDFBitmap_Destroy === 'function') {
-                    mod.FPDFBitmap_Destroy(bitmap);
-                  }
-                }
-              }
-            }
-
-            // Decompose the object's transform matrix for accurate dimensions.
-            // GetBounds returns the axis-aligned bounding box which expands when
-            // the image is rotated/skewed, causing distortion with object-fit:fill.
-            // The matrix encodes the actual rendered width, height, rotation, and flip.
-            let imgLeft = left;
-            let imgTop = top;
-            let imgWidth = width;
-            let imgHeight = height;
-            let imgRotation = 0;
-            let imgFlipX = false;
-            let imgFlipY = false;
-
-            const matrix = getPageObjectMatrix(this.engine, mod, objHandle);
-            if (matrix) {
-              // For image objects, the matrix maps the unit square [0,1]x[0,1]
-              // to the rendered rectangle on the page.
-              // Column vectors: width=(a,b), height=(c,d), origin=(e,f)
-              const renderW = Math.sqrt(matrix.a * matrix.a + matrix.b * matrix.b);
-              const renderH = Math.sqrt(matrix.c * matrix.c + matrix.d * matrix.d);
-
-              if (renderW > 0 && renderH > 0) {
-                imgWidth = renderW;
-                imgHeight = renderH;
-
-                // Rotation angle from the width-axis vector (negate for CSS CW convention)
-                const angleRad = Math.atan2(matrix.b, matrix.a);
-                imgRotation = -(angleRad * 180) / Math.PI;
-
-                // Determinant sign detects reflection (flip)
-                const det = matrix.a * matrix.d - matrix.b * matrix.c;
-                if (det < 0) {
-                  imgFlipY = true;
-                }
-
-                // Center of the image in PDF coordinates
-                const centerPdfX = matrix.e + (matrix.a + matrix.c) / 2;
-                const centerPdfY = matrix.f + (matrix.b + matrix.d) / 2;
-
-                // Convert center to DOM coordinates (origin top-left)
-                const centerDomX = centerPdfX;
-                const centerDomY = heightPts - centerPdfY;
-
-                imgLeft = centerDomX - imgWidth / 2;
-                imgTop = centerDomY - imgHeight / 2;
-              }
-            }
-
-            images.push({
-              type: 'image',
-              id: `img_${this.pageIndex}_${i}`,
-              pageIndex: this.pageIndex,
-              left: imgLeft,
-              top: imgTop,
-              width: imgWidth,
-              height: imgHeight,
-              rotation: imgRotation,
-              flipX: imgFlipX,
-              flipY: imgFlipY,
-              src,
-              pdfObjectIndex: i
-            });
-          } else {
-            shapes.push({
-              type: 'shape',
-              id: `shape_${this.pageIndex}_${i}`,
-              pageIndex: this.pageIndex,
-              left,
-              top,
-              width,
-              height,
-              rotation: 0,
-              flipX: false,
-              flipY: false,
-              fill: 'transparent',
-              pdfObjectIndex: i
-            });
-          }
-        }
-      }
-    } finally {
-      this.engine.freeMemory(leftPtr);
-      this.engine.freeMemory(bottomPtr);
-      this.engine.freeMemory(rightPtr);
-      this.engine.freeMemory(topPtr);
-    }
-
-    // Sort spans by area (width * height) in descending order to fix layering/click-through.
-    // Largest items (like background images) will be rendered first and pushed to the back.
-    images.sort((a, b) => (b.width * b.height) - (a.width * a.height));
-    shapes.sort((a, b) => (b.width * b.height) - (a.width * a.height));
-
-    return { images, shapes };
-  }
-
-  /**
-   * Draws a new text element onto the page.
-   * @param options The text content, position, and formatting specifications.
-   * @returns The current PdfPage instance for chaining.
-   */
-  public drawText(options: TextOptions): this {
-    drawText(this.engine, this.docHandle, this.pageHandle, options);
-    return this;
-  }
-
-  /**
-   * Draws a rectangular shape onto the page.
-   * @param options The rectangle dimensions, position, and styling.
-   * @returns The current PdfPage instance for chaining.
-   */
-  public drawRectangle(options: ShapeOptions): this {
-    drawRectangle(this.engine, this.pageHandle, options);
-    return this;
-  }
-
-  /**
-   * Draws a circular or elliptical shape onto the page.
-   * @param options The circle dimensions, position, and styling.
-   * @returns The current PdfPage instance for chaining.
-   */
-  public drawCircle(options: ShapeOptions): this {
-    drawCircle(this.engine, this.pageHandle, options);
-    return this;
-  }
-
-  /**
-   * Draws a straight line onto the page.
-   * @param options The line start/end coordinates and styling.
-   * @returns The current PdfPage instance for chaining.
-   */
-  public drawLine(options: ShapeOptions): this {
-    drawLine(this.engine, this.pageHandle, options);
-    return this;
-  }
-
-  /**
-   * Draws a line terminating in an arrow head onto the page.
-   * @param options The arrow coordinates and styling.
-   * @returns The current PdfPage instance for chaining.
-   */
-  public drawArrow(options: ShapeOptions): this {
-    drawArrow(this.engine, this.pageHandle, options);
-    return this;
-  }
-
-  /**
-   * Draws a polyline/path onto the page.
-   * @param options The path coordinates and styling.
-   * @returns The current PdfPage instance for chaining.
-   */
-  public drawPath(options: import('./operations/types').PathOptions): this {
-    drawPath(this.engine, this.pageHandle, options);
-    return this;
-  }
-
-  /**
-   * Adds a Text Highlight annotation to the page.
-   * @param options The dimensions and styling for the highlight.
-   * @returns The current PdfPage instance for chaining.
-   */
-  public addHighlightAnnotation(options: ShapeOptions): this {
-    addHighlightAnnotation(this.engine, this.pageHandle, options);
-    return this;
-  }
-
-  /**
-   * Adds an Ink (freehand) annotation to the page.
-   * @param options The path coordinates and styling for the ink.
-   * @returns The current PdfPage instance for chaining.
-   */
-  public addInkAnnotation(options: import('./operations/types').PathOptions): this {
-    addInkAnnotation(this.engine, this.pageHandle, options);
-    return this;
-  }
-
-  /**
-   * Embeds and draws an image onto the page.
-   * @param options The image data, positioning, and sizing.
-   * @returns The current PdfPage instance for chaining.
-   */
-  public drawImage(options: ImageOptions): this {
-    drawImage(this.engine, this.docHandle, this.pageHandle, options);
-    return this;
-  }
-
-  /**
-   * Adds a Text (Sticky Note) annotation to the page.
-   * @param options Sticky note text annotation options.
-   * @returns The current PdfPage instance for chaining.
-   */
-  public addTextAnnotation(options: NoteAnnotationOptions): this {
-    addTextAnnotation(this.engine, this.pageHandle, options);
-    return this;
-  }
-
-  /**
-   * Draws a placeholder representation for an interactive form field.
-   * @param options The form field type, position, and dimensions.
-   * @returns The current PdfPage instance for chaining.
-   */
-  public drawFormFieldPlaceholder(options: FormFieldPlaceholderOptions): this {
-    drawFormFieldPlaceholder(this.engine, this.docHandle, this.pageHandle, options);
-    return this;
-  }
-}
