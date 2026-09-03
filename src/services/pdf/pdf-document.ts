@@ -1534,3 +1534,249 @@ export class PdfDocument {
     return dims;
   }
 
+  /**
+   * Retrieves memoized overlay spans and objects for a page.
+   *
+   * @param pageIndex Zero-based page index.
+   */
+  public getCachedPageSpans(pageIndex: number): {
+    textSpans: EditableTextSpan[];
+    pageCharacters?: PageCharacter[];
+    images: EditableImageSpan[];
+    shapes: EditableShapeSpan[];
+    formFields: EditableFormFieldSpan[];
+  } | undefined {
+    const existing = this._pageSpansCache.get(pageIndex);
+    if (existing) {
+      this._pageSpansCache.delete(pageIndex);
+      this._pageSpansCache.set(pageIndex, existing);
+      return existing;
+    }
+    return undefined;
+  }
+
+  /**
+   * Stores memoized overlay spans and objects for a page.
+   *
+   * @param pageIndex Zero-based page index.
+   * @param spans Extracted spans and object collections.
+   */
+  public setCachedPageSpans(
+    pageIndex: number,
+    spans: {
+      textSpans: EditableTextSpan[];
+      pageCharacters?: PageCharacter[];
+      images: EditableImageSpan[];
+      shapes: EditableShapeSpan[];
+      formFields: EditableFormFieldSpan[];
+    }
+  ): void {
+    if (this._pageSpansCache.has(pageIndex)) {
+      this._pageSpansCache.delete(pageIndex);
+    } else if (this._pageSpansCache.size >= PdfDocument.MAX_CACHED_SPANS) {
+      const oldestKey = this._pageSpansCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this._pageSpansCache.delete(oldestKey);
+      }
+    }
+    this._pageSpansCache.set(pageIndex, spans);
+  }
+
+  /**
+   * Clears memoized overlay spans for a specific page or the entire document.
+   *
+   * @param pageIndex Optional zero-based page index. Clears all pages if omitted.
+   */
+  public clearCachedPageSpans(pageIndex?: number): void {
+    if (pageIndex !== undefined) {
+      this._pageSpansCache.delete(pageIndex);
+    } else {
+      this._pageSpansCache.clear();
+    }
+  }
+
+  public drawText(pageIndex: number, options: TextOptions): void {
+    const page = this.getPage(pageIndex);
+    page.drawText(options);
+    this.invalidatePage(pageIndex);
+  }
+
+  public drawRectangle(pageIndex: number, options: ShapeOptions): void {
+    const page = this.getPage(pageIndex);
+    page.drawRectangle(options);
+    page.generateContent();
+    this.invalidatePage(pageIndex);
+  }
+
+  public drawCircle(pageIndex: number, options: ShapeOptions): void {
+    const page = this.getPage(pageIndex);
+    page.drawCircle(options);
+    page.generateContent();
+    this.invalidatePage(pageIndex);
+  }
+
+  public drawLine(pageIndex: number, options: ShapeOptions): void {
+    const page = this.getPage(pageIndex);
+    page.drawLine(options);
+    page.generateContent();
+    this.invalidatePage(pageIndex);
+  }
+
+  public drawArrow(pageIndex: number, options: ShapeOptions): void {
+    const page = this.getPage(pageIndex);
+    page.drawArrow(options);
+    page.generateContent();
+    this.invalidatePage(pageIndex);
+  }
+
+  public drawPath(pageIndex: number, options: PathOptions): void {
+    const page = this.getPage(pageIndex);
+    page.drawPath(options);
+    page.generateContent();
+    this.invalidatePage(pageIndex);
+  }
+
+  public drawImage(pageIndex: number, options: ImageOptions): void {
+    const page = this.getPage(pageIndex);
+    page.drawImage(options);
+    page.generateContent();
+    this.invalidatePage(pageIndex);
+  }
+
+  public addHighlightAnnotation(pageIndex: number, options: ShapeOptions): void {
+    const page = this.getPage(pageIndex);
+    page.addHighlightAnnotation(options);
+    page.generateContent();
+    this.invalidatePage(pageIndex);
+  }
+
+  public addInkAnnotation(pageIndex: number, options: PathOptions): void {
+    const page = this.getPage(pageIndex);
+    page.addInkAnnotation(options);
+    page.generateContent();
+    this.invalidatePage(pageIndex);
+  }
+
+  public addTextAnnotation(pageIndex: number, options: NoteAnnotationOptions): void {
+    const page = this.getPage(pageIndex);
+    page.addTextAnnotation(options);
+    page.generateContent();
+    this.invalidatePage(pageIndex);
+  }
+
+  public removeAnnotation(pageIndex: number, annotIndex: number): void {
+    const page = this.getPage(pageIndex);
+    page.removeAnnotation(annotIndex);
+    page.generateContent();
+    this.invalidatePage(pageIndex);
+  }
+
+  // Unified command and history execution
+
+  /** Past command history stack for undo. */
+  private pastCommands: Command[] = [];
+
+  /** Future command history stack for redo. */
+  private futureCommands: Command[] = [];
+
+  /** Maximum command history depth. */
+  private static readonly MAX_HISTORY_DEPTH = 50;
+
+  public get canUndo(): boolean {
+    return this.pastCommands.length > 0;
+  }
+
+  public get canRedo(): boolean {
+    return this.futureCommands.length > 0;
+  }
+
+  public get undoDescription(): string | null {
+    if (this.pastCommands.length === 0) return null;
+    return this.pastCommands[this.pastCommands.length - 1].description;
+  }
+
+  public get redoDescription(): string | null {
+    if (this.futureCommands.length === 0) return null;
+    return this.futureCommands[this.futureCommands.length - 1].description;
+  }
+
+  public get undoCount(): number {
+    return this.pastCommands.length;
+  }
+
+  public get redoCount(): number {
+    return this.futureCommands.length;
+  }
+
+  public pushCommand(command: Command): void {
+    if (this.pastCommands.length > 0 && typeof command.merge === 'function') {
+      const prev = this.pastCommands[this.pastCommands.length - 1];
+      const merged = command.merge(prev);
+      if (merged) {
+        this.pastCommands[this.pastCommands.length - 1] = merged;
+        this.futureCommands = [];
+        return;
+      }
+    }
+    this.pastCommands.push(command);
+    if (this.pastCommands.length > PdfDocument.MAX_HISTORY_DEPTH) {
+      this.pastCommands.shift();
+    }
+    this.futureCommands = [];
+  }
+
+  public async executeCommand(command: Command, ctx: CommandContext): Promise<void> {
+    await command.execute(ctx);
+    this.pushCommand(command);
+  }
+
+  public async undo(ctx: CommandContext): Promise<boolean> {
+    if (this.pastCommands.length === 0) return false;
+    const cmd = this.pastCommands.pop()!;
+    try {
+      await cmd.undo(ctx);
+      this.futureCommands.push(cmd);
+      if (this.futureCommands.length > PdfDocument.MAX_HISTORY_DEPTH) {
+        this.futureCommands.shift();
+      }
+      return true;
+    } catch (err) {
+      console.error(`Failed to undo command "${cmd.description}":`, err);
+      this.pastCommands.push(cmd);
+      return false;
+    }
+  }
+
+  public async redo(ctx: CommandContext): Promise<boolean> {
+    if (this.futureCommands.length === 0) return false;
+    const cmd = this.futureCommands.pop()!;
+    try {
+      await cmd.execute(ctx);
+      this.pastCommands.push(cmd);
+      return true;
+    } catch (err) {
+      console.error(`Failed to redo command "${cmd.description}":`, err);
+      this.futureCommands.push(cmd);
+      return false;
+    }
+  }
+
+  public clearHistory(): void {
+    this.pastCommands = [];
+    this.futureCommands = [];
+  }
+
+  public syncCommandStacks(past: Command[], future: Command[]): void {
+    this.pastCommands = [...past];
+    this.futureCommands = [...future];
+  }
+
+  public dispose(): void {
+    this.closeAllPages();
+    this.engine.closeCurrentDocument();
+    this.pastCommands = [];
+    this.futureCommands = [];
+    this._fontCharsetIndex.invalidate();
+  }
+
+}
