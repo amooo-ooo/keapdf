@@ -49,6 +49,7 @@ export function getCanvasTextCharacters(
 
   const baseFontSize = element.fontSize || 12;
   const lineSpacing = element.lineHeight || baseFontSize * 1.25;
+  const elementRotation = element.rotation || 0;
 
   let globalCharOffset = 0;
 
@@ -97,6 +98,9 @@ export function getCanvasTextCharacters(
       if (line.segments && line.segments.length > 0) {
         for (const seg of line.segments) {
           const segFontSize = seg.fontSize || lineFontSize;
+          if (seg.left !== undefined) {
+            cursorX = element.x + seg.left;
+          }
           for (let cIdx = 0; cIdx < seg.text.length; cIdx++) {
             const char = seg.text[cIdx];
             const charWidth = charWidths[charCursor] || estimateCharWidth(char, segFontSize);
@@ -117,6 +121,7 @@ export function getCanvasTextCharacters(
               domRight: cursorX + charWidth,
               domBottom: lineBottom,
               domBaseline: baselineY,
+              rotation: elementRotation,
             });
 
             cursorX += charWidth;
@@ -145,6 +150,7 @@ export function getCanvasTextCharacters(
             domRight: cursorX + charWidth,
             domBottom: lineBottom,
             domBaseline: baselineY,
+            rotation: elementRotation,
           });
 
           cursorX += charWidth;
@@ -152,14 +158,70 @@ export function getCanvasTextCharacters(
         }
       }
 
+      // Synchronize newline character offsets between lines
+      if (lIdx < element.lines.length - 1 && globalCharOffset < element.text.length) {
+        if (element.text[globalCharOffset] === '\r' && element.text[globalCharOffset + 1] === '\n') {
+          globalCharOffset += 2;
+        } else if (element.text[globalCharOffset] === '\n') {
+          globalCharOffset += 1;
+        }
+      }
+
       currentY += effectiveLineHeight;
+    }
+  } else if (element.segments && element.segments.length > 0) {
+    let currentY = element.y;
+    let cursorX = element.x;
+
+    for (const seg of element.segments) {
+      const segFontSize = seg.fontSize || baseFontSize;
+      if (seg.left !== undefined) {
+        cursorX = element.x + seg.left;
+      }
+      const segTop = seg.top !== undefined ? element.y + seg.top : currentY;
+      const segBottom = segTop + (seg.height || lineSpacing);
+      const baselineY = seg.baselineY !== undefined ? segTop + seg.baselineY : segTop + segFontSize * 0.82;
+
+      for (let cIdx = 0; cIdx < seg.text.length; cIdx++) {
+        const char = seg.text[cIdx];
+        if (char === '\n') {
+          cursorX = element.x;
+          currentY += lineSpacing;
+          globalCharOffset++;
+          continue;
+        }
+        const charWidth = estimateCharWidth(char, segFontSize);
+        const syntheticIndex = SYNTHETIC_CHAR_INDEX_BASE - (elementIndex * 100000 + globalCharOffset);
+
+        characters.push({
+          charIndex: syntheticIndex,
+          unicode: char,
+          fontSize: segFontSize,
+          left: cursorX,
+          top: segTop,
+          right: cursorX + charWidth,
+          bottom: segBottom,
+          originX: cursorX,
+          originY: baselineY,
+          domLeft: cursorX,
+          domTop: segTop,
+          domRight: cursorX + charWidth,
+          domBottom: segBottom,
+          domBaseline: baselineY,
+          rotation: elementRotation,
+        });
+
+        cursorX += charWidth;
+        globalCharOffset++;
+      }
     }
   } else {
     // Single block of text fallback
     const rawLines = element.text.split(/\r?\n/);
     let currentY = element.y;
 
-    for (const lineText of rawLines) {
+    for (let lIdx = 0; lIdx < rawLines.length; lIdx++) {
+      const lineText = rawLines[lIdx];
       let lineTotalWidth = 0;
       const charWidths: number[] = [];
       for (let i = 0; i < lineText.length; i++) {
@@ -200,10 +262,20 @@ export function getCanvasTextCharacters(
           domRight: cursorX + charWidth,
           domBottom: lineBottom,
           domBaseline: baselineY,
+          rotation: elementRotation,
         });
 
         cursorX += charWidth;
         globalCharOffset++;
+      }
+
+      // Synchronize newline character offsets between lines
+      if (lIdx < rawLines.length - 1 && globalCharOffset < element.text.length) {
+        if (element.text[globalCharOffset] === '\r' && element.text[globalCharOffset + 1] === '\n') {
+          globalCharOffset += 2;
+        } else if (element.text[globalCharOffset] === '\n') {
+          globalCharOffset += 1;
+        }
       }
 
       currentY += lineSpacing;
@@ -289,6 +361,29 @@ export function resolveCanvasTextChar(
 }
 
 /**
+ * Unrotates a point around a center origin by an angle in degrees.
+ *
+ * @param x X coordinate.
+ * @param y Y coordinate.
+ * @param cx Center X coordinate.
+ * @param cy Center Y coordinate.
+ * @param deg Rotation in degrees.
+ * @return Unrotated point coordinates.
+ */
+function unrotatePoint(x: number, y: number, cx: number, cy: number, deg: number): { x: number; y: number } {
+  if (!deg) return { x, y };
+  const rad = -deg * (Math.PI / 180);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const dx = x - cx;
+  const dy = y - cy;
+  return {
+    x: dx * cos - dy * sin + cx,
+    y: dx * sin + dy * cos + cy,
+  };
+}
+
+/**
  * Spatial hit test to find a character across both raw PDF and canvas text layers.
  *
  * @param characters Combined unified page characters.
@@ -313,13 +408,14 @@ export function findUnifiedCharacterAt(
   // 1. Direct hit with bounding box + tolerance
   for (let i = 0; i < characters.length; i++) {
     const c = characters[i];
-    const inX = x >= c.domLeft - toleranceX && x <= c.domRight + toleranceX;
-    const inY = y >= c.domTop - toleranceY && y <= c.domBottom + toleranceY;
+    const pt = c.rotation ? unrotatePoint(x, y, (c.domLeft + c.domRight) / 2, (c.domTop + c.domBottom) / 2, c.rotation) : { x, y };
+    const inX = pt.x >= c.domLeft - toleranceX && pt.x <= c.domRight + toleranceX;
+    const inY = pt.y >= c.domTop - toleranceY && pt.y <= c.domBottom + toleranceY;
 
     if (inX && inY) {
       const centerX = (c.domLeft + c.domRight) / 2;
       const centerY = (c.domTop + c.domBottom) / 2;
-      const distSq = (x - centerX) ** 2 + (y - centerY) ** 2;
+      const distSq = (pt.x - centerX) ** 2 + (pt.y - centerY) ** 2;
       if (distSq < minDistanceSq) {
         minDistanceSq = distSq;
         bestMatch = c;
@@ -332,15 +428,35 @@ export function findUnifiedCharacterAt(
   // 2. Line-level fallback: if pointer is vertically within a line's range, find closest character horizontally
   for (let i = 0; i < characters.length; i++) {
     const c = characters[i];
-    const inY = y >= c.domTop - toleranceY && y <= c.domBottom + toleranceY;
+    const pt = c.rotation ? unrotatePoint(x, y, (c.domLeft + c.domRight) / 2, (c.domTop + c.domBottom) / 2, c.rotation) : { x, y };
+    const inY = pt.y >= c.domTop - toleranceY && pt.y <= c.domBottom + toleranceY;
     if (inY) {
-      const dx = x < c.domLeft ? c.domLeft - x : x > c.domRight ? x - c.domRight : 0;
+      const dx = pt.x < c.domLeft ? c.domLeft - pt.x : pt.x > c.domRight ? pt.x - c.domRight : 0;
       if (dx < toleranceX * 3) {
         const distSq = dx * dx;
         if (distSq < minDistanceSq) {
           minDistanceSq = distSq;
           bestMatch = c;
         }
+      }
+    }
+  }
+
+  if (bestMatch) return bestMatch;
+
+  // 3. Proximity fallback: if pointer is slightly outside line bounds but within text line spacing
+  for (let i = 0; i < characters.length; i++) {
+    const c = characters[i];
+    const pt = c.rotation ? unrotatePoint(x, y, (c.domLeft + c.domRight) / 2, (c.domTop + c.domBottom) / 2, c.rotation) : { x, y };
+    const inX = pt.x >= c.domLeft - toleranceX * 2 && pt.x <= c.domRight + toleranceX * 2;
+    const inY = pt.y >= c.domTop - toleranceY * 1.5 && pt.y <= c.domBottom + toleranceY * 1.5;
+    if (inX && inY) {
+      const centerX = (c.domLeft + c.domRight) / 2;
+      const centerY = (c.domTop + c.domBottom) / 2;
+      const distSq = (pt.x - centerX) ** 2 + (pt.y - centerY) ** 2;
+      if (distSq < minDistanceSq) {
+        minDistanceSq = distSq;
+        bestMatch = c;
       }
     }
   }
