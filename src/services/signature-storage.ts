@@ -32,7 +32,17 @@ export interface SavedSignature {
   aspectRatio: number;
 }
 
+export interface StrokeBoundingBox {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  width: number;
+  height: number;
+}
+
 const STORAGE_KEY = 'pdf_editor_saved_signatures_v1';
+const MAX_SAVED_SIGNATURES = 12;
 
 /**
  * Retrieves all saved signatures from browser localStorage.
@@ -41,6 +51,7 @@ const STORAGE_KEY = 'pdf_editor_saved_signatures_v1';
  */
 export function getSavedSignatures(): SavedSignature[] {
   try {
+    if (typeof localStorage === 'undefined') return [];
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
@@ -55,7 +66,29 @@ export function getSavedSignatures(): SavedSignature[] {
 }
 
 /**
- * Saves a new signature to persistent storage.
+ * Attempts to persist the signature list into localStorage with quota protection.
+ *
+ * @param signatures Array of signatures to persist.
+ */
+function persistSignatures(signatures: SavedSignature[]): void {
+  if (typeof localStorage === 'undefined') return;
+
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(signatures));
+  } catch (err) {
+    // If quota exceeded, evict oldest non-default signatures and retry
+    console.warn('LocalStorage quota issue while saving signature, attempting eviction:', err);
+    const trimmed = signatures.filter((s, idx) => s.isDefault || idx < 5);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
+    } catch (innerErr) {
+      console.error('Failed to write signature to localStorage after eviction:', innerErr);
+    }
+  }
+}
+
+/**
+ * Saves a new signature to persistent storage with quota bounding.
  *
  * @param item Signature details without ID and creation timestamp.
  * @return The created SavedSignature with generated ID.
@@ -79,12 +112,25 @@ export function saveSignature(item: Omit<SavedSignature, 'id' | 'createdAt'>): S
   }
 
   current.unshift(newSignature);
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
-  } catch (err) {
-    console.error('Failed to write signature to localStorage:', err);
+
+  // Enforce maximum collection capacity to prevent localStorage exhaustion
+  while (current.length > MAX_SAVED_SIGNATURES) {
+    // Find oldest non-default signature to remove
+    let removeIdx = -1;
+    for (let i = current.length - 1; i >= 0; i--) {
+      if (!current[i].isDefault) {
+        removeIdx = i;
+        break;
+      }
+    }
+    if (removeIdx >= 0) {
+      current.splice(removeIdx, 1);
+    } else {
+      current.pop();
+    }
   }
 
+  persistSignatures(current);
   return newSignature;
 }
 
@@ -98,11 +144,7 @@ export function deleteSignature(id: string): void {
   if (current.length > 0 && !current.some((s) => s.isDefault)) {
     current[0].isDefault = true;
   }
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
-  } catch (err) {
-    console.error('Failed to update localStorage after deletion:', err);
-  }
+  persistSignatures(current);
 }
 
 /**
@@ -115,11 +157,7 @@ export function setDefaultSignature(id: string): void {
   for (const s of current) {
     s.isDefault = s.id === id;
   }
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
-  } catch (err) {
-    console.error('Failed to update default signature in localStorage:', err);
-  }
+  persistSignatures(current);
 }
 
 /**
@@ -142,8 +180,67 @@ export interface DrawPoint {
 }
 
 /**
- * Trims transparent whitespace margins from a canvas element to produce
- * tightly bounded image coordinates.
+ * Mathematically calculates the tight bounding box of vector drawn strokes
+ * without performing costly pixel buffer scans.
+ *
+ * @param strokes Array of stroke paths with coordinates.
+ * @param strokeWidth Pen stroke thickness.
+ * @param padding Margin in pixels around the stroke bounds.
+ * @return Analytical bounding box coordinates and dimensions.
+ */
+export function calculateStrokeBoundingBox(
+  strokes: DrawPoint[][],
+  strokeWidth = 2.5,
+  padding = 12
+): StrokeBoundingBox {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let hasPoints = false;
+
+  const halfWidth = Math.ceil(strokeWidth / 2);
+
+  for (let i = 0; i < strokes.length; i++) {
+    const stroke = strokes[i];
+    for (let j = 0; j < stroke.length; j++) {
+      const pt = stroke[j];
+      hasPoints = true;
+      if (pt.x < minX) minX = pt.x;
+      if (pt.x > maxX) maxX = pt.x;
+      if (pt.y < minY) minY = pt.y;
+      if (pt.y > maxY) maxY = pt.y;
+    }
+  }
+
+  if (!hasPoints) {
+    return {
+      minX: 0,
+      minY: 0,
+      maxX: 200,
+      maxY: 60,
+      width: 200,
+      height: 60,
+    };
+  }
+
+  const boundedMinX = minX - halfWidth - padding;
+  const boundedMaxX = maxX + halfWidth + padding;
+  const boundedMinY = minY - halfWidth - padding;
+  const boundedMaxY = maxY + halfWidth + padding;
+
+  return {
+    minX: boundedMinX,
+    minY: boundedMinY,
+    maxX: boundedMaxX,
+    maxY: boundedMaxY,
+    width: Math.max(1, boundedMaxX - boundedMinX),
+    height: Math.max(1, boundedMaxY - boundedMinY),
+  };
+}
+
+/**
+ * Trims transparent whitespace margins from an image canvas using edge scanning.
  *
  * @param canvas The canvas to crop.
  * @param padding Extra padding in pixels to retain around trimmed bounds.
@@ -155,30 +252,61 @@ export function cropCanvasToContent(canvas: HTMLCanvasElement, padding = 12): HT
 
   const w = canvas.width;
   const h = canvas.height;
+  if (w === 0 || h === 0) return canvas;
+
   const imgData = ctx.getImageData(0, 0, w, h);
-  const data = imgData.data;
+  const data32 = new Uint32Array(imgData.data.buffer, imgData.data.byteOffset, imgData.data.byteLength / 4);
 
   let minX = w;
   let minY = h;
   let maxX = 0;
   let maxY = 0;
 
-  for (let y = 0; y < h; y++) {
+  // Find top bound
+  topLoop: for (let y = 0; y < h; y++) {
+    const rowOffset = y * w;
     for (let x = 0; x < w; x++) {
-      const idx = (y * w + x) * 4;
-      const alpha = data[idx + 3];
-      if (alpha > 10) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
+      if ((data32[rowOffset + x] & 0xff000000) !== 0) {
+        minY = y;
+        break topLoop;
       }
     }
   }
 
-  // If blank canvas, return a fallback small canvas
-  if (minX > maxX || minY > maxY) {
+  // If blank canvas, return original canvas
+  if (minY === h) {
     return canvas;
+  }
+
+  // Find bottom bound
+  bottomLoop: for (let y = h - 1; y >= minY; y--) {
+    const rowOffset = y * w;
+    for (let x = 0; x < w; x++) {
+      if ((data32[rowOffset + x] & 0xff000000) !== 0) {
+        maxY = y;
+        break bottomLoop;
+      }
+    }
+  }
+
+  // Find left bound
+  leftLoop: for (let x = 0; x < w; x++) {
+    for (let y = minY; y <= maxY; y++) {
+      if ((data32[y * w + x] & 0xff000000) !== 0) {
+        minX = x;
+        break leftLoop;
+      }
+    }
+  }
+
+  // Find right bound
+  rightLoop: for (let x = w - 1; x >= minX; x--) {
+    for (let y = minY; y <= maxY; y++) {
+      if ((data32[y * w + x] & 0xff000000) !== 0) {
+        maxX = x;
+        break rightLoop;
+      }
+    }
   }
 
   const cropX = Math.max(0, minX - padding);
@@ -198,13 +326,14 @@ export function cropCanvasToContent(canvas: HTMLCanvasElement, padding = 12): HT
 }
 
 /**
- * Renders multiple drawn stroke paths into a smooth transparent PNG Data URL.
+ * Renders multiple drawn stroke paths into a smooth transparent PNG Data URL
+ * using analytical vector bounding box calculation.
  *
  * @param strokes Array of stroke paths, each containing a sequence of DrawPoints.
  * @param strokeWidth Pen stroke thickness in pixels.
  * @param strokeColor CSS stroke color string.
- * @param rawWidth Base canvas width.
- * @param rawHeight Base canvas height.
+ * @param rawWidth Base canvas width fallback.
+ * @param rawHeight Base canvas height fallback.
  * @return High-resolution cropped Data URL and dimensions.
  */
 export function renderDrawnStrokesToDataUrl(
@@ -214,23 +343,35 @@ export function renderDrawnStrokesToDataUrl(
   rawWidth = 800,
   rawHeight = 350
 ): { dataUrl: string; width: number; height: number; aspectRatio: number } {
-  const canvas = document.createElement('canvas');
-  const dpr = 2; // Supersample for crisp PDF printing
-  canvas.width = rawWidth * dpr;
-  canvas.height = rawHeight * dpr;
-
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
+  if (strokes.length === 0) {
     return { dataUrl: '', width: rawWidth, height: rawHeight, aspectRatio: rawWidth / rawHeight };
   }
 
+  const bbox = calculateStrokeBoundingBox(strokes, strokeWidth, 12);
+  const dpr = 2; // Supersample for crisp PDF printing
+  const canvasWidth = Math.max(20, Math.ceil(bbox.width * dpr));
+  const canvasHeight = Math.max(20, Math.ceil(bbox.height * dpr));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return { dataUrl: '', width: bbox.width, height: bbox.height, aspectRatio: bbox.width / bbox.height };
+  }
+
   ctx.scale(dpr, dpr);
+  // Shift origin by bounding box offset
+  ctx.translate(-bbox.minX, -bbox.minY);
+
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.strokeStyle = strokeColor;
   ctx.lineWidth = strokeWidth;
 
-  for (const stroke of strokes) {
+  for (let s = 0; s < strokes.length; s++) {
+    const stroke = strokes[s];
     if (stroke.length === 0) continue;
     if (stroke.length === 1) {
       ctx.beginPath();
@@ -254,20 +395,47 @@ export function renderDrawnStrokesToDataUrl(
     ctx.stroke();
   }
 
-  const cropped = cropCanvasToContent(canvas, 16);
-  const dataUrl = cropped.toDataURL('image/png');
-  const aspect = cropped.width / Math.max(1, cropped.height);
+  const dataUrl = canvas.toDataURL('image/png');
+  const logicalWidth = canvasWidth / dpr;
+  const logicalHeight = canvasHeight / dpr;
+  const aspect = logicalWidth / Math.max(1, logicalHeight);
 
   return {
     dataUrl,
-    width: cropped.width / dpr,
-    height: cropped.height / dpr,
+    width: logicalWidth,
+    height: logicalHeight,
     aspectRatio: aspect,
   };
 }
 
+let signatureFontsPreloaded = false;
+
 /**
- * Renders a typed text string using a handwriting or script font into a transparent PNG Data URL.
+ * Asynchronously preloads Google Fonts required for handwriting signatures
+ * without blocking document rendering.
+ */
+export function preloadSignatureFonts(): void {
+  if (signatureFontsPreloaded || typeof document === 'undefined') return;
+  signatureFontsPreloaded = true;
+
+  const fontFamilies = [
+    'Alex+Brush',
+    'Allura',
+    'Caveat:wght@600',
+    'Dancing+Script:wght@600',
+    'Great+Vibes',
+    'Pacifico',
+  ];
+
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href = `https://fonts.googleapis.com/css2?${fontFamilies.map((f) => `family=${f}`).join('&')}&display=swap`;
+  document.head.appendChild(link);
+}
+
+/**
+ * Renders a typed text string using a handwriting or script font into a transparent PNG Data URL
+ * using analytical FontMetrics measurement.
  *
  * @param text The signer name or initials string.
  * @param fontFamily Font family to apply.
@@ -279,52 +447,77 @@ export async function renderTypedSignatureToDataUrl(
   fontFamily: string,
   color: string
 ): Promise<{ dataUrl: string; width: number; height: number; aspectRatio: number }> {
-  if (document.fonts) {
+  const cleanText = text.trim() || 'Signature';
+
+  // Fast font load check with 300ms timeout race to prevent UI deadlocks
+  if (typeof document !== 'undefined' && document.fonts) {
     try {
-      await document.fonts.load(`72px "${fontFamily}"`);
+      preloadSignatureFonts();
+      if (!document.fonts.check(`64px "${fontFamily}"`)) {
+        await Promise.race([
+          document.fonts.load(`64px "${fontFamily}"`),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Font load timeout')), 300)),
+        ]);
+      }
     } catch {
-      // Font load error fallback
+      // Graceful fallback to cursive system fonts
     }
   }
 
-  const canvas = document.createElement('canvas');
   const dpr = 2;
-  const testWidth = 1200;
-  const testHeight = 400;
-  canvas.width = testWidth * dpr;
-  canvas.height = testHeight * dpr;
-
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
+  const measureCanvas = document.createElement('canvas');
+  const measureCtx = measureCanvas.getContext('2d');
+  if (!measureCtx) {
     return { dataUrl: '', width: 200, height: 60, aspectRatio: 3.33 };
   }
 
+  const fontSize = 56;
+  measureCtx.font = `${fontSize}px "${fontFamily}", cursive, sans-serif`;
+  const metrics = measureCtx.measureText(cleanText);
+
+  const textWidth = Math.ceil(metrics.width);
+  const ascent = Math.ceil(metrics.actualBoundingBoxAscent || fontSize * 0.75);
+  const descent = Math.ceil(metrics.actualBoundingBoxDescent || fontSize * 0.25);
+  const textHeight = Math.max(20, ascent + descent);
+
+  const padding = 16;
+  const logicalW = Math.max(40, textWidth + padding * 2);
+  const logicalH = Math.max(20, textHeight + padding * 2);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(logicalW * dpr);
+  canvas.height = Math.ceil(logicalH * dpr);
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return { dataUrl: '', width: logicalW, height: logicalH, aspectRatio: logicalW / logicalH };
+  }
+
   ctx.scale(dpr, dpr);
-  ctx.font = `64px "${fontFamily}", cursive, sans-serif`;
+  ctx.font = `${fontSize}px "${fontFamily}", cursive, sans-serif`;
   ctx.fillStyle = color;
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'center';
 
-  ctx.fillText(text, testWidth / 2, testHeight / 2);
+  ctx.fillText(cleanText, logicalW / 2, logicalH / 2);
 
-  const cropped = cropCanvasToContent(canvas, 16);
-  const dataUrl = cropped.toDataURL('image/png');
-  const aspect = cropped.width / Math.max(1, cropped.height);
+  const dataUrl = canvas.toDataURL('image/png');
+  const aspect = logicalW / Math.max(1, logicalH);
 
   return {
     dataUrl,
-    width: cropped.width / dpr,
-    height: cropped.height / dpr,
+    width: logicalW,
+    height: logicalH,
     aspectRatio: aspect,
   };
 }
 
 /**
- * Cleans an uploaded signature image by removing white or light background
- * and converting non-white ink pixels to a transparent PNG.
+ * Cleans an uploaded signature image by downscaling high-resolution photos,
+ * removing light backgrounds, and converting ink pixels to a transparent PNG.
  *
  * @param imageSource Base64 Data URL or Image Element.
- * @param threshold Brightness threshold from 0 to 255 (default 215) above which pixels are transparent.
+ * @param threshold Brightness threshold from 0 to 255 (default 220) above which pixels are transparent.
  * @param targetColor Optional override color for ink pixels.
  * @return High-resolution cropped transparent PNG Data URL and metrics.
  */
@@ -337,16 +530,31 @@ export async function processUploadedSignatureImage(
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
+      // Constrain oversized image dimensions to prevent freezing main thread
+      const MAX_UPLOAD_DIM = 600;
+      let targetW = img.naturalWidth || img.width;
+      let targetH = img.naturalHeight || img.height;
+
+      if (targetW > MAX_UPLOAD_DIM || targetH > MAX_UPLOAD_DIM) {
+        if (targetW >= targetH) {
+          targetH = Math.max(1, Math.round((targetH * MAX_UPLOAD_DIM) / targetW));
+          targetW = MAX_UPLOAD_DIM;
+        } else {
+          targetW = Math.max(1, Math.round((targetW * MAX_UPLOAD_DIM) / targetH));
+          targetH = MAX_UPLOAD_DIM;
+        }
+      }
+
       const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
+      canvas.width = targetW;
+      canvas.height = targetH;
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) {
         return reject(new Error('Failed to get canvas 2d context.'));
       }
 
-      ctx.drawImage(img, 0, 0);
-      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, targetW, targetH);
+      const imgData = ctx.getImageData(0, 0, targetW, targetH);
       const data = imgData.data;
 
       let rTarget = 0;
@@ -354,13 +562,11 @@ export async function processUploadedSignatureImage(
       let bTarget = 0;
       let hasTargetColor = false;
 
-      if (targetColor) {
-        if (targetColor.startsWith('#') && targetColor.length === 7) {
-          rTarget = parseInt(targetColor.slice(1, 3), 16);
-          gTarget = parseInt(targetColor.slice(3, 5), 16);
-          bTarget = parseInt(targetColor.slice(5, 7), 16);
-          hasTargetColor = true;
-        }
+      if (targetColor && targetColor.startsWith('#') && targetColor.length === 7) {
+        rTarget = parseInt(targetColor.slice(1, 3), 16);
+        gTarget = parseInt(targetColor.slice(3, 5), 16);
+        bTarget = parseInt(targetColor.slice(5, 7), 16);
+        hasTargetColor = true;
       }
 
       for (let i = 0; i < data.length; i += 4) {
@@ -371,14 +577,14 @@ export async function processUploadedSignatureImage(
 
         if (a === 0) continue;
 
-        // Calculate perceived brightness (standard luminance formula)
+        // Calculate perceived brightness via standard luminance formula
         const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
 
         if (luminance >= threshold) {
           // Pure transparent
           data[i + 3] = 0;
         } else {
-          // Smooth alpha dropoff near the threshold boundary for anti-aliasing
+          // Smooth anti-aliasing alpha dropoff near the threshold boundary
           const darknessRatio = Math.max(0, Math.min(1, (threshold - luminance) / 50));
           data[i + 3] = Math.round(a * darknessRatio);
 
