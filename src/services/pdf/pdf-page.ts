@@ -407,3 +407,412 @@ export class PdfPage {
                                   imgData.data[dstIdx + 3] = format === 4 ? rawBytes[srcIdx + 3] : 255; // A
                                 } else if (format === 2) { // BGR (3 bytes per pixel)
                                   imgData.data[dstIdx] = rawBytes[srcIdx + 2];     // R
+                                  imgData.data[dstIdx + 1] = rawBytes[srcIdx + 1]; // G
+                                  imgData.data[dstIdx + 2] = rawBytes[srcIdx];     // B
+                                  imgData.data[dstIdx + 3] = 255;
+                                } else if (format === 1) { // Grayscale
+                                  imgData.data[dstIdx] = rawBytes[srcIdx];
+                                  imgData.data[dstIdx + 1] = rawBytes[srcIdx];
+                                  imgData.data[dstIdx + 2] = rawBytes[srcIdx];
+                                  imgData.data[dstIdx + 3] = 255;
+                                }
+                              }
+                            }
+                            ctx.putImageData(imgData, 0, 0);
+                            src = canvas.toDataURL('image/png');
+                        }
+                    }
+                  }
+                } catch (e) {
+                  console.error('Failed to extract image bitmap', e);
+                } finally {
+                  if (typeof mod.FPDFBitmap_Destroy === 'function') {
+                    mod.FPDFBitmap_Destroy(bitmap);
+                  }
+                }
+              }
+            }
+
+            // Decompose the object's transform matrix for accurate dimensions.
+            // GetBounds returns the axis-aligned bounding box which expands when
+            // the image is rotated/skewed, causing distortion with object-fit:fill.
+            // The matrix encodes the actual rendered width, height, rotation, and flip.
+            let imgLeft = left;
+            let imgTop = top;
+            let imgWidth = width;
+            let imgHeight = height;
+            let imgRotation = 0;
+            let imgFlipX = false;
+            let imgFlipY = false;
+
+            const matrix = getPageObjectMatrix(this.engine, mod, objHandle);
+            if (matrix) {
+              // For image objects, the matrix maps the unit square [0,1]x[0,1]
+              // to the rendered rectangle on the page.
+              // Column vectors: width=(a,b), height=(c,d), origin=(e,f)
+              const renderW = Math.sqrt(matrix.a * matrix.a + matrix.b * matrix.b);
+              const renderH = Math.sqrt(matrix.c * matrix.c + matrix.d * matrix.d);
+
+              if (renderW > 0 && renderH > 0) {
+                imgWidth = renderW;
+                imgHeight = renderH;
+
+                // Rotation angle from the width-axis vector (negate for CSS CW convention)
+                const angleRad = Math.atan2(matrix.b, matrix.a);
+                imgRotation = -(angleRad * 180) / Math.PI;
+
+                // Determinant sign detects reflection (flip)
+                const det = matrix.a * matrix.d - matrix.b * matrix.c;
+                if (det < 0) {
+                  imgFlipY = true;
+                }
+
+                // Center of the image in PDF coordinates
+                const centerPdfX = matrix.e + (matrix.a + matrix.c) / 2;
+                const centerPdfY = matrix.f + (matrix.b + matrix.d) / 2;
+
+                // Convert center to DOM coordinates (origin top-left)
+                let centerDomX: number;
+                let centerDomY: number;
+
+                if (cropInfo.rotation !== 0) {
+                  const pt = pdfToDomCoords(centerPdfX, centerPdfY, cropInfo);
+                  centerDomX = pt.x;
+                  centerDomY = pt.y;
+                } else {
+                  centerDomX = centerPdfX - cropInfo.cropLeft;
+                  centerDomY = heightPts - (centerPdfY - cropInfo.cropBottom);
+                }
+
+                imgLeft = centerDomX - imgWidth / 2;
+                imgTop = centerDomY - imgHeight / 2;
+              }
+            }
+
+            images.push({
+              type: 'image',
+              id: `img_${this.pageIndex}_${i}`,
+              pageIndex: this.pageIndex,
+              left: imgLeft,
+              top: imgTop,
+              width: imgWidth,
+              height: imgHeight,
+              rotation: imgRotation,
+              flipX: imgFlipX,
+              flipY: imgFlipY,
+              src,
+              pdfObjectIndex: i
+            });
+          } else {
+            shapes.push({
+              type: 'shape',
+              id: `shape_${this.pageIndex}_${i}`,
+              pageIndex: this.pageIndex,
+              left,
+              top,
+              width,
+              height,
+              rotation: 0,
+              flipX: false,
+              flipY: false,
+              fill: 'transparent',
+              pdfObjectIndex: i
+            });
+          }
+        }
+      }
+    } finally {
+      this.engine.freeMemory(leftPtr);
+      this.engine.freeMemory(bottomPtr);
+      this.engine.freeMemory(rightPtr);
+      this.engine.freeMemory(topPtr);
+    }
+
+    // Sort spans by area (width * height) in descending order to fix layering/click-through.
+    // Largest items (like background images) will be rendered first and pushed to the back.
+    images.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+    shapes.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+
+    return { images, shapes };
+  }
+
+  /**
+   * Retrieves the page CropBox margins, dimensions, and rotation info.
+   *
+   * @returns PageCropInfo describing CropBox offsets and dimensions.
+   */
+  public getCropInfo(): PageCropInfo {
+    this.assertNotDisposed();
+    const mod = this.engine.getModule();
+    return getPageCropInfo(this.engine, mod, this.pageHandle);
+  }
+
+  /**
+   * Fast-path bounding box computation across all page content (characters, paths, images).
+   * Computes outer bounding rectangle without running paragraph detection, text encoding,
+   * or bitmap decoding.
+   *
+   * @returns ContentBounds or null if page has no visible content.
+   */
+  public getContentBounds(): ContentBounds | null {
+    this.assertNotDisposed();
+    const mod = this.engine.getModule();
+    const heightPts = mod.FPDF_GetPageHeightF(this.pageHandle);
+    const cropInfo = getPageCropInfo(this.engine, mod, this.pageHandle);
+
+    let minLeft = Infinity;
+    let minTop = Infinity;
+    let maxRight = -Infinity;
+    let maxBottom = -Infinity;
+
+    // 1. Fast character bounding scan
+    let textPageHandle = 0;
+    try {
+      textPageHandle = mod.FPDFText_LoadPage(this.pageHandle);
+      if (textPageHandle) {
+        const totalChars = mod.FPDFText_CountChars(textPageHandle);
+        if (totalChars > 0) {
+          const leftPtr = this.engine.allocateMemory(8);
+          const topPtr = this.engine.allocateMemory(8);
+          const rightPtr = this.engine.allocateMemory(8);
+          const bottomPtr = this.engine.allocateMemory(8);
+          try {
+            const heapF64 = mod.pdfium.HEAPF64;
+            for (let i = 0; i < totalChars; i++) {
+              const charCode = mod.FPDFText_GetUnicode(textPageHandle, i);
+              if (charCode <= 32 || charCode === 0xa0) continue;
+
+              mod.FPDFText_GetCharBox(textPageHandle, i, leftPtr, rightPtr, bottomPtr, topPtr);
+              const left = heapF64[leftPtr >> 3] || 0;
+              const top = heapF64[topPtr >> 3] || 0;
+              const right = heapF64[rightPtr >> 3] || 0;
+              const bottom = heapF64[bottomPtr >> 3] || 0;
+
+              if (right > left && top > bottom) {
+                let domLeft: number;
+                let domTop: number;
+                let domRight: number;
+                let domBottom: number;
+
+                if (cropInfo.rotation !== 0) {
+                  const bounds = pdfBoxToDomBounds(left, bottom, right, top, cropInfo);
+                  domLeft = bounds.left;
+                  domTop = bounds.top;
+                  domRight = bounds.right;
+                  domBottom = bounds.bottom;
+                } else {
+                  domLeft = left - cropInfo.cropLeft;
+                  domRight = right - cropInfo.cropLeft;
+                  domTop = Math.max(0, heightPts - (top - cropInfo.cropBottom));
+                  domBottom = Math.max(0, heightPts - (bottom - cropInfo.cropBottom));
+                }
+
+                minLeft = Math.min(minLeft, domLeft);
+                minTop = Math.min(minTop, domTop);
+                maxRight = Math.max(maxRight, domRight);
+                maxBottom = Math.max(maxBottom, domBottom);
+              }
+            }
+          } finally {
+            this.engine.freeMemory(leftPtr);
+            this.engine.freeMemory(topPtr);
+            this.engine.freeMemory(rightPtr);
+            this.engine.freeMemory(bottomPtr);
+          }
+        }
+      }
+    } finally {
+      if (textPageHandle) {
+        mod.FPDFText_ClosePage(textPageHandle);
+      }
+    }
+
+    // 2. Fast object bounding scan (paths, images)
+    const objectCount = mod.FPDFPage_CountObjects(this.pageHandle);
+    if (objectCount > 0 && typeof mod.FPDFPageObj_GetBounds === 'function') {
+      const leftPtr = this.engine.allocateMemory(4);
+      const bottomPtr = this.engine.allocateMemory(4);
+      const rightPtr = this.engine.allocateMemory(4);
+      const topPtr = this.engine.allocateMemory(4);
+      try {
+        const heapF32 = mod.pdfium.HEAPF32;
+        for (let i = 0; i < objectCount; i++) {
+          const objHandle = mod.FPDFPage_GetObject(this.pageHandle, i);
+          if (!objHandle) continue;
+          const objType = mod.FPDFPageObj_GetType(objHandle);
+          if (objType === 2 || objType === 3) {
+            const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
+            if (!ok) continue;
+            const objLeft = heapF32[leftPtr >> 2];
+            const objBottom = heapF32[bottomPtr >> 2];
+            const objRight = heapF32[rightPtr >> 2];
+            const objTop = heapF32[topPtr >> 2];
+
+            if (objRight > objLeft && objTop > objBottom) {
+              let domLeft: number;
+              let domTop: number;
+              let domRight: number;
+              let domBottom: number;
+
+              if (cropInfo.rotation !== 0) {
+                const bounds = pdfBoxToDomBounds(objLeft, objBottom, objRight, objTop, cropInfo);
+                domLeft = bounds.left;
+                domTop = bounds.top;
+                domRight = bounds.right;
+                domBottom = bounds.bottom;
+              } else {
+                domLeft = objLeft - cropInfo.cropLeft;
+                domRight = objRight - cropInfo.cropLeft;
+                domTop = Math.max(0, heightPts - (objTop - cropInfo.cropBottom));
+                domBottom = Math.max(0, heightPts - (objBottom - cropInfo.cropBottom));
+              }
+
+              minLeft = Math.min(minLeft, domLeft);
+              minTop = Math.min(minTop, domTop);
+              maxRight = Math.max(maxRight, domRight);
+              maxBottom = Math.max(maxBottom, domBottom);
+            }
+          }
+        }
+      } finally {
+        this.engine.freeMemory(leftPtr);
+        this.engine.freeMemory(bottomPtr);
+        this.engine.freeMemory(rightPtr);
+        this.engine.freeMemory(topPtr);
+      }
+    }
+
+    if (!Number.isFinite(minLeft) || !Number.isFinite(minTop) || !Number.isFinite(maxRight) || !Number.isFinite(maxBottom)) {
+      return null;
+    }
+
+    return {
+      left: minLeft,
+      top: minTop,
+      right: maxRight,
+      bottom: maxBottom,
+    };
+  }
+
+  /**
+   * Draws a new text element onto the page.
+   * @param options The text content, position, and formatting specifications.
+   * @param charsetIndex Optional document font character availability index.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public drawText(options: TextOptions, charsetIndex?: FontCharsetIndex): this {
+    this.assertNotDisposed();
+    drawText(this.engine, this.docHandle, this.pageHandle, options, charsetIndex);
+    return this;
+  }
+
+  /**
+   * Draws a rectangular shape onto the page.
+   * @param options The rectangle dimensions, position, and styling.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public drawRectangle(options: ShapeOptions): this {
+    this.assertNotDisposed();
+    drawRectangle(this.engine, this.pageHandle, options);
+    return this;
+  }
+
+  /**
+   * Draws a circular or elliptical shape onto the page.
+   * @param options The circle dimensions, position, and styling.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public drawCircle(options: ShapeOptions): this {
+    this.assertNotDisposed();
+    drawCircle(this.engine, this.pageHandle, options);
+    return this;
+  }
+
+  /**
+   * Draws a straight line onto the page.
+   * @param options The line start/end coordinates and styling.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public drawLine(options: ShapeOptions): this {
+    this.assertNotDisposed();
+    drawLine(this.engine, this.pageHandle, options);
+    return this;
+  }
+
+  /**
+   * Draws a line terminating in an arrow head onto the page.
+   * @param options The arrow coordinates and styling.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public drawArrow(options: ShapeOptions): this {
+    this.assertNotDisposed();
+    drawArrow(this.engine, this.pageHandle, options);
+    return this;
+  }
+
+  /**
+   * Draws a polyline/path onto the page.
+   * @param options The path coordinates and styling.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public drawPath(options: import('./operations/types').PathOptions): this {
+    this.assertNotDisposed();
+    drawPath(this.engine, this.pageHandle, options);
+    return this;
+  }
+
+  /**
+   * Adds a Text Highlight annotation to the page.
+   * @param options The dimensions and styling for the highlight.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public addHighlightAnnotation(options: ShapeOptions): this {
+    this.assertNotDisposed();
+    addHighlightAnnotation(this.engine, this.pageHandle, options);
+    return this;
+  }
+
+  /**
+   * Adds an Ink (freehand) annotation to the page.
+   * @param options The path coordinates and styling for the ink.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public addInkAnnotation(options: import('./operations/types').PathOptions): this {
+    this.assertNotDisposed();
+    addInkAnnotation(this.engine, this.pageHandle, options);
+    return this;
+  }
+
+  /**
+   * Embeds and draws an image onto the page.
+   * @param options The image data, positioning, and sizing.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public drawImage(options: ImageOptions): this {
+    this.assertNotDisposed();
+    drawImage(this.engine, this.docHandle, this.pageHandle, options);
+    return this;
+  }
+
+  /**
+   * Adds a Text (Sticky Note) annotation to the page.
+   * @param options Sticky note text annotation options.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public addTextAnnotation(options: NoteAnnotationOptions): this {
+    this.assertNotDisposed();
+    addTextAnnotation(this.engine, this.pageHandle, options);
+    return this;
+  }
+
+  /**
+   * Draws a placeholder representation for an interactive form field.
+   * @param options The form field type, position, and dimensions.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public drawFormFieldPlaceholder(options: FormFieldPlaceholderOptions): this {
+    this.assertNotDisposed();
+    drawFormFieldPlaceholder(this.engine, this.docHandle, this.pageHandle, options);
+    return this;
+  }
+}
