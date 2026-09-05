@@ -336,3 +336,338 @@ export async function convertImageToEmbeddable(
     bytes = new Uint8Array(arrayBuf);
   }
 
+  // Fast path 1: PNG direct binary parsing
+  const isPng = bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+  if (isPng) {
+    const dims = extractPngDimensions(bytes);
+    if (dims) {
+      return {
+        data: bytes,
+        format: 'png',
+        width: dims.width,
+        height: dims.height,
+      };
+    }
+  }
+
+  // Fast path 2: JPEG direct binary parsing
+  const isJpeg = bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  if (isJpeg) {
+    const dims = extractJpegDimensions(bytes);
+    if (dims) {
+      return {
+        data: bytes,
+        format: 'jpeg',
+        width: dims.width,
+        height: dims.height,
+      };
+    }
+  }
+
+  // Path 3: Browser DOM Canvas conversion for WebP, GIF, BMP, SVG, and other image formats
+  if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    const reencoded = await reencodeImageViaCanvas(bytes, fileName, resolvedMimeType);
+    return {
+      data: reencoded.data,
+      format: 'png',
+      width: reencoded.width,
+      height: reencoded.height,
+    };
+  }
+
+  // Fallback for headless environments if dimensions could not be read
+  if (isPng) {
+    return { data: bytes, format: 'png', width: 595, height: 842 };
+  }
+  if (isJpeg) {
+    return { data: bytes, format: 'jpeg', width: 595, height: 842 };
+  }
+
+  throw new Error(`Unsupported image format for file "${fileName ?? 'image'}".`);
+}
+
+/**
+ * Normalizes input list into standard MergeInputItem array with pure ArrayBuffer buffers.
+ */
+async function normalizeMergeInputs(
+  inputs: Array<File | MergeInputItem>
+): Promise<Array<{ name: string; buffer: ArrayBuffer; mimeType?: string }>> {
+  const normalized: Array<{ name: string; buffer: ArrayBuffer; mimeType?: string }> = [];
+
+  for (const item of inputs) {
+    if ('buffer' in item) {
+      let arrayBuf: ArrayBuffer;
+      if (item.buffer instanceof ArrayBuffer) {
+        arrayBuf = item.buffer;
+      } else if (ArrayBuffer.isView(item.buffer)) {
+        const view = item.buffer;
+        arrayBuf = view.buffer.slice(
+          view.byteOffset,
+          view.byteOffset + view.byteLength
+        ) as ArrayBuffer;
+      } else {
+        arrayBuf = new ArrayBuffer(0);
+      }
+      normalized.push({
+        name: item.name,
+        buffer: arrayBuf,
+        mimeType: item.mimeType,
+      });
+    } else {
+      const file = item as File;
+      const buf = await file.arrayBuffer();
+      normalized.push({
+        name: file.name,
+        buffer: buf,
+        mimeType: file.type,
+      });
+    }
+  }
+
+  return normalized;
+}
+
+/**
+ * Suggests an appropriate merged file name based on input names.
+ */
+function deriveMergedFileName(items: Array<{ name: string; buffer: ArrayBuffer; mimeType?: string }>): string {
+  if (items.length === 0) return 'merged.pdf';
+  if (items.length === 1) {
+    const base = items[0].name.replace(/\.[^/.]+$/, '');
+    return `${base}.pdf`;
+  }
+
+  const firstBase = items[0].name.replace(/\.[^/.]+$/, '');
+  const allImages = items.every((i) => isImageFile(i.buffer, i.name));
+  if (allImages) {
+    return `${firstBase}_merged_images.pdf`;
+  }
+  return `${firstBase}_merged.pdf`;
+}
+
+/**
+ * Merges PDF documents and images using pdf-lib.
+ * Includes defensive updateFieldAppearances suppression and page-by-page copy fallback
+ * to prevent UnexpectedObjectTypeError when AcroForms contain dangling or missing dictionary entries.
+ */
+export async function mergeFilesViaPdfLib(
+  items: Array<{ name: string; buffer: ArrayBuffer; mimeType?: string }>
+): Promise<MergeFilesResult> {
+  const targetDoc = await PDFDocument.create();
+
+  for (const item of items) {
+    const isPdf = isPdfFile(item.buffer, item.name);
+    const isImg = isImageFile(item.buffer, item.name);
+
+    if (isPdf) {
+      const srcDoc = await PDFDocument.load(item.buffer, { ignoreEncryption: true });
+      const pageIndices = srcDoc.getPageIndices();
+      if (pageIndices.length > 0) {
+        try {
+          const copiedPages = await targetDoc.copyPages(srcDoc, pageIndices);
+          for (const page of copiedPages) {
+            targetDoc.addPage(page);
+          }
+        } catch {
+          // Bulk copy failure recovery: copy page by page to salvage all valid pages
+          for (const idx of pageIndices) {
+            try {
+              const [singlePage] = await targetDoc.copyPages(srcDoc, [idx]);
+              if (singlePage) {
+                targetDoc.addPage(singlePage);
+              }
+            } catch {
+              // Ignore individual corrupted page
+            }
+          }
+        }
+      }
+    } else if (isImg) {
+      let embeddable = await convertImageToEmbeddable(item.buffer, item.name, item.mimeType);
+      let embeddedImage;
+
+      try {
+        const safeData = embeddable.data.byteOffset === 0 && embeddable.data.byteLength === embeddable.data.buffer.byteLength
+          ? embeddable.data
+          : new Uint8Array(embeddable.data.buffer.slice(embeddable.data.byteOffset, embeddable.data.byteOffset + embeddable.data.byteLength));
+        embeddedImage = embeddable.format === 'jpeg'
+          ? await targetDoc.embedJpg(safeData)
+          : await targetDoc.embedPng(safeData);
+      } catch {
+        if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+          const reencoded = await reencodeImageViaCanvas(item.buffer, item.name, item.mimeType);
+          embeddedImage = await targetDoc.embedPng(reencoded.data);
+          embeddable = {
+            data: reencoded.data,
+            format: 'png',
+            width: reencoded.width,
+            height: reencoded.height,
+          };
+        } else {
+          throw new Error(`Failed to embed image "${item.name}" into document.`);
+        }
+      }
+
+      const dims = calculateImagePageDimensions(embeddable.width, embeddable.height);
+      const page = targetDoc.addPage([dims.width, dims.height]);
+      page.drawImage(embeddedImage, {
+        x: 0,
+        y: 0,
+        width: dims.width,
+        height: dims.height,
+      });
+    } else if (documentConverter.isConvertible(item.name, item.buffer, item.mimeType)) {
+      const converted = await documentConverter.convertDocument({
+        name: item.name,
+        buffer: item.buffer,
+        mimeType: item.mimeType,
+      });
+      const convertedDoc = await PDFDocument.load(converted.buffer, { ignoreEncryption: true });
+      const indices = convertedDoc.getPageIndices();
+      const pages = await targetDoc.copyPages(convertedDoc, indices);
+      for (const p of pages) {
+        targetDoc.addPage(p);
+      }
+    } else {
+      // Attempt PDF parsing as graceful fallback for unknown extensions with PDF content
+      try {
+        const fallbackDoc = await PDFDocument.load(item.buffer, { ignoreEncryption: true });
+        const indices = fallbackDoc.getPageIndices();
+        const pages = await targetDoc.copyPages(fallbackDoc, indices);
+        for (const p of pages) {
+          targetDoc.addPage(p);
+        }
+      } catch {
+        throw new Error(`File "${item.name}" is not a recognized PDF or image format.`);
+      }
+    }
+  }
+
+  const pageCount = targetDoc.getPageCount();
+  if (pageCount === 0) {
+    throw new Error('Merged document contains no readable pages.');
+  }
+
+  // Passing updateFieldAppearances: false is critical to prevent pdf-lib from throwing
+  // "Expected instance of PDFDict, but got instance of undefined" when AcroForm
+  // fields contain dangling, invalid, or undefined dictionary references.
+  const mergedBytes = await targetDoc.save({ updateFieldAppearances: false });
+  const buffer = mergedBytes.buffer.slice(
+    mergedBytes.byteOffset,
+    mergedBytes.byteOffset + mergedBytes.byteLength
+  ) as ArrayBuffer;
+
+  return {
+    buffer,
+    pageCount,
+    fileName: deriveMergedFileName(items),
+  };
+}
+
+/**
+ * Merges any combination of PDF files and image files into a single unified PDF buffer.
+ * Preserves the exact sequence of input files. Multi-page PDFs have all pages imported
+ * in sequence; images are converted into individual full-bleed pages.
+ *
+ * Uses PDFium WASM as the primary engine when available for native speed and fault tolerance,
+ * falling back to resilient pdf-lib processing with disabled field appearance generation.
+ *
+ * @param rawInputs Array of File objects or MergeInputItem objects.
+ * @param engine Optional PDFium engine instance.
+ * @returns Object containing the merged ArrayBuffer, total page count, and suggested file name.
+ */
+export async function mergeFilesToPdfBuffer(
+  rawInputs: Array<File | MergeInputItem>,
+  engine?: PdfiumEngine
+): Promise<MergeFilesResult> {
+  if (!rawInputs || rawInputs.length === 0) {
+    throw new Error('No files provided for merging.');
+  }
+
+  const rawItems = await normalizeMergeInputs(rawInputs);
+
+  // Pre-convert any non-PDF, non-image documents to PDF buffers
+  const items = await Promise.all(
+    rawItems.map(async (item) => {
+      if (
+        !isPdfFile(item.buffer, item.name) &&
+        !isImageFile(item.buffer, item.name) &&
+        documentConverter.isConvertible(item.name, item.buffer, item.mimeType)
+      ) {
+        const converted = await documentConverter.convertDocument({
+          name: item.name,
+          buffer: item.buffer,
+          mimeType: item.mimeType,
+        });
+        return {
+          name: converted.fileName,
+          buffer: converted.buffer,
+          mimeType: 'application/pdf',
+        };
+      }
+      return item;
+    })
+  );
+
+  // Determine active PDFium engine
+  const activeEngine = engine ?? (typeof window !== 'undefined' ? PdfiumEngine.getInstance() : undefined);
+
+  // Single PDF optimization: pass through without re-encoding
+  if (items.length === 1) {
+    const single = items[0];
+    if (isPdfFile(single.buffer, single.name)) {
+      let pageCount = 1;
+      if (activeEngine && activeEngine.isReady) {
+        const mod = activeEngine.getModule();
+        const sourceBytes = new Uint8Array(single.buffer);
+        const sourceSize = sourceBytes.byteLength;
+        const sourcePtr = activeEngine.allocateMemory(sourceSize);
+        try {
+          const heapBytes = new Uint8Array(mod.pdfium.HEAPU8.buffer, sourcePtr, sourceSize);
+          heapBytes.set(sourceBytes);
+          const docHandle = mod.FPDF_LoadMemDocument(sourcePtr, sourceSize, '');
+          if (!docHandle) {
+            throw new Error(`Failed to parse PDF document "${single.name}".`);
+          }
+          try {
+            pageCount = mod.FPDF_GetPageCount(docHandle);
+          } finally {
+            mod.FPDF_CloseDocument(docHandle);
+          }
+        } finally {
+          activeEngine.freeMemory(sourcePtr);
+        }
+      } else {
+        const doc = await PDFDocument.load(single.buffer, { ignoreEncryption: true });
+        pageCount = doc.getPageCount();
+      }
+      return {
+        buffer: single.buffer,
+        pageCount,
+        fileName: deriveMergedFileName(items),
+      };
+    }
+  }
+
+  // Primary layer: PDFium WASM engine when initialized
+  if (activeEngine && activeEngine.isReady) {
+    try {
+      const { data, pageCount } = await mergeDocumentsAndImages(activeEngine, items);
+      const buffer = data.buffer.slice(
+        data.byteOffset,
+        data.byteOffset + data.byteLength
+      ) as ArrayBuffer;
+
+      return {
+        buffer,
+        pageCount,
+        fileName: deriveMergedFileName(items),
+      };
+    } catch (engineErr) {
+      console.warn('PDFium engine merge encountered an issue, falling back to pdf-lib:', engineErr);
+    }
+  }
+
+  // Fallback layer: Fortified pdf-lib with updateFieldAppearances disabled
+  return await mergeFilesViaPdfLib(items);
+}
