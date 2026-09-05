@@ -1,0 +1,380 @@
+/**
+ * Text, Markdown, and Code to PDF Converter.
+ * Parses markdown, plain text, and code files into an IDR FlowDocument and renders through pdf-layout-engine.
+ */
+
+import { PDFDocument } from 'pdf-lib';
+import type {
+  ConversionInputItem,
+  ConvertedDocumentResult,
+  DocumentConversionOptions,
+  FlowDocument,
+  DocumentBlock,
+  TableBlock,
+  StyledRun,
+  FormatConverter,
+} from '../types';
+import { layoutFlowDocument } from '../pdf-layout-engine';
+
+/**
+ * Parses inline Markdown formatting into styled runs.
+ * Supports **bold**, *italic*, `code`, and ~~strike~~.
+ */
+export function parseInlineMarkdown(text: string): StyledRun[] {
+  const runs: StyledRun[] = [];
+  const regex = /(\*\*|__)(.*?)\1|(\*|_)(.*?)\3|(`)(.*?)\5|(~~)(.*?)\7|([^*_`~]+)/g;
+
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    if (match[2] !== undefined) {
+      // Bold
+      runs.push({
+        text: match[2],
+        style: { bold: true },
+      });
+    } else if (match[4] !== undefined) {
+      // Italic
+      runs.push({
+        text: match[4],
+        style: { italic: true },
+      });
+    } else if (match[6] !== undefined) {
+      // Inline code
+      runs.push({
+        text: match[6],
+        style: { fontFamily: 'courier', fontColor: '#1E293B' },
+      });
+    } else if (match[8] !== undefined) {
+      // Strikethrough
+      runs.push({
+        text: match[8],
+        style: { strike: true },
+      });
+    } else if (match[9] !== undefined) {
+      // Plain text
+      runs.push({
+        text: match[9],
+      });
+    }
+  }
+
+  return runs.length > 0 ? runs : [{ text }];
+}
+
+/**
+ * Parses a Markdown table string into an IDR TableBlock.
+ */
+function parseMarkdownTable(lines: string[]): TableBlock | null {
+  if (lines.length < 2) return null;
+
+  const parsedRows: string[][] = [];
+  for (const line of lines) {
+    // Skip separator lines like |---|---|
+    if (/^\s*\|?\s*[-:]+[-| :]*\|?\s*$/.test(line)) {
+      continue;
+    }
+
+    const cells = line
+      .split('|')
+      .map((c) => c.trim())
+      .filter((c, idx, arr) => (idx > 0 && idx < arr.length - 1) || c.length > 0);
+
+    if (cells.length > 0) {
+      parsedRows.push(cells);
+    }
+  }
+
+  if (parsedRows.length === 0) return null;
+
+  return {
+    type: 'table',
+    rows: parsedRows.map((row, rIdx) => ({
+      isHeader: rIdx === 0,
+      cells: row.map((cellText) => ({
+        runs: parseInlineMarkdown(cellText),
+        isHeader: rIdx === 0,
+      })),
+    })),
+    hasBorders: true,
+    hasZebraStriping: true,
+  };
+}
+
+/**
+ * Parses Markdown source text into an IDR FlowDocument.
+ */
+export function parseMarkdownText(markdown: string, baseTitle?: string): FlowDocument {
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+  const blocks: DocumentBlock[] = [];
+  let docTitle = baseTitle;
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (trimmed.length === 0) {
+      i++;
+      continue;
+    }
+
+    // Fenced Code Block
+    if (trimmed.startsWith('```')) {
+      const language = trimmed.slice(3).trim();
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++; // Skip closing ```
+      blocks.push({
+        type: 'code',
+        code: codeLines.join('\n'),
+        language: language || undefined,
+        showLineNumbers: true,
+      });
+      continue;
+    }
+
+    // Headings: # H1, ## H2, ### H3, #### H4
+    const headingMatch = /^(#{1,4})\s+(.+)$/.exec(trimmed);
+    if (headingMatch) {
+      const level = headingMatch[1].length as 1 | 2 | 3 | 4;
+      const text = headingMatch[2].trim();
+      if (level === 1) {
+        docTitle = text;
+      }
+      blocks.push({
+        type: 'heading',
+        level,
+        text,
+      });
+      i++;
+      continue;
+    }
+
+    // Horizontal Rule: ---, ***, ___
+    if (/^(\*{3,}|-{3,}|_{3,})$/.test(trimmed)) {
+      blocks.push({ type: 'divider' });
+      i++;
+      continue;
+    }
+
+    // Blockquote: > text
+    if (trimmed.startsWith('>')) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith('>')) {
+        quoteLines.push(lines[i].trim().replace(/^>\s*/, ''));
+        i++;
+      }
+      blocks.push({
+        type: 'quote',
+        text: quoteLines.join(' '),
+      });
+      continue;
+    }
+
+    // Markdown Table: starts with |
+    if (trimmed.startsWith('|')) {
+      const tableLines: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith('|')) {
+        tableLines.push(lines[i].trim());
+        i++;
+      }
+      const tableBlock = parseMarkdownTable(tableLines);
+      if (tableBlock) {
+        blocks.push(tableBlock);
+        continue;
+      }
+    }
+
+    // Unordered List: - item, * item, + item
+    if (/^[-*+]\s+/.test(trimmed)) {
+      const items: (readonly StyledRun[])[] = [];
+      while (i < lines.length && /^[-*+]\s+/.test(lines[i].trim())) {
+        const itemText = lines[i].trim().replace(/^[-*+]\s+/, '');
+        items.push(parseInlineMarkdown(itemText));
+        i++;
+      }
+      blocks.push({
+        type: 'list',
+        ordered: false,
+        items,
+      });
+      continue;
+    }
+
+    // Ordered List: 1. item
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const items: (readonly StyledRun[])[] = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
+        const itemText = lines[i].trim().replace(/^\d+\.\s+/, '');
+        items.push(parseInlineMarkdown(itemText));
+        i++;
+      }
+      blocks.push({
+        type: 'list',
+        ordered: true,
+        items,
+      });
+      continue;
+    }
+
+    // Standard Paragraph
+    const paraLines: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim().length > 0 &&
+      !lines[i].trim().startsWith('#') &&
+      !lines[i].trim().startsWith('```') &&
+      !lines[i].trim().startsWith('>') &&
+      !lines[i].trim().startsWith('|') &&
+      !/^[-*+]\s+/.test(lines[i].trim()) &&
+      !/^\d+\.\s+/.test(lines[i].trim()) &&
+      !/^(\*{3,}|-{3,}|_{3,})$/.test(lines[i].trim())
+    ) {
+      paraLines.push(lines[i].trim());
+      i++;
+    }
+
+    const runs = parseInlineMarkdown(paraLines.join(' '));
+    blocks.push({
+      type: 'paragraph',
+      runs,
+      spaceAfter: 6,
+    });
+  }
+
+  return {
+    title: docTitle,
+    blocks,
+  };
+}
+
+/**
+ * Parses plain text or code files into an IDR FlowDocument.
+ */
+export function parsePlainText(
+  text: string,
+  baseTitle?: string,
+  isCodeFormat?: boolean
+): FlowDocument {
+  if (isCodeFormat) {
+    return {
+      title: baseTitle,
+      blocks: [
+        {
+          type: 'code',
+          code: text,
+          showLineNumbers: true,
+        },
+      ],
+    };
+  }
+
+  const paragraphs = text.replace(/\r\n/g, '\n').split(/\n\s*\n/);
+  const blocks: DocumentBlock[] = [];
+
+  for (const p of paragraphs) {
+    const trimmed = p.trim();
+    if (trimmed.length === 0) continue;
+
+    blocks.push({
+      type: 'paragraph',
+      runs: [{ text: trimmed }],
+      spaceAfter: 6,
+    });
+  }
+
+  return {
+    title: baseTitle,
+    blocks,
+  };
+}
+
+export class TextConverter implements FormatConverter {
+  readonly id = 'text';
+  readonly displayName = 'Markdown, Text & Code (.md, .txt, .json, etc.)';
+  readonly formats = ['markdown', 'text', 'code', 'json'] as const;
+  readonly extensions = [
+    '.md',
+    '.markdown',
+    '.txt',
+    '.json',
+    '.xml',
+    '.html',
+    '.htm',
+    '.rtf',
+    '.yaml',
+    '.yml',
+    '.log',
+    '.js',
+    '.ts',
+  ] as const;
+  readonly mimeTypes = [
+    'text/markdown',
+    'text/plain',
+    'application/json',
+    'text/html',
+    'application/xml',
+    'text/yaml',
+  ] as const;
+
+  canConvert(fileName: string, _buffer: ArrayBuffer | Uint8Array, mimeType?: string): boolean {
+    const lower = fileName.toLowerCase();
+    for (const ext of this.extensions) {
+      if (lower.endsWith(ext)) return true;
+    }
+    if (mimeType && (mimeType.startsWith('text/') || this.mimeTypes.includes(mimeType as typeof this.mimeTypes[number]))) {
+      return true;
+    }
+    return false;
+  }
+
+  async convert(
+    input: ConversionInputItem,
+    options?: DocumentConversionOptions
+  ): Promise<ConvertedDocumentResult> {
+    const startTime = Date.now();
+    const baseName = input.name.replace(/\.[^/.]+$/, '');
+    const lower = input.name.toLowerCase();
+
+    const rawText = typeof input.buffer === 'string'
+      ? input.buffer
+      : new TextDecoder('utf-8').decode(input.buffer);
+
+    const isMarkdown = lower.endsWith('.md') || lower.endsWith('.markdown') || input.mimeType === 'text/markdown';
+    const isCode = lower.endsWith('.json') || lower.endsWith('.xml') || lower.endsWith('.yaml') || lower.endsWith('.yml') || lower.endsWith('.log') || lower.endsWith('.js') || lower.endsWith('.ts');
+
+    let flowDoc: FlowDocument;
+    if (isMarkdown) {
+      flowDoc = parseMarkdownText(rawText, baseName);
+    } else {
+      flowDoc = parsePlainText(rawText, baseName, isCode);
+    }
+
+    const doc = await PDFDocument.create();
+    const { pageCount } = await layoutFlowDocument(doc, flowDoc, options);
+
+    const pdfBytes = await doc.save();
+    const buffer = pdfBytes.buffer.slice(
+      pdfBytes.byteOffset,
+      pdfBytes.byteOffset + pdfBytes.byteLength
+    ) as ArrayBuffer;
+
+    const wordCount = rawText.match(/\S+/g)?.length ?? 0;
+
+    return {
+      buffer,
+      pageCount,
+      fileName: `${baseName}.pdf`,
+      format: isMarkdown ? 'markdown' : isCode ? 'code' : 'text',
+      metadata: {
+        title: flowDoc.title ?? baseName,
+        wordCount,
+        conversionDurationMs: Date.now() - startTime,
+      },
+    };
+  }
+}
