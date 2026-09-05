@@ -382,3 +382,394 @@ function renderParagraph(ctx: LayoutContext, block: ParagraphBlock): void {
   ctx.cursorY += spaceAfter;
 }
 
+/**
+ * Renders a heading block into the layout context.
+ */
+function renderHeading(ctx: LayoutContext, block: HeadingBlock): void {
+  const levelConfigs: Record<1 | 2 | 3 | 4, { size: number; before: number; after: number; color: RGB }> = {
+    1: { size: 22, before: 18, after: 8, color: rgb(0.1, 0.15, 0.28) },
+    2: { size: 16, before: 14, after: 6, color: rgb(0.15, 0.2, 0.32) },
+    3: { size: 13, before: 10, after: 4, color: rgb(0.2, 0.25, 0.38) },
+    4: { size: 11, before: 8, after: 4, color: rgb(0.25, 0.3, 0.42) },
+  };
+
+  const config = levelConfigs[block.level] ?? levelConfigs[1];
+  const runs: StyledRun[] = [
+    {
+      text: block.text,
+      style: {
+        bold: true,
+        fontSize: config.size,
+      },
+    },
+  ];
+
+  const lines = wrapRunsToLines(
+    runs,
+    ctx.fonts,
+    ctx.printableWidth,
+    config.size,
+    config.color
+  );
+
+  ctx.cursorY += config.before;
+
+  for (const line of lines) {
+    ensureVerticalSpace(ctx, line.height);
+    drawWrappedLine(
+      ctx.activePage,
+      ctx.pageHeight,
+      line,
+      ctx.margins.left,
+      ctx.cursorY,
+      block.align ?? 'left',
+      ctx.printableWidth
+    );
+    ctx.cursorY += line.height;
+  }
+
+  ctx.cursorY += config.after;
+}
+
+/**
+ * Renders a bullet or ordered list block into the layout context.
+ */
+function renderList(ctx: LayoutContext, block: ListBlock): void {
+  const defaultSize = ctx.options.fontSize ?? 10.5;
+  const indentOffset = (block.indentLevel ?? 0) * 16;
+  const bulletWidth = 16;
+  const contentWidth = ctx.printableWidth - indentOffset - bulletWidth;
+
+  for (let i = 0; i < block.items.length; i++) {
+    const itemRuns = block.items[i];
+    const bulletText = block.ordered ? `${i + 1}.` : '•';
+    const lines = wrapRunsToLines(
+      itemRuns,
+      ctx.fonts,
+      contentWidth,
+      defaultSize
+    );
+
+    if (lines.length === 0) continue;
+
+    ensureVerticalSpace(ctx, lines[0].height);
+
+    // Draw bullet / number
+    const bulletPdfY = ctx.pageHeight - ctx.cursorY - lines[0].height * 0.8;
+    ctx.activePage.drawText(bulletText, {
+      x: ctx.margins.left + indentOffset,
+      y: bulletPdfY,
+      size: defaultSize,
+      font: block.ordered ? ctx.fonts.regular : ctx.fonts.bold,
+      color: rgb(0.2, 0.25, 0.35),
+    });
+
+    for (const line of lines) {
+      ensureVerticalSpace(ctx, line.height);
+      drawWrappedLine(
+        ctx.activePage,
+        ctx.pageHeight,
+        line,
+        ctx.margins.left + indentOffset + bulletWidth,
+        ctx.cursorY,
+        'left',
+        contentWidth
+      );
+      ctx.cursorY += line.height;
+    }
+
+    ctx.cursorY += 3; // Space between list items
+  }
+
+  ctx.cursorY += 6;
+}
+
+/**
+ * Renders a code block into the layout context with syntax background card.
+ */
+function renderCodeBlock(ctx: LayoutContext, block: CodeBlock): void {
+  const codeLines = block.code.split('\n');
+  const fontSize = 8.5;
+  const lineHeight = fontSize * 1.35;
+  const padding = 10;
+  const lineNumberWidth = block.showLineNumbers !== false ? 28 : 0;
+  const textStartX = ctx.margins.left + padding + lineNumberWidth;
+  const contentWidth = ctx.printableWidth - padding * 2 - lineNumberWidth;
+
+  const totalHeight = codeLines.length * lineHeight + padding * 2;
+
+  // If entire code block fits on current page, keep together; otherwise break per line
+  if (totalHeight <= ctx.printableHeight && ctx.cursorY + totalHeight > ctx.pageHeight - ctx.margins.bottom) {
+    breakPage(ctx);
+  }
+
+  ctx.cursorY += 6;
+
+  for (let idx = 0; idx < codeLines.length; idx++) {
+    ensureVerticalSpace(ctx, lineHeight + (idx === 0 ? padding : 0) + (idx === codeLines.length - 1 ? padding : 0));
+
+    // Draw background slice
+    const cardTop = ctx.cursorY;
+    const sliceHeight = lineHeight + (idx === 0 ? padding : 0) + (idx === codeLines.length - 1 ? padding : 0);
+    const pdfY = ctx.pageHeight - cardTop - sliceHeight;
+
+    ctx.activePage.drawRectangle({
+      x: ctx.margins.left,
+      y: pdfY,
+      width: ctx.printableWidth,
+      height: sliceHeight,
+      color: rgb(0.96, 0.97, 0.98),
+      borderColor: rgb(0.88, 0.9, 0.93),
+      borderWidth: 0.5,
+    });
+
+    if (idx === 0) ctx.cursorY += padding;
+
+    // Draw line number if enabled
+    if (block.showLineNumbers !== false) {
+      const lineNumStr = `${idx + 1}`.padStart(3, ' ');
+      ctx.activePage.drawText(lineNumStr, {
+        x: ctx.margins.left + padding,
+        y: ctx.pageHeight - ctx.cursorY - lineHeight * 0.8,
+        size: fontSize,
+        font: ctx.fonts.mono,
+        color: rgb(0.6, 0.65, 0.72),
+      });
+    }
+
+    // Draw code text
+    const text = codeLines[idx];
+    const maxChars = Math.floor(contentWidth / (fontSize * 0.6));
+    const truncated = text.length > maxChars ? text.slice(0, maxChars) : text;
+
+    ctx.activePage.drawText(truncated, {
+      x: textStartX,
+      y: ctx.pageHeight - ctx.cursorY - lineHeight * 0.8,
+      size: fontSize,
+      font: ctx.fonts.mono,
+      color: rgb(0.15, 0.18, 0.24),
+    });
+
+    ctx.cursorY += lineHeight;
+
+    if (idx === codeLines.length - 1) ctx.cursorY += padding;
+  }
+
+  ctx.cursorY += 8;
+}
+
+/**
+ * Renders a blockquote into the layout context with an accent left border.
+ */
+function renderQuote(ctx: LayoutContext, block: QuoteBlock): void {
+  const fontSize = (ctx.options.fontSize ?? 10.5) * 1.05;
+  const paddingLeft = 14;
+  const contentWidth = ctx.printableWidth - paddingLeft;
+
+  const runs: StyledRun[] = [
+    {
+      text: block.text,
+      style: {
+        italic: true,
+        fontSize,
+      },
+    },
+  ];
+
+  const lines = wrapRunsToLines(runs, ctx.fonts, contentWidth, fontSize, rgb(0.25, 0.3, 0.4));
+  const totalHeight = lines.reduce((acc, l) => acc + l.height, 0) + 8;
+
+  ensureVerticalSpace(ctx, totalHeight);
+
+  const startY = ctx.cursorY;
+  const borderHeight = totalHeight - 4;
+  const pdfBorderY = ctx.pageHeight - startY - borderHeight;
+
+  // Left accent line
+  ctx.activePage.drawRectangle({
+    x: ctx.margins.left,
+    y: pdfBorderY,
+    width: 3.5,
+    height: borderHeight,
+    color: rgb(0.2, 0.45, 0.85),
+  });
+
+  ctx.cursorY += 4;
+
+  for (const line of lines) {
+    drawWrappedLine(
+      ctx.activePage,
+      ctx.pageHeight,
+      line,
+      ctx.margins.left + paddingLeft,
+      ctx.cursorY,
+      'left',
+      contentWidth
+    );
+    ctx.cursorY += line.height;
+  }
+
+  ctx.cursorY += 8;
+}
+
+/**
+ * Renders a horizontal divider line into the layout context.
+ */
+function renderDivider(ctx: LayoutContext): void {
+  ctx.cursorY += 8;
+  ensureVerticalSpace(ctx, 4);
+
+  const pdfY = ctx.pageHeight - ctx.cursorY;
+  ctx.activePage.drawLine({
+    start: { x: ctx.margins.left, y: pdfY },
+    end: { x: ctx.margins.left + ctx.printableWidth, y: pdfY },
+    thickness: 0.5,
+    color: rgb(0.85, 0.88, 0.92),
+  });
+
+  ctx.cursorY += 8;
+}
+
+/**
+ * Renders an image block into the layout context.
+ */
+async function renderImage(ctx: LayoutContext, block: ImageBlock): Promise<void> {
+  let embeddedImage;
+  try {
+    embeddedImage = block.mimeType.includes('png')
+      ? await ctx.doc.embedPng(block.data)
+      : await ctx.doc.embedJpg(block.data);
+  } catch {
+    // If embedding fails, gracefully skip image
+    return;
+  }
+
+  const naturalWidth = block.width ?? embeddedImage.width;
+  const naturalHeight = block.height ?? embeddedImage.height;
+  const aspect = naturalWidth / naturalHeight;
+
+  let renderWidth = Math.min(ctx.printableWidth, naturalWidth);
+  let renderHeight = renderWidth / aspect;
+
+  if (renderHeight > ctx.printableHeight * 0.6) {
+    renderHeight = ctx.printableHeight * 0.6;
+    renderWidth = renderHeight * aspect;
+  }
+
+  ensureVerticalSpace(ctx, renderHeight + 10);
+
+  const pdfY = ctx.pageHeight - ctx.cursorY - renderHeight;
+  const startX = ctx.margins.left + (ctx.printableWidth - renderWidth) / 2;
+
+  ctx.activePage.drawImage(embeddedImage, {
+    x: startX,
+    y: pdfY,
+    width: renderWidth,
+    height: renderHeight,
+  });
+
+  ctx.cursorY += renderHeight + 8;
+}
+
+/**
+ * Resolves column widths for a table.
+ */
+function resolveColumnWidths(
+  table: TableBlock,
+  printableWidth: number
+): number[] {
+  const colCount = Math.max(
+    ...table.rows.map((r) => r.cells.length),
+    1
+  );
+
+  if (table.columnWidths && table.columnWidths.length === colCount) {
+    const sum = table.columnWidths.reduce((a, b) => a + b, 0);
+    if (sum > 0) {
+      return table.columnWidths.map((w) => (w / sum) * printableWidth);
+    }
+  }
+
+  // Equal division fallback
+  const equalWidth = printableWidth / colCount;
+  return Array(colCount).fill(equalWidth);
+}
+
+/**
+ * Renders a single table row, returning the computed row height.
+ */
+function drawTableRow(
+  ctx: LayoutContext,
+  rowCells: TableBlock['rows'][number]['cells'],
+  colWidths: number[],
+  isHeader: boolean,
+  rowIndex: number,
+  hasBorders: boolean,
+  hasZebra: boolean
+): number {
+  const paddingX = 6;
+  const paddingY = 5;
+  const fontSize = isHeader ? 9.5 : (ctx.options.fontSize ?? 9);
+
+  // Measure cell line wraps to determine maximum row height
+  const cellWrappedLines = rowCells.map((cell, colIdx) => {
+    const colW = colWidths[colIdx] ?? colWidths[colWidths.length - 1];
+    const cellInnerW = Math.max(20, colW - paddingX * 2);
+    return wrapRunsToLines(
+      cell.runs,
+      ctx.fonts,
+      cellInnerW,
+      fontSize,
+      isHeader ? rgb(1, 1, 1) : rgb(0.12, 0.15, 0.22)
+    );
+  });
+
+  const maxContentHeight = Math.max(
+    ...cellWrappedLines.map((lines) =>
+      lines.reduce((sum, l) => sum + l.height, 0)
+    ),
+    fontSize * 1.3
+  );
+
+  const rowHeight = maxContentHeight + paddingY * 2;
+
+  // Background shading
+  let bgColor: RGB | undefined;
+  if (isHeader) {
+    bgColor = rgb(0.12, 0.16, 0.26); // Dark slate header
+  } else if (hasZebra && rowIndex % 2 === 1) {
+    bgColor = rgb(0.97, 0.98, 0.995); // Zebra light fill
+  }
+
+  const pdfY = ctx.pageHeight - ctx.cursorY - rowHeight;
+
+  if (bgColor) {
+    ctx.activePage.drawRectangle({
+      x: ctx.margins.left,
+      y: pdfY,
+      width: ctx.printableWidth,
+      height: rowHeight,
+      color: bgColor,
+    });
+  }
+
+  // Draw cells
+  let currentX = ctx.margins.left;
+  for (let c = 0; c < rowCells.length; c++) {
+    const colW = colWidths[c] ?? colWidths[colWidths.length - 1];
+    const lines = cellWrappedLines[c];
+    let textCursorY = ctx.cursorY + paddingY;
+
+    for (const line of lines) {
+      drawWrappedLine(
+        ctx.activePage,
+        ctx.pageHeight,
+        line,
+        currentX + paddingX,
+        textCursorY,
+        rowCells[c]?.align ?? (isHeader ? 'left' : 'left'),
+        colW - paddingX * 2
+      );
+      textCursorY += line.height;
+    }
+
