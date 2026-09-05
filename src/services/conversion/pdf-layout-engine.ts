@@ -773,3 +773,392 @@ function drawTableRow(
       textCursorY += line.height;
     }
 
+    if (hasBorders && !isHeader) {
+      // Vertical cell border
+      ctx.activePage.drawLine({
+        start: { x: currentX + colW, y: pdfY },
+        end: { x: currentX + colW, y: pdfY + rowHeight },
+        thickness: 0.5,
+        color: rgb(0.88, 0.9, 0.93),
+      });
+    }
+
+    currentX += colW;
+  }
+
+  // Horizontal border under row
+  if (hasBorders || isHeader) {
+    ctx.activePage.drawLine({
+      start: { x: ctx.margins.left, y: pdfY },
+      end: { x: ctx.margins.left + ctx.printableWidth, y: pdfY },
+      thickness: isHeader ? 1.5 : 0.5,
+      color: isHeader ? rgb(0.2, 0.45, 0.85) : rgb(0.88, 0.9, 0.93),
+    });
+  }
+
+  return rowHeight;
+}
+
+/**
+ * Renders a table block with automatic pagination and repeating headers.
+ */
+function renderTable(ctx: LayoutContext, table: TableBlock): void {
+  if (table.rows.length === 0) return;
+
+  const colWidths = resolveColumnWidths(table, ctx.printableWidth);
+  const headerRow = table.rows.find((r) => r.isHeader) ?? table.rows[0];
+  const bodyRows = table.rows.filter((r) => r !== headerRow);
+  const hasBorders = table.hasBorders !== false;
+  const hasZebra = table.hasZebraStriping !== false;
+
+  ctx.cursorY += 6;
+
+  // Render header
+  ensureVerticalSpace(ctx, 30);
+  const headerH = drawTableRow(ctx, headerRow.cells, colWidths, true, 0, hasBorders, false);
+  ctx.cursorY += headerH;
+
+  // Render body rows
+  for (let rIdx = 0; rIdx < bodyRows.length; rIdx++) {
+    const row = bodyRows[rIdx];
+    // Check if row fits; if not, break page and re-render header!
+    if (ctx.cursorY + 30 > ctx.pageHeight - ctx.margins.bottom) {
+      breakPage(ctx);
+      const reHeaderH = drawTableRow(ctx, headerRow.cells, colWidths, true, 0, hasBorders, false);
+      ctx.cursorY += reHeaderH;
+    }
+
+    const rowH = drawTableRow(ctx, row.cells, colWidths, false, rIdx, hasBorders, hasZebra);
+    ctx.cursorY += rowH;
+  }
+
+  ctx.cursorY += 10;
+}
+
+/**
+ * Decorates pages with running headers, thin rules, and "Page X of Y" page numbers.
+ */
+function decorateDocumentPages(ctx: LayoutContext, title?: string): void {
+  const totalPages = ctx.pages.length;
+  const docTitle = title ?? ctx.options.title;
+
+  for (let i = 0; i < totalPages; i++) {
+    const page = ctx.pages[i];
+
+    // Running header on pages > 0 if title is available
+    if (i > 0 && docTitle) {
+      const headerY = ctx.pageHeight - ctx.margins.top + 20;
+      page.drawText(docTitle, {
+        x: ctx.margins.left,
+        y: headerY,
+        size: 8.5,
+        font: ctx.fonts.regular,
+        color: rgb(0.5, 0.55, 0.65),
+      });
+
+      page.drawLine({
+        start: { x: ctx.margins.left, y: headerY - 6 },
+        end: { x: ctx.pageWidth - ctx.margins.right, y: headerY - 6 },
+        thickness: 0.5,
+        color: rgb(0.88, 0.9, 0.94),
+      });
+    }
+
+    // Running footer with page counter if enabled
+    if (ctx.options.includePageNumbers !== false) {
+      const footerY = Math.max(20, ctx.margins.bottom - 24);
+      const pageText = `Page ${i + 1} of ${totalPages}`;
+      const pageTextWidth = ctx.fonts.regular.widthOfTextAtSize(pageText, 8.5);
+
+      page.drawLine({
+        start: { x: ctx.margins.left, y: footerY + 12 },
+        end: { x: ctx.pageWidth - ctx.margins.right, y: footerY + 12 },
+        thickness: 0.5,
+        color: rgb(0.88, 0.9, 0.94),
+      });
+
+      page.drawText(pageText, {
+        x: ctx.pageWidth - ctx.margins.right - pageTextWidth,
+        y: footerY,
+        size: 8.5,
+        font: ctx.fonts.regular,
+        color: rgb(0.5, 0.55, 0.65),
+      });
+    }
+  }
+}
+
+/**
+ * Lays out a FlowDocument (Word, Markdown, Text) into a multi-page PDF.
+ */
+export async function layoutFlowDocument(
+  doc: PDFDocument,
+  flowDoc: FlowDocument,
+  options?: DocumentConversionOptions
+): Promise<{ pageCount: number }> {
+  const ctx = await createLayoutContext(doc, options);
+
+  for (const block of flowDoc.blocks) {
+    switch (block.type) {
+      case 'paragraph':
+        renderParagraph(ctx, block);
+        break;
+      case 'heading':
+        renderHeading(ctx, block);
+        break;
+      case 'list':
+        renderList(ctx, block);
+        break;
+      case 'code':
+        renderCodeBlock(ctx, block);
+        break;
+      case 'quote':
+        renderQuote(ctx, block);
+        break;
+      case 'divider':
+        renderDivider(ctx);
+        break;
+      case 'pageBreak':
+        breakPage(ctx);
+        break;
+      case 'table':
+        renderTable(ctx, block);
+        break;
+      case 'image':
+        await renderImage(ctx, block);
+        break;
+    }
+  }
+
+  decorateDocumentPages(ctx, flowDoc.title);
+  return { pageCount: ctx.pages.length };
+}
+
+/**
+ * Lays out a GridDocument (Spreadsheets: XLSX, CSV, TSV) into a multi-page PDF.
+ */
+export async function layoutGridDocument(
+  doc: PDFDocument,
+  gridDoc: GridDocument,
+  options?: DocumentConversionOptions
+): Promise<{ pageCount: number }> {
+  // Auto-detect landscape if maximum columns > 5
+  const maxCols = Math.max(
+    ...gridDoc.sheets.flatMap((s) => s.rows.map((r) => r.length)),
+    1
+  );
+
+  const effectiveOrientation = options?.orientation ?? (maxCols > 5 ? 'landscape' : 'portrait');
+  const effectiveOptions: DocumentConversionOptions = {
+    ...options,
+    orientation: effectiveOrientation,
+  };
+
+  const ctx = await createLayoutContext(doc, effectiveOptions);
+
+  for (let sIdx = 0; sIdx < gridDoc.sheets.length; sIdx++) {
+    const sheet = gridDoc.sheets[sIdx];
+    if (sIdx > 0) {
+      breakPage(ctx);
+    }
+
+    // Render sheet header badge
+    const badgeText = sheet.name || `Sheet ${sIdx + 1}`;
+    renderHeading(ctx, {
+      type: 'heading',
+      level: 2,
+      text: badgeText,
+    });
+
+    if (sheet.rows.length === 0) continue;
+
+    const tableBlock: TableBlock = {
+      type: 'table',
+      rows: sheet.rows.map((row, rIdx) => ({
+        isHeader: rIdx === 0,
+        cells: row.map((cellText) => ({
+          runs: [{ text: cellText }],
+          isHeader: rIdx === 0,
+        })),
+      })),
+      hasBorders: options?.includeGridlines !== false,
+      hasZebraStriping: options?.alternateRowShading !== false,
+    };
+
+    renderTable(ctx, tableBlock);
+  }
+
+  decorateDocumentPages(ctx, gridDoc.title);
+  return { pageCount: ctx.pages.length };
+}
+
+/**
+ * Lays out a SlideDocument (Presentations: PPTX) into a 16:9 or 4:3 PDF slide deck.
+ */
+export async function layoutSlideDocument(
+  doc: PDFDocument,
+  slideDoc: SlideDocument,
+  options?: DocumentConversionOptions
+): Promise<{ pageCount: number }> {
+  const slideDims: PageDimensions = {
+    width: slideDoc.width || 960,
+    height: slideDoc.height || 540,
+  };
+
+  const fonts = await loadFontSet(doc, options?.fontFamily ?? 'helvetica');
+
+  for (let sIdx = 0; sIdx < slideDoc.slides.length; sIdx++) {
+    const slide = slideDoc.slides[sIdx];
+    const page = doc.addPage([slideDims.width, slideDims.height]);
+
+    // Slide background
+    page.drawRectangle({
+      x: 0,
+      y: 0,
+      width: slideDims.width,
+      height: slideDims.height,
+      color: parseColor(slide.backgroundColor, rgb(0.985, 0.988, 0.995)),
+    });
+
+    // Top accent border
+    page.drawRectangle({
+      x: 0,
+      y: slideDims.height - 6,
+      width: slideDims.width,
+      height: 6,
+      color: rgb(0.18, 0.42, 0.85),
+    });
+
+    let cursorY = 48;
+
+    // Slide Title
+    if (slide.title) {
+      const titleLines = wrapRunsToLines(
+        [{ text: slide.title, style: { bold: true, fontSize: 24 } }],
+        fonts,
+        slideDims.width - 96,
+        24,
+        rgb(0.1, 0.15, 0.28)
+      );
+
+      for (const line of titleLines) {
+        drawWrappedLine(page, slideDims.height, line, 48, cursorY, 'left');
+        cursorY += line.height;
+      }
+
+      // Divider below title
+      cursorY += 8;
+      const pdfDividerY = slideDims.height - cursorY;
+      page.drawLine({
+        start: { x: 48, y: pdfDividerY },
+        end: { x: slideDims.width - 48, y: pdfDividerY },
+        thickness: 1.5,
+        color: rgb(0.85, 0.88, 0.94),
+      });
+      cursorY += 20;
+    }
+
+    // Slide content elements
+    for (const el of slide.elements) {
+      if (el.kind === 'bullet_list' && el.items && el.items.length > 0) {
+        for (const item of el.items) {
+          const lines = wrapRunsToLines(
+            [{ text: item, style: { fontSize: 14 } }],
+            fonts,
+            slideDims.width - 130,
+            14,
+            rgb(0.15, 0.2, 0.3)
+          );
+
+          if (lines.length > 0) {
+            const bulletY = slideDims.height - cursorY - lines[0].height * 0.8;
+            page.drawText('•', {
+              x: 56,
+              y: bulletY,
+              size: 16,
+              font: fonts.bold,
+              color: rgb(0.2, 0.45, 0.85),
+            });
+
+            for (const line of lines) {
+              drawWrappedLine(page, slideDims.height, line, 76, cursorY, 'left');
+              cursorY += line.height;
+            }
+            cursorY += 6;
+          }
+        }
+      } else if (el.kind === 'body' && el.runs) {
+        const lines = wrapRunsToLines(
+          el.runs,
+          fonts,
+          slideDims.width - 96,
+          13,
+          rgb(0.2, 0.25, 0.35)
+        );
+        for (const line of lines) {
+          drawWrappedLine(page, slideDims.height, line, 48, cursorY, 'left');
+          cursorY += line.height;
+        }
+        cursorY += 12;
+      } else if (el.kind === 'card' && el.title) {
+        // Draw presentation card container
+        const cardH = 80;
+        const cardPdfY = slideDims.height - cursorY - cardH;
+
+        page.drawRectangle({
+          x: 48,
+          y: cardPdfY,
+          width: slideDims.width - 96,
+          height: cardH,
+          color: rgb(1, 1, 1),
+          borderColor: rgb(0.86, 0.89, 0.94),
+          borderWidth: 1,
+        });
+
+        page.drawText(el.title, {
+          x: 64,
+          y: cardPdfY + cardH - 26,
+          size: 14,
+          font: fonts.bold,
+          color: rgb(0.12, 0.18, 0.32),
+        });
+
+        if (el.runs) {
+          const cardLines = wrapRunsToLines(el.runs, fonts, slideDims.width - 128, 11);
+          let cardCurY = cursorY + 36;
+          for (const cLine of cardLines) {
+            drawWrappedLine(page, slideDims.height, cLine, 64, cardCurY, 'left');
+            cardCurY += cLine.height;
+          }
+        }
+
+        cursorY += cardH + 16;
+      }
+    }
+
+    // Slide footer numbering
+    if (options?.showSlideNumbers !== false) {
+      const footerText = `Slide ${sIdx + 1} of ${slideDoc.slides.length}`;
+      const footerW = fonts.regular.widthOfTextAtSize(footerText, 9);
+      page.drawText(footerText, {
+        x: slideDims.width - 48 - footerW,
+        y: 20,
+        size: 9,
+        font: fonts.regular,
+        color: rgb(0.5, 0.55, 0.65),
+      });
+
+      if (slideDoc.title) {
+        page.drawText(slideDoc.title, {
+          x: 48,
+          y: 20,
+          size: 9,
+          font: fonts.regular,
+          color: rgb(0.5, 0.55, 0.65),
+        });
+      }
+    }
+  }
+
+  return { pageCount: slideDoc.slides.length };
+}
