@@ -1,7 +1,8 @@
 import { getContext, setContext } from 'svelte';
-import type { CanvasElement, DragState } from './canvas-types';
+import type { CanvasElement, DragState, ElementDropPayload, DropPreviewState } from './canvas-types';
 
 const CANVAS_STORE_KEY = Symbol('canvas-store');
+const EMPTY_ELEMENTS: CanvasElement[] = Object.freeze([]) as unknown as CanvasElement[];
 
 export class CanvasStore {
     elements = $state<CanvasElement[]>([]);
@@ -9,6 +10,9 @@ export class CanvasStore {
     dragState = $state<DragState | null>(null);
     hoveredElementId = $state<string | null>(null);
     editingElementId = $state<string | null>(null);
+    activeDropPayload = $state<ElementDropPayload | null>(null);
+    dropPreview = $state<DropPreviewState | null>(null);
+    activeDropPageIndex = $state<number | null>(null);
 
     selectedElement = $derived(this.elements.find((e) => e.id === this.selectedElementId) ?? null);
 
@@ -29,6 +33,10 @@ export class CanvasStore {
         this.elements.push(element);
     }
 
+    getElementById(id: string): CanvasElement | null {
+        return this.elements.find((e) => e.id === id) ?? null;
+    }
+
     updateElement(id: string, updates: Partial<CanvasElement>): void {
         const index = this.elements.findIndex((e) => e.id === id);
         if (index !== -1) {
@@ -36,7 +44,30 @@ export class CanvasStore {
         }
     }
 
-    updateElementProperties(id: string, updates: Record<string, string | number | boolean>): void {
+    updateElementPosition(id: string, x: number, y: number): void {
+        this.updateElement(id, { x, y } as Partial<CanvasElement>);
+    }
+
+    updateElementBounds(
+        id: string,
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        fontSize?: number,
+    ): void {
+        const updates: Record<string, unknown> = { x, y, width, height };
+        if (fontSize !== undefined) {
+            updates.fontSize = fontSize;
+        }
+        this.updateElement(id, updates as Partial<CanvasElement>);
+    }
+
+    updateElementRotation(id: string, rotation: number): void {
+        this.updateElement(id, { rotation } as Partial<CanvasElement>);
+    }
+
+    updateElementProperties(id: string, updates: Record<string, unknown>): void {
         const index = this.elements.findIndex((e) => e.id === id);
         if (index !== -1) {
             Object.assign(this.elements[index], updates);
@@ -67,11 +98,37 @@ export class CanvasStore {
     }
 
     getElementsByPage(pageIndex: number): CanvasElement[] {
-        return this.elementsByPage.get(pageIndex) ?? [];
+        return this.elementsByPage.get(pageIndex) ?? EMPTY_ELEMENTS;
     }
 
     clearDragState(): void {
         this.dragState = null;
+    }
+
+    setDropPreview(preview: DropPreviewState | null): void {
+        if (!preview && !this.dropPreview) {
+            return;
+        }
+        if (
+            preview &&
+            this.dropPreview &&
+            this.dropPreview.pageIndex === preview.pageIndex &&
+            this.dropPreview.x === preview.x &&
+            this.dropPreview.y === preview.y &&
+            this.dropPreview.width === preview.width &&
+            this.dropPreview.height === preview.height &&
+            this.dropPreview.kind === preview.kind &&
+            this.dropPreview.label === preview.label
+        ) {
+            return;
+        }
+        this.dropPreview = preview;
+    }
+
+    clearDropState(): void {
+        this.activeDropPayload = null;
+        this.dropPreview = null;
+        this.activeDropPageIndex = null;
     }
 
     generateId(): string {
