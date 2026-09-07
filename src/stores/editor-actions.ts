@@ -536,16 +536,29 @@ export class EditorActions {
 
     if (adding) {
       await this.saveActiveFileToWorkspace();
+    } else {
+      this.clearWorkspaceState();
     }
 
     try {
-      this.service.loadDocumentFromBuffer(buffer);
-      this.store.fileName = fileName;
+      this.service.loadDocumentFromBuffer(finalBuffer);
+      this.store.fileName = finalFileName;
       this.store.currentPageIndex = 0;
       this.store.isDocumentLoaded = true;
-      this.store.clearSelection();
+      this.clearSelection(false);
+      useSelection().clear();
+      this.store.pageTransforms = {};
       this.store.hiddenSpanIds.clear();
+      this.store.pageVersions = {};
+      if (this.canvasStore) {
+        this.canvasStore.elements = [];
+        this.canvasStore.selectElement(null);
+        this.canvasStore.clearDragState();
+      }
       this.store.pageCount = this.service.document.getPageCount();
+      this.store.scannedPages = new Set();
+      this.store.pageOcrResults = new Map();
+      this.detectScannedPages();
       this.store.incrementRenderVersion();
       
       let thumbnailDataUri: string | undefined;
@@ -559,29 +572,52 @@ export class EditorActions {
       }
 
       const newFileId = crypto.randomUUID();
-      if (!this.isAddingToWorkspace) {
-        this.service.clearWorkspace();
-        this.historyStore?.clearAll();
-      }
-      setFileBuffer(newFileId, buffer);
+      setFileBuffer(newFileId, finalBuffer);
       this.service.addFile({
         id: newFileId,
-        fileName,
+        fileName: finalFileName,
         thumbnail: thumbnailDataUri,
-        sizeBytes: buffer.byteLength
+        sizeBytes: finalBuffer.byteLength,
+        canvasElements: [],
+        pageTransforms: {},
+        hiddenSpanIds: [],
+        currentPageIndex: 0,
+        pageVersions: {},
       });
       this.store.activeWorkspaceFileId = newFileId;
-      const initialSnapshot = this.captureSnapshot('Open Document', false, newFileId, fileName, buffer);
-      this.historyStore?.initFile(newFileId, initialSnapshot);
+      this.historyStore?.initFile(newFileId);
+
+      if (this._pluginManager) {
+        this._pluginManager.emit('document:loaded', {
+          fileName: finalFileName,
+          pageCount: this.store.pageCount,
+        });
+      }
     } catch (err) {
       console.error('Failed to load PDF buffer:', err);
     }
   }
 
-  async loadDocumentFromFile(file: File): Promise<void> {
+  async loadDocumentFromFile(file: File, addToWorkspace?: boolean): Promise<void> {
     try {
-      const buffer = await file.arrayBuffer();
-      await this.loadDocumentFromBuffer(buffer, file.name);
+      let buffer = await file.arrayBuffer();
+      let fileName = file.name;
+      if (isImageFile(buffer, file.name) || file.type.startsWith('image/')) {
+        const converted = await mergeFilesToPdfBuffer([
+          { name: file.name, buffer, mimeType: file.type || inferImageMimeType(file.name) },
+        ], this.service.engine);
+        buffer = converted.buffer;
+        fileName = converted.fileName;
+      } else if (documentConverter.isConvertible(file.name, buffer, file.type)) {
+        const converted = await documentConverter.convertDocument({
+          name: file.name,
+          buffer,
+          mimeType: file.type,
+        });
+        buffer = converted.buffer;
+        fileName = converted.fileName;
+      }
+      await this.loadDocumentFromBuffer(buffer, fileName, addToWorkspace);
     } catch (err) {
       console.error('Failed to read file:', err);
     }
@@ -590,20 +626,36 @@ export class EditorActions {
   async loadDocumentsFromFiles(files: File[]): Promise<void> {
     if (files.length === 0) return;
     
-    // Clear workspace if we're completely replacing it, only ONCE
+    // Clear workspace if we are completely replacing it, only ONCE
     if (!this.isAddingToWorkspace) {
-      this.service.clearWorkspace();
+      this.clearWorkspaceState();
     }
 
-    // Now we must ensure subsequent files in this batch don't clear it
+    // Now we must ensure subsequent files in this batch do not clear it
     const originalIsAdding = this.isAddingToWorkspace;
     try {
       this.isAddingToWorkspace = true;
 
       for (const file of files) {
         try {
-          const buffer = await file.arrayBuffer();
-          await this.loadDocumentFromBuffer(buffer, file.name);
+          let buffer = await file.arrayBuffer();
+          let fileName = file.name;
+          if (isImageFile(buffer, file.name) || file.type.startsWith('image/')) {
+            const converted = await mergeFilesToPdfBuffer([
+              { name: file.name, buffer, mimeType: file.type || inferImageMimeType(file.name) },
+            ], this.service.engine);
+            buffer = converted.buffer;
+            fileName = converted.fileName;
+          } else if (documentConverter.isConvertible(file.name, buffer, file.type)) {
+            const converted = await documentConverter.convertDocument({
+              name: file.name,
+              buffer,
+              mimeType: file.type,
+            });
+            buffer = converted.buffer;
+            fileName = converted.fileName;
+          }
+          await this.loadDocumentFromBuffer(buffer, fileName);
         } catch (err) {
           console.error('Failed to read file:', err);
         }
@@ -614,11 +666,68 @@ export class EditorActions {
     }
   }
 
+  openConvertDialog(file?: File): void {
+    this.store.openConvertDialog(file);
+  }
+
+  closeConvertDialog(): void {
+    this.store.closeConvertDialog();
+  }
+
+  async convertAndLoadDocument(file: File, options?: DocumentConversionOptions): Promise<void> {
+    this.store.isLoadingDocument = true;
+    this.store.loadingProgress = `Converting ${file.name} to PDF...`;
+    this.store.loadError = null;
+    try {
+      const buffer = await file.arrayBuffer();
+      const converted = await documentConverter.convertDocument(
+        { name: file.name, buffer, mimeType: file.type },
+        options
+      );
+      await this.loadDocumentFromBuffer(converted.buffer, converted.fileName);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error during document conversion.';
+      this.store.loadError = `Failed to convert document: ${message}`;
+      console.error('Failed to convert document:', err);
+    } finally {
+      this.store.isLoadingDocument = false;
+    }
+  }
+
   // -- File input triggers --
 
   triggerFileOpen(addToWorkspace: boolean = false): void {
     this.isAddingToWorkspace = addToWorkspace;
     this.fileInputEl?.click();
+  }
+
+  triggerMergeFiles(): void {
+    this.mergeFilesInputEl?.click();
+  }
+
+  /**
+   * Merges multiple PDF files and or images as pages into a single document,
+   * then immediately loads the resulting document into the workspace.
+   *
+   * @param files Array of File objects to merge.
+   */
+  async mergeAndLoadFiles(files: File[]): Promise<void> {
+    if (!files || files.length === 0) return;
+
+    this.store.isLoadingDocument = true;
+    this.store.loadingProgress = `Merging ${files.length} files...`;
+    this.store.loadError = null;
+
+    try {
+      const result = await mergeFilesToPdfBuffer(files, this.service.engine);
+      await this.loadDocumentFromBuffer(result.buffer, result.fileName);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error during merge.';
+      this.store.loadError = `Failed to merge files: ${message}`;
+      console.error('Failed to merge files:', err);
+    } finally {
+      this.store.isLoadingDocument = false;
+    }
   }
 
   triggerMergeUpload(): void {
@@ -638,7 +747,7 @@ export class EditorActions {
     this.mergeFileInputEl?.click();
   }
 
-  mergeWorkspaceFiles(fileIds: string[], atIndex?: number): void {
+  async mergeWorkspaceFiles(fileIds: string[], atIndex?: number): Promise<void> {
     const filesToMerge = fileIds
       .map(id => this.service.getFile(id))
       .filter((f): f is NonNullable<typeof f> => f !== undefined);
@@ -648,30 +757,39 @@ export class EditorActions {
     // We will merge everything into the first selected file IN MEMORY
     const firstFile = filesToMerge[0];
     if (this.store.activeWorkspaceFileId !== firstFile.id) {
-       this.switchWorkspaceFile(firstFile.id);
+       await this.switchWorkspaceFile(firstFile.id);
     }
     
-    let targetIndex = atIndex !== undefined ? atIndex : this.store.pageCount;
-    for (let i = 1; i < filesToMerge.length; i++) {
-       const fileBuf = getFileBuffer(filesToMerge[i].id);
-       if (!fileBuf) continue;
-       const previousPageCount = this.store.pageCount;
-       this.service.document.merge(fileBuf, targetIndex);
-       this.store.pageCount = this.service.document.getPageCount();
-       if (atIndex !== undefined) {
-           targetIndex += (this.store.pageCount - previousPageCount);
-       }
-    }
-    
-    // Remove the merged files from the workspace
-    const idsToRemove = new Set(filesToMerge.slice(1).map(f => f.id));
-    for (const id of idsToRemove) {
-      this.service.removeFile(id);
-    }
-    
-    this.refreshDocument();
+    await this.executeDocumentMutation('Merge Workspace Files', this.store.currentPageIndex, async () => {
+      let targetIndex = atIndex !== undefined ? atIndex : this.store.pageCount;
+      for (let i = 1; i < filesToMerge.length; i++) {
+         const fileBuf = getFileBuffer(filesToMerge[i].id);
+         if (!fileBuf) continue;
+         const previousPageCount = this.store.pageCount;
+         if (isImageFile(fileBuf, filesToMerge[i].fileName)) {
+           await this.service.document.importImageAsPage(
+             fileBuf,
+             inferImageMimeType(filesToMerge[i].fileName),
+             targetIndex,
+           );
+         } else {
+           this.service.document.merge(fileBuf, targetIndex);
+         }
+         this.store.pageCount = this.service.document.getPageCount();
+         if (atIndex !== undefined) {
+             targetIndex += (this.store.pageCount - previousPageCount);
+         }
+      }
+      
+      // Remove the merged files from the workspace
+      const idsToRemove = new Set(filesToMerge.slice(1).map(f => f.id));
+      for (const id of idsToRemove) {
+        this.service.removeFile(id);
+        this.historyStore?.clearFile(id);
+      }
+    });
+
     useSelection().clear();
-    this.recordSnapshot('Merge Workspace Files', true);
   }
 
   triggerImageImport(): void {
@@ -682,29 +800,67 @@ export class EditorActions {
     this.imageAsPageFileInputEl?.click();
   }
   
+  /**
+   * Commits active inline text editing sessions, flushes active DOM elements,
+   * and clears browser window DOM text selection ranges.
+   */
+  commitActiveEdits(): void {
+    if (typeof document !== 'undefined' && document.activeElement) {
+      const el = document.activeElement as { blur?: () => void };
+      if (typeof el.blur === 'function') {
+        el.blur();
+      }
+    }
+
+    if (this.store.inlineEdit) {
+      this.submitInlineEdit();
+    }
+
+    if (typeof window !== 'undefined' && typeof window.getSelection === 'function') {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0) {
+        sel.removeAllRanges();
+      }
+    }
+  }
+
   // -- Workspace --
   
   async saveActiveFileToWorkspace(): Promise<void> {
     if (this.store.activeWorkspaceFileId && this.store.isDocumentLoaded) {
       const currentActiveFile = this.service.getFile(this.store.activeWorkspaceFileId);
       if (currentActiveFile) {
+        // Synchronously flush in-flight edits before capturing state
+        this.commitActiveEdits();
+        if (typeof this.historyStore?.flushDebounced === 'function') {
+          this.historyStore.flushDebounced();
+        }
+
+        // Snapshot active file interactive state first, decoupled from WASM document saving
         try {
-          const hasTransforms = Object.values(this.store.pageTransforms).some(
-            t => t && (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1)
-          );
-          if (hasTransforms) {
-            const latestBuffer = await this.service.document.saveAsync(this.store.pageTransforms);
-            const bufferArray = latestBuffer.buffer.slice(latestBuffer.byteOffset, latestBuffer.byteOffset + latestBuffer.byteLength) as ArrayBuffer;
-            setFileBuffer(currentActiveFile.id, bufferArray);
-            currentActiveFile.sizeBytes = bufferArray.byteLength;
-          } else {
-            const latestBuffer = this.service.document.save();
-            const bufferArray = latestBuffer.buffer.slice(latestBuffer.byteOffset, latestBuffer.byteOffset + latestBuffer.byteLength) as ArrayBuffer;
-            setFileBuffer(currentActiveFile.id, bufferArray);
-            currentActiveFile.sizeBytes = bufferArray.byteLength;
-          }
+          currentActiveFile.canvasElements = this.canvasStore
+            ? safeClone(this.canvasStore.elements)
+            : [];
+          currentActiveFile.pageTransforms = safeClone(this.store.pageTransforms) ?? {};
+          currentActiveFile.hiddenSpanIds = Array.from(this.store.hiddenSpanIds);
+          currentActiveFile.currentPageIndex = this.store.currentPageIndex;
+          currentActiveFile.pageVersions = { ...this.store.pageVersions };
+          currentActiveFile.scannedPages = Array.from(this.store.scannedPages);
         } catch (err) {
-          console.warn('Failed to export current file state to workspace:', err);
+          console.warn('Failed to snapshot interactive file state to workspace:', err);
+        }
+
+        // Serialize active WASM document state in an isolated block
+        try {
+          const latestBuffer = this.service.document.save();
+          const bufferArray = latestBuffer.buffer.slice(
+            latestBuffer.byteOffset,
+            latestBuffer.byteOffset + latestBuffer.byteLength
+          ) as ArrayBuffer;
+          setFileBuffer(currentActiveFile.id, bufferArray);
+          currentActiveFile.sizeBytes = bufferArray.byteLength;
+        } catch (err) {
+          console.warn('Failed to export WASM document buffer to workspace:', err);
         }
       }
     }
@@ -722,15 +878,61 @@ export class EditorActions {
     if (!fileBuffer) return;
 
     try {
+      // Clear transient selections, drag state, and DOM focus/ranges
+      this.clearSelection(false);
+      useSelection().clear();
+      if (this.canvasStore) {
+        this.canvasStore.selectElement(null);
+        this.canvasStore.clearDragState();
+        this.canvasStore.hoveredElementId = null;
+        this.canvasStore.editingElementId = null;
+      }
+      if (typeof window !== 'undefined' && typeof window.getSelection === 'function') {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+          sel.removeAllRanges();
+        }
+      }
+      if (typeof document !== 'undefined' && document.activeElement) {
+        const el = document.activeElement as { blur?: () => void };
+        if (typeof el.blur === 'function') {
+          el.blur();
+        }
+      }
+
+      // Load document buffer into WASM engine
       this.service.loadDocumentFromBuffer(fileBuffer);
       this.store.fileName = file.fileName;
-      this.store.currentPageIndex = 0;
       this.store.isDocumentLoaded = true;
-      this.store.clearSelection();
       this.store.pageCount = this.service.document.getPageCount();
-      this.store.incrementRenderVersion();
       this.store.activeWorkspaceFileId = id;
+      this.store.currentPageIndex = Math.min(
+        file.currentPageIndex ?? 0,
+        Math.max(0, this.store.pageCount - 1),
+      );
+
+      // Restore scoped document state with safe cloning
+      this.store.pageTransforms = file.pageTransforms ? safeClone(file.pageTransforms) : {};
+      this.store.hiddenSpanIds = new SvelteSet(file.hiddenSpanIds ?? []);
+      this.store.pageVersions = file.pageVersions ? { ...file.pageVersions } : {};
+      if (this.canvasStore) {
+        this.canvasStore.elements = file.canvasElements ? safeClone(file.canvasElements) : [];
+      }
+      this.store.scannedPages = new Set(file.scannedPages ?? []);
+      this.store.pageOcrResults = new Map();
+      if (!file.scannedPages) {
+        this.detectScannedPages();
+      }
+
       this.historyStore?.setActiveFileId(id);
+      this.store.incrementRenderVersion();
+
+      if (typeof window !== 'undefined' && typeof window.getSelection === 'function') {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+          sel.removeAllRanges();
+        }
+      }
     } catch (err) {
       console.error('Failed to switch workspace file:', err);
     }
@@ -754,7 +956,7 @@ export class EditorActions {
   // -- Document refresh --
 
   refreshDocument(): void {
-    if (!this.store.isDocumentLoaded) return;
+    if (!this.store.isDocumentLoaded || !this.service?.document || typeof this.service.document.getPageCount !== 'function') return;
     this.store.pageCount = this.service.document.getPageCount();
     this.store.currentPageIndex = Math.min(
       this.store.currentPageIndex,
@@ -778,18 +980,170 @@ export class EditorActions {
 
   // -- Navigation --
 
-  registerScrollCallback(cb: (index: number) => void): void {
+  registerScrollCallback(cb: ScrollCallback): void {
     this.scrollCallback = cb;
   }
 
-  goToPage(index: number): void {
+  goToPage(index: number, options?: ScrollTargetOptions): void {
     if (index < 0 || index >= this.store.pageCount) return;
     if (this.store.inlineEdit) {
       this.submitInlineEdit();
     }
     this.store.currentPageIndex = index;
     this.store.clearSelection();
-    this.scrollCallback?.(index);
+    this.scrollCallback?.(index, options);
+  }
+
+  /**
+   * Navigates to an outline bookmark and selects/focuses the corresponding text on that page.
+   * Matches both canvas text elements and PDF text spans using exact, whitespace-normalized,
+   * case-insensitive, and substring comparisons, disambiguated by destY when available.
+   *
+   * @param item The outline item to navigate to and select.
+   */
+  selectOutlineItem(item: OutlineItemFlat): void {
+    if (!this.store.isDocumentLoaded || item.pageIndex === null || item.pageIndex === undefined) return;
+    const pageIndex = item.pageIndex;
+    if (pageIndex < 0 || pageIndex >= this.store.pageCount) return;
+
+    if (this.store.inlineEdit) {
+      this.submitInlineEdit();
+    }
+
+    this.store.currentPageIndex = pageIndex;
+
+    // Retrieve page height for destY coordinate transformation if available
+    let pageH = 792;
+    try {
+      const dims = this.service.document.getPageDimensions(pageIndex);
+      if (dims && dims.heightPts > 0) {
+        pageH = dims.heightPts;
+      }
+    } catch {}
+
+    const targetTitle = (item.title || '').trim();
+    const normalize = (s: string): string => s.replace(/\s+/g, ' ').trim().toLowerCase();
+    const normalizedTarget = normalize(targetTitle);
+
+    // Expected top offset in page points if destY is provided (destY is measured from page bottom)
+    const expectedTop = item.destY !== undefined ? Math.max(0, pageH - item.destY) : undefined;
+
+    interface OutlineMatchCandidate {
+      type: 'canvas' | 'pdf';
+      canvasElement?: TextElement;
+      pdfSpan?: EditableTextSpan;
+      top: number;
+      score: number;
+      distanceToDestY: number;
+    }
+
+    const candidates: OutlineMatchCandidate[] = [];
+
+    // 1. Check canvas text elements on target page
+    if (this.canvasStore) {
+      const canvasTextEls = this.canvasStore.elements.filter(
+        (el): el is TextElement => el.kind === 'text' && el.pageIndex === pageIndex
+      );
+      for (const el of canvasTextEls) {
+        const text = (el.text || '').trim();
+        if (!text) continue;
+        const normText = normalize(text);
+
+        let score = 0;
+        if (text === targetTitle) {
+          score = 4;
+        } else if (normText === normalizedTarget) {
+          score = 3;
+        } else if (normText.startsWith(normalizedTarget) || normalizedTarget.startsWith(normText)) {
+          score = 2;
+        } else if (normText.includes(normalizedTarget) || normalizedTarget.includes(normText)) {
+          score = 1;
+        }
+
+        if (score > 0) {
+          const distanceToDestY = expectedTop !== undefined ? Math.abs(el.y - expectedTop) : el.y;
+          candidates.push({
+            type: 'canvas',
+            canvasElement: el,
+            top: el.y,
+            score,
+            distanceToDestY,
+          });
+        }
+      }
+    }
+
+    // 2. Check PDF text spans on target page
+    try {
+      const pageSpans = this.service.document.getPage(pageIndex).extractTextSpans();
+      for (const span of pageSpans) {
+        const text = (span.text || '').trim();
+        if (!text) continue;
+        const normText = normalize(text);
+
+        let score = 0;
+        if (text === targetTitle) {
+          score = 4;
+        } else if (normText === normalizedTarget) {
+          score = 3;
+        } else if (normText.startsWith(normalizedTarget) || normalizedTarget.startsWith(normText)) {
+          score = 2;
+        } else if (normText.includes(normalizedTarget) || normalizedTarget.includes(normText)) {
+          score = 1;
+        }
+
+        if (score > 0) {
+          const distanceToDestY = expectedTop !== undefined ? Math.abs(span.top - expectedTop) : span.top;
+          candidates.push({
+            type: 'pdf',
+            pdfSpan: span,
+            top: span.top,
+            score,
+            distanceToDestY,
+          });
+        }
+      }
+    } catch {}
+
+    // Sort candidates by score descending, then distanceToDestY ascending
+    candidates.sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      return a.distanceToDestY - b.distanceToDestY;
+    });
+
+    const bestMatch = candidates[0];
+
+    if (bestMatch) {
+      if (bestMatch.type === 'canvas' && bestMatch.canvasElement) {
+        this.clearSelection(true);
+        this.canvasStore?.selectElement(bestMatch.canvasElement.id);
+        this.scrollCallback?.(pageIndex, { targetTop: bestMatch.canvasElement.y, behavior: 'smooth' });
+
+        if (typeof document !== 'undefined' && typeof document.querySelector === 'function') {
+          setTimeout(() => {
+            const el = document.querySelector(`[data-element-id="${bestMatch.canvasElement!.id}"]`) as HTMLElement | null;
+            el?.focus?.({ preventScroll: true });
+          }, 50);
+        }
+      } else if (bestMatch.type === 'pdf' && bestMatch.pdfSpan) {
+        this.canvasStore?.selectElement(null);
+        this.selectSpan(bestMatch.pdfSpan);
+        this.scrollCallback?.(pageIndex, { targetTop: bestMatch.pdfSpan.top, behavior: 'smooth' });
+
+        if (typeof document !== 'undefined' && typeof document.querySelector === 'function') {
+          setTimeout(() => {
+            const el = document.querySelector(`[data-span-id="${bestMatch.pdfSpan!.id}"]`) as HTMLElement | null;
+            el?.focus?.({ preventScroll: true });
+          }, 50);
+        }
+      }
+    } else {
+      this.store.clearSelection();
+      this.canvasStore?.selectElement(null);
+      this.scrollCallback?.(pageIndex, { destY: item.destY, behavior: 'smooth' });
+    }
   }
 
   goToPrevPage(): void {
@@ -809,10 +1163,35 @@ export class EditorActions {
     this.store.currentPageIndex = index;
   }
 
+  /**
+   * Constructs a tool execution context.
+   */
+  getToolContext(pageIndex?: number, containerEl?: HTMLElement): ToolContext {
+    if (!this._canvasActions) {
+      throw new Error("CanvasActions not initialized on EditorActions");
+    }
+    return {
+      editorStore: this.store,
+      canvasStore: this.canvasStore ?? (null as unknown as CanvasStore),
+      actions: this,
+      canvasActions: this._canvasActions,
+      pageIndex,
+      containerEl,
+    };
+  }
+
   // -- Tool selection --
 
   setTool(tool: EditorTool): void {
     if (this.store.activeTool === tool) return;
+
+    if (this.canvasStore) {
+      this.canvasStore.clearDragState();
+      if (this.canvasStore.editingElementId) {
+        this.canvasStore.selectElement(null);
+      }
+    }
+
     if (this.store.inlineEdit) {
       this.submitInlineEdit();
     }
