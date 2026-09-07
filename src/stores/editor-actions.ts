@@ -1,4 +1,5 @@
 import { getContext, setContext } from 'svelte';
+import { SvelteSet } from 'svelte/reactivity';
 
 import type { PdfEditorService } from '../services/pdf-editor';
 import type { 
@@ -6,37 +7,92 @@ import type {
   EditableTextSpan, 
   EditableImageSpan, 
   EditableShapeSpan,
+  EditableFormFieldSpan,
   TextMutationOptions,
   TextLine,
   SanitizeOptions,
   SanitizeSummary,
   SanitizationInspection,
+  CompressOptions,
+  CompressSummary,
+  CompressionInspection,
+  CompressionLevel,
   HighlightRect,
   DocumentMetadata,
   DocumentMetadataUpdate,
+  ColorRgba,
 } from '../core/types';
 import type { EditorStore } from './editor.svelte';
 import { getFileBuffer, setFileBuffer } from './editor.svelte';
 import type { CanvasStore } from './canvas.svelte';
 import type { HistoryStore } from './history.svelte';
-import type { HistorySnapshot } from './history-types';
-import type { EditorTool } from './types';
-import type { CanvasElement, TextElement, TextSegment, TextElementLine } from './canvas-types';
+import type { EditorTool, CropUnit, CropScope } from './types';
+import type { CanvasElement, TextElement, TextSegment, TextElementLine, ShapeElement } from './canvas-types';
+import type { CanvasActions } from './canvas-actions';
 import { downloadBytes } from '../utils/download-utils';
+import { safeClone } from '../utils/clone-utils';
+import { UNICODE_TRAILING_WS_REGEX, UNICODE_LEADING_WS_REGEX } from '../utils/text-range-utils';
 import { useSelection } from './selection.svelte';
+import { cropPages, resetCropPages, type PageCropMargins } from '../services/pdf/operations/crop-ops';
+import {
+  scalePages,
+  transformCanvasElementsForScale,
+  type ScalePageOptions,
+  type PageScaleScope,
+} from '../services/pdf/operations/scale-ops';
 import type { ImpositionConfig } from '../services/pdf/operations/types';
-import type { ColorRgba } from '../core/types';
-import { applyImposition } from '../services/pdf/operations/imposition-ops';
 import type { SavedSignature } from '../services/signature-storage';
 import type { SignPdfOptions, SignatureValidationResult } from '../services/pdf/operations/signature-ops';
 import { isSyntheticCanvasCharIndex, resolveCanvasTextChar } from '../services/pdf/unified-text-provider';
+import type { ErasableCandidate } from '../services/eraser/eraser-engine';
+import type { Command, CommandContext } from '../core/command';
+import {
+  CompoundCommand,
+  AddElementCommand,
+  RemoveElementCommand,
+  UpdateElementPropertyCommand,
+  HideSpanCommand,
+  ReplaceTextCommand,
+  ReplaceOcrTextCommand,
+  ApplyOcrLayerCommand,
+  DeleteTextCommand,
+  RotatePageCommand,
+  MutateDocumentCommand,
+  RemoveAcroFormFieldCommand,
+} from '../commands';
+import { OcrService } from '../services/ocr';
+import type { OcrPageResult } from '../services/ocr';
+import type { ToolRegistry, ToolContext } from '../core/tool-registry';
+import type { ExportRegistry } from '../core/export-registry';
+import type { PluginManager } from '../core/plugin-manager';
+import { findClosestGoogleFont, loadGoogleFont } from '../services/font-loader';
+import { resolveDemoPreset } from '../services/demo-documents/registry';
+import {
+  fetchPdfFromUrl,
+  formatUrlLoadErrorMessage,
+  syncUrlParameter,
+} from '../services/url-document-loader';
+import { mergeFilesToPdfBuffer, isImageFile, inferImageMimeType } from '../services/file-merger';
+import { documentConverter, type DocumentConversionOptions } from '../services/conversion';
+import type { OutlineItemFlat } from '../services/pdf/operations/outline-ops';
 
 const EDITOR_ACTIONS_KEY = Symbol('editor-actions');
 
 /** Minimum and maximum zoom bounds. */
-const ZOOM_MIN = 0.25;
-const ZOOM_MAX = 5.0;
-const ZOOM_STEP = 1.2;
+export const ZOOM_MIN = 0.25;
+export const ZOOM_MAX = 5.0;
+export const ZOOM_STEP = 1.2;
+
+/**
+ * Target options for programmatic scrolling and element centering.
+ */
+export interface ScrollTargetOptions {
+  destY?: number;
+  targetTop?: number;
+  behavior?: ScrollBehavior;
+}
+
+export type ScrollCallback = (index: number, options?: ScrollTargetOptions) => void;
 
 export class EditorActions {
   /** DOM references for hidden file inputs. Set by the root component. */
@@ -44,21 +100,43 @@ export class EditorActions {
   mergeFileInputEl: HTMLInputElement | null = null;
   imageFileInputEl: HTMLInputElement | null = null;
   imageAsPageFileInputEl: HTMLInputElement | null = null;
+  mergeFilesInputEl: HTMLInputElement | null = null;
 
   /**
    * Scroll callback registered by Canvas.svelte.
    * Called when programmatic page navigation requires a scroll.
    */
-  private scrollCallback: ((index: number) => void) | null = null;
+  private scrollCallback: ScrollCallback | null = null;
   
   private isAddingToWorkspace: boolean = false;
+  private _canvasActions: CanvasActions | null = null;
+  private _pluginManager: PluginManager | null = null;
+  private zoomDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     public readonly store: EditorStore,
     public readonly service: PdfEditorService,
     public readonly historyStore?: HistoryStore,
     public canvasStore?: CanvasStore,
+    public toolRegistry?: ToolRegistry,
+    public exportRegistry?: ExportRegistry,
   ) {}
+
+  get canvasActions(): CanvasActions | null {
+    return this._canvasActions;
+  }
+
+  set canvasActions(actions: CanvasActions | null) {
+    this._canvasActions = actions;
+  }
+
+  setCanvasActions(canvasActions: CanvasActions): void {
+    this._canvasActions = canvasActions;
+  }
+
+  setPluginManager(pluginManager: PluginManager): void {
+    this._pluginManager = pluginManager;
+  }
 
   /**
    * Captures an immutable snapshot of current editor and canvas state.
@@ -70,132 +148,140 @@ export class EditorActions {
    * @param explicitBuffer Optional explicit document buffer.
    * @return The newly generated HistorySnapshot object.
    */
-  captureSnapshot(
-    description: string,
-    forcePdfSave: boolean = false,
-    explicitFileId?: string,
-    explicitFileName?: string,
-    explicitBuffer?: ArrayBuffer,
-  ): HistorySnapshot {
-    const fileId = explicitFileId ?? this.store.activeWorkspaceFileId ?? 'default-file';
-    const fileName = explicitFileName ?? this.store.fileName;
-    let docBuffer = explicitBuffer ?? getFileBuffer(fileId);
-
-    if (forcePdfSave || !docBuffer) {
-      if (this.store.isDocumentLoaded) {
-        try {
-          const savedBytes = this.service.document.save();
-          const bufferArray = savedBytes.buffer.slice(
-            savedBytes.byteOffset,
-            savedBytes.byteOffset + savedBytes.byteLength
-          ) as ArrayBuffer;
-          setFileBuffer(fileId, bufferArray);
-          docBuffer = bufferArray;
-        } catch (err) {
-          console.warn('Failed to save document buffer during snapshot capture:', err);
-          if (!docBuffer) {
-            docBuffer = new ArrayBuffer(0);
-          }
-        }
-      } else {
-        docBuffer = new ArrayBuffer(0);
-      }
-    }
-
-    const canvasElements = this.canvasStore ? structuredClone(this.canvasStore.elements) : [];
-    const selectedElementId = this.canvasStore?.selectedElementId ?? null;
-
+  /**
+   * Constructs a command execution context.
+   */
+  getCommandContext(): CommandContext {
     return {
-      id: crypto.randomUUID(),
-      description,
-      timestamp: Date.now(),
-      fileId,
-      fileName,
-      pageIndex: this.store.currentPageIndex,
-      documentBuffer: docBuffer,
-      canvasElements,
-      pageTransforms: { ...this.store.pageTransforms },
-      hiddenSpanIds: Array.from(this.store.hiddenSpanIds),
-      selectedElementId,
+      editorStore: this.store,
+      canvasStore: this.canvasStore ?? (null as unknown as CanvasStore),
+      service: this.service,
     };
   }
 
   /**
-   * Records a snapshot of the current state onto the active file history stack.
+   * Pushes an already-executed command onto the active history stack.
    *
-   * @param description Description of the mutation.
-   * @param forcePdfSave Whether the underlying PDFium document was modified.
+   * @param command The command that was executed.
    */
-  recordSnapshot(description: string, forcePdfSave: boolean = false): void {
+  pushCommand(command: Command): void {
     if (!this.historyStore) return;
-    const snapshot = this.captureSnapshot(description, forcePdfSave);
-    this.historyStore.pushSnapshot(snapshot);
+    const fileId = this.store.activeWorkspaceFileId ?? undefined;
+    if (fileId && this.historyStore.activeFileId !== fileId) {
+      this.historyStore.setActiveFileId(fileId);
+    }
+    this.historyStore.pushCommand(command, fileId);
+    if (this.service?.document && typeof this.service.document.pushCommand === 'function') {
+      this.service.document.pushCommand(command);
+    }
   }
 
   /**
-   * Queues a debounced snapshot capture for continuous property adjustments.
+   * Executes a command and pushes it onto the active history stack.
    *
-   * @param description Description of the mutation.
+   * @param command The command to execute.
+   */
+  async executeCommand(command: Command): Promise<void> {
+    if (!this.historyStore) return;
+    await this.historyStore.executeCommand(
+      command,
+      this.getCommandContext(),
+      this.store.activeWorkspaceFileId ?? undefined,
+    );
+    if (this.service.document && typeof this.service.document.pushCommand === 'function') {
+      this.service.document.pushCommand(command);
+    }
+  }
+
+  /**
+   * Queues a debounced command push to coalesce continuous rapid changes.
+   *
+   * @param command The command to record.
    * @param delayMs Debounce delay in milliseconds. Defaults to 300ms.
    */
-  recordDebouncedSnapshot(description: string, delayMs: number = 300): void {
+  recordDebouncedCommand(command: Command, delayMs: number = 300): void {
     if (!this.historyStore) return;
-    this.historyStore.recordDebounced(() => this.captureSnapshot(description, false), delayMs);
+    this.historyStore.recordDebouncedCommand(
+      command,
+      delayMs,
+      this.store.activeWorkspaceFileId ?? undefined,
+    );
   }
 
   /**
-   * Restores a history snapshot into the active editor, canvas, and PDFium document state.
+   * Executes a destructive WASM document mutation with full buffer undo/redo support.
    *
-   * @param snapshot The target snapshot to restore.
+   * Captures references to the previous and new binary document buffers and records
+   * a typed MutateDocumentCommand on the history stack.
+   *
+   * @param description Human-readable description of the operation.
+   * @param targetPageIndex Active page index after the mutation completes.
+   * @param mutateFn The mutation function executing operations on the document.
+   * @param indexMap Optional function to remap page indices for canvas elements and transforms.
    */
-  async restoreSnapshot(snapshot: HistorySnapshot): Promise<void> {
-    if (this.store.inlineEdit) {
-      this.cancelInlineEdit();
+  async executeDocumentMutation(
+    description: string,
+    targetPageIndex: number,
+    mutateFn: () => void | Promise<void>,
+    indexMap?: (oldIndex: number) => number,
+    skipPush?: boolean,
+    duplicateCopies?: Array<{ sourceIndex: number; targetIndex: number }>,
+  ): Promise<MutateDocumentCommand | undefined> {
+    const fileId = this.store.activeWorkspaceFileId;
+    if (!fileId || !this.store.isDocumentLoaded) return;
+
+    const prevSaved = this.service.document.save();
+    const prevBuffer = getFileBuffer(fileId) ?? (prevSaved.buffer.slice(prevSaved.byteOffset, prevSaved.byteOffset + prevSaved.byteLength) as ArrayBuffer);
+    const prevPageIndex = this.store.currentPageIndex;
+    const prevElements = this.canvasStore ? safeClone(this.canvasStore.elements) : [];
+    const prevTransforms = { ...this.store.pageTransforms };
+
+    try {
+      await mutateFn();
+    } catch (err) {
+      this.service.loadDocumentFromBuffer(prevBuffer);
+      throw err;
     }
 
-    const currentBuffer = this.store.activeWorkspaceFileId
-      ? getFileBuffer(this.store.activeWorkspaceFileId)
-      : undefined;
-
-    const needsBufferReload =
-      !this.store.isDocumentLoaded ||
-      currentBuffer !== snapshot.documentBuffer ||
-      this.store.fileName !== snapshot.fileName;
-
-    if (needsBufferReload && snapshot.documentBuffer.byteLength > 0) {
-      setFileBuffer(snapshot.fileId, snapshot.documentBuffer);
-      this.service.loadDocumentFromBuffer(snapshot.documentBuffer);
-      this.store.fileName = snapshot.fileName;
-      this.store.isDocumentLoaded = true;
-      this.store.pageCount = this.service.document.getPageCount();
+    if (indexMap) {
+      this.remapPageIndices(indexMap, duplicateCopies);
     }
 
-    this.store.activeWorkspaceFileId = snapshot.fileId;
-    this.historyStore?.setActiveFileId(snapshot.fileId);
+    const savedBytes = this.service.document.save();
+    const newBuffer = savedBytes.buffer.slice(
+      savedBytes.byteOffset,
+      savedBytes.byteOffset + savedBytes.byteLength
+    ) as ArrayBuffer;
 
-    // Restore canvas overlay elements
-    if (this.canvasStore) {
-      this.canvasStore.elements = structuredClone(snapshot.canvasElements);
-      this.canvasStore.selectElement(snapshot.selectedElementId);
-      this.canvasStore.clearDragState();
+    const newElements = this.canvasStore ? safeClone(this.canvasStore.elements) : [];
+    const newTransforms = { ...this.store.pageTransforms };
+
+    const cmd = new MutateDocumentCommand(
+      description,
+      fileId,
+      prevBuffer,
+      newBuffer,
+      prevPageIndex,
+      targetPageIndex,
+      prevElements,
+      newElements,
+      prevTransforms,
+      newTransforms,
+    );
+
+    if (!skipPush) {
+      this.pushCommand(cmd);
     }
-
-    // Restore page transforms
-    this.store.pageTransforms = { ...snapshot.pageTransforms };
-
-    // Restore hidden spans
-    this.store.hiddenSpanIds.clear();
-    for (const spanId of snapshot.hiddenSpanIds) {
-      this.store.hiddenSpanIds.add(spanId);
-    }
-
-    // Restore active page index bounded to valid range
-    const maxPageIndex = Math.max(0, this.service.document.getPageCount() - 1);
-    this.store.currentPageIndex = Math.max(0, Math.min(snapshot.pageIndex, maxPageIndex));
-
-    this.store.clearSelection();
+    setFileBuffer(fileId, newBuffer);
+    this.store.pageCount = this.service.document.getPageCount();
+    this.store.currentPageIndex = Math.min(targetPageIndex, Math.max(0, this.store.pageCount - 1));
     this.store.incrementRenderVersion();
+    if (this.store.selectedSpan && this.store.selectedSpan.pageIndex === targetPageIndex) {
+      this.clearSelection(true);
+    }
     this.refreshDocument();
+    
+    return cmd;
   }
 
   /**
@@ -204,11 +290,27 @@ export class EditorActions {
    * @return Promise resolving to true if undo succeeded, false otherwise.
    */
   async undo(): Promise<boolean> {
+    const fileId = this.store.activeWorkspaceFileId ?? undefined;
+    if (this.historyStore && fileId && this.historyStore.activeFileId !== fileId) {
+      this.historyStore.setActiveFileId(fileId);
+    }
     if (!this.historyStore || !this.historyStore.canUndo) return false;
-    const previousSnapshot = this.historyStore.undo(this.store.activeWorkspaceFileId ?? undefined);
-    if (!previousSnapshot) return false;
-    await this.restoreSnapshot(previousSnapshot);
-    return true;
+    const ctx = this.getCommandContext();
+    const success = await this.historyStore.undoCommand(
+      ctx,
+      fileId,
+    );
+    if (success) {
+      if (this.service.document && typeof this.service.document.syncCommandStacks === 'function' && this.historyStore.activeCommandState) {
+        this.service.document.syncCommandStacks(
+          this.historyStore.activeCommandState.past,
+          this.historyStore.activeCommandState.future,
+        );
+      }
+      this.refreshDocument();
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -217,11 +319,27 @@ export class EditorActions {
    * @return Promise resolving to true if redo succeeded, false otherwise.
    */
   async redo(): Promise<boolean> {
+    const fileId = this.store.activeWorkspaceFileId ?? undefined;
+    if (this.historyStore && fileId && this.historyStore.activeFileId !== fileId) {
+      this.historyStore.setActiveFileId(fileId);
+    }
     if (!this.historyStore || !this.historyStore.canRedo) return false;
-    const nextSnapshot = this.historyStore.redo(this.store.activeWorkspaceFileId ?? undefined);
-    if (!nextSnapshot) return false;
-    await this.restoreSnapshot(nextSnapshot);
-    return true;
+    const ctx = this.getCommandContext();
+    const success = await this.historyStore.redoCommand(
+      ctx,
+      fileId,
+    );
+    if (success) {
+      if (this.service.document && typeof this.service.document.syncCommandStacks === 'function' && this.historyStore.activeCommandState) {
+        this.service.document.syncCommandStacks(
+          this.historyStore.activeCommandState.past,
+          this.historyStore.activeCommandState.future,
+        );
+      }
+      this.refreshDocument();
+      return true;
+    }
+    return false;
   }
 
   // -- Initialization --
@@ -235,6 +353,116 @@ export class EditorActions {
     }
   }
 
+  async loadDemoDocument(presetIdOrUrl: string): Promise<void> {
+    const trimmed = (presetIdOrUrl || '').trim();
+    if (!trimmed) return;
+
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      await this.loadDocumentFromUrl(trimmed);
+      return;
+    }
+
+    const preset = resolveDemoPreset(trimmed);
+    if (!preset) {
+      this.store.loadError = `Unknown compliance test document identifier: "${trimmed}".`;
+      return;
+    }
+
+    this.store.isLoadingDocument = true;
+    this.store.loadingProgress = `Loading ${preset.title}...`;
+    this.store.loadError = null;
+
+    try {
+      let buffer: ArrayBuffer | null = null;
+      let usedRemoteBenchmark = false;
+
+      // 1. Attempt streaming real-world benchmark PDF from CORS-enabled URL
+      if (preset.primaryUrl && typeof fetch !== 'undefined') {
+        try {
+          this.store.loadingProgress = `Streaming ${preset.title} from ${preset.origin}...`;
+          const result = await fetchPdfFromUrl(preset.primaryUrl, 15000);
+          buffer = result.buffer;
+          usedRemoteBenchmark = true;
+        } catch (primaryErr) {
+          console.warn(`Primary benchmark fetch failed for "${preset.id}", trying fallback mirrors:`, primaryErr);
+
+          if (preset.remoteFallbackUrls && preset.remoteFallbackUrls.length > 0) {
+            for (const fallbackUrl of preset.remoteFallbackUrls) {
+              try {
+                this.store.loadingProgress = `Fetching fallback mirror for ${preset.title}...`;
+                const result = await fetchPdfFromUrl(fallbackUrl, 10000);
+                buffer = result.buffer;
+                usedRemoteBenchmark = true;
+                break;
+              } catch {
+                // Continue to next mirror or procedural generator
+              }
+            }
+          }
+        }
+      }
+
+      // 2. Resilient fallback: compile procedural compliance document
+      if (!buffer) {
+        this.store.loadingProgress = `Compiling fallback document for ${preset.title}...`;
+        const bytes = await preset.generateBuffer();
+        buffer = bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        ) as ArrayBuffer;
+      }
+
+      await this.loadDocumentFromBuffer(buffer, preset.fileName);
+
+      // Attach companion canvas elements for procedural fallback
+      const shouldAttachCanvasElements = !usedRemoteBenchmark;
+      const canvasElements = (shouldAttachCanvasElements && preset.getCanvasElements)
+        ? await preset.getCanvasElements()
+        : [];
+
+      if (this.canvasStore && canvasElements.length > 0) {
+        this.canvasStore.elements = safeClone(canvasElements);
+        const activeFile = this.service.getFile(this.store.activeWorkspaceFileId ?? '');
+        if (activeFile) {
+          activeFile.canvasElements = safeClone(canvasElements);
+        }
+      }
+
+      syncUrlParameter(preset.id);
+    } catch (err) {
+      console.error(`Failed to load compliance document "${preset.id}":`, err);
+      this.store.loadError = err instanceof Error ? err.message : `Failed to load ${preset.title}.`;
+    } finally {
+      this.store.isLoadingDocument = false;
+      this.store.loadingProgress = null;
+    }
+  }
+
+  async loadDocumentFromUrl(url: string, addToWorkspace?: boolean): Promise<void> {
+    const trimmed = (url || '').trim();
+    if (!trimmed) return;
+
+    this.store.isLoadingDocument = true;
+    this.store.loadingProgress = `Fetching PDF from ${trimmed}...`;
+    this.store.loadError = null;
+
+    try {
+      const { buffer, fileName } = await fetchPdfFromUrl(trimmed);
+      await this.loadDocumentFromBuffer(buffer, fileName, addToWorkspace);
+      syncUrlParameter(trimmed);
+    } catch (err) {
+      console.error(`Failed to load PDF from URL "${trimmed}":`, err);
+      const friendlyMessage = formatUrlLoadErrorMessage(err, trimmed);
+      this.store.loadError = friendlyMessage;
+    } finally {
+      this.store.isLoadingDocument = false;
+      this.store.loadingProgress = null;
+    }
+  }
+
+  /**
+   * Loads the public sample PDF demo template document.
+   */
   async loadSampleDocument(): Promise<void> {
     try {
       const resp = await fetch('/sample.pdf');
@@ -250,12 +478,63 @@ export class EditorActions {
 
   // -- Document lifecycle --
 
-  async loadDocumentFromBuffer(buffer: ArrayBuffer, fileName: string): Promise<void> {
+  /**
+   * Resets all workspace state, clearing active documents, canvas elements,
+   * page transforms, span caches, and command histories.
+   */
+  clearWorkspaceState(): void {
+    this.service.clearWorkspace();
+    this.historyStore?.clearAll();
+    this.store.pageTransforms = {};
+    this.store.hiddenSpanIds.clear();
+    this.store.pageVersions = {};
+    this.store.activeWorkspaceFileId = null;
+    this.store.fileName = 'No document';
+    this.store.pageCount = 0;
+    this.store.currentPageIndex = 0;
+    this.store.isDocumentLoaded = false;
+    this.clearSelection(false);
+    useSelection().clear();
+    if (this.canvasStore) {
+      this.canvasStore.elements = [];
+      this.canvasStore.selectElement(null);
+      this.canvasStore.clearDragState();
+    }
+    this.store.scannedPages = new Set();
+    this.store.pageOcrResults = new Map();
+    this.store.isOcrRunning = false;
+    this.store.ocrProgress = null;
+    this.store.showOcrDialog = false;
+  }
+
+  async loadDocumentFromBuffer(
+    buffer: ArrayBuffer,
+    fileName: string,
+    addToWorkspace?: boolean,
+  ): Promise<void> {
     if (!this.store.isInitialized) {
       return;
     }
 
-    if (this.isAddingToWorkspace) {
+    let finalBuffer = buffer;
+    let finalFileName = fileName;
+
+    if (documentConverter.isConvertible(fileName, buffer)) {
+      try {
+        const converted = await documentConverter.convertDocument({
+          name: fileName,
+          buffer,
+        });
+        finalBuffer = converted.buffer;
+        finalFileName = converted.fileName;
+      } catch (err) {
+        console.error('Failed to convert document buffer:', err);
+      }
+    }
+
+    const adding = addToWorkspace !== undefined ? addToWorkspace : this.isAddingToWorkspace;
+
+    if (adding) {
       await this.saveActiveFileToWorkspace();
     }
 
