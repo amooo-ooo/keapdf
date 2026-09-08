@@ -2129,3 +2129,533 @@ export function createWebMcpTools(ctx: WebMcpContext): Array<ModelContextTool<Re
     execute: async (input: { fileId?: string; fileName?: string }): Promise<WebMcpResponse<{ activeFileId: string; fileName: string; pageCount: number }>> => {
       let fileId = typeof input.fileId === 'string' ? input.fileId.trim() : '';
 
+      if (!fileId && typeof input.fileName === 'string' && input.fileName.trim().length > 0) {
+        const query = input.fileName.trim().toLowerCase();
+        const matched = ctx.editorStore.workspaceFiles.find(
+          (f) => f.fileName.toLowerCase() === query || f.fileName.toLowerCase().includes(query)
+        );
+        if (matched) {
+          fileId = matched.id;
+        }
+      }
+
+      if (!fileId) {
+        return {
+          ok: false,
+          error: {
+            code: 'NODE_NOT_FOUND',
+            message: `Target workspace file "${input.fileName || input.fileId}" not found in workspace. Call pdf.listWorkspace to inspect open files.`,
+          },
+        };
+      }
+
+      if (!ctx.editorActions) {
+        return {
+          ok: false,
+          error: { code: 'INTERNAL_ERROR', message: 'Editor actions unavailable.' },
+        };
+      }
+
+      await ctx.editorActions.switchWorkspaceFile(fileId);
+      ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+
+      return {
+        ok: true,
+        result: {
+          activeFileId: fileId,
+          fileName: ctx.editorStore.fileName,
+          pageCount: ctx.pdfDoc.getPageCount(),
+        },
+      };
+    },
+  });
+
+  // pdf.mergeDocument
+  tools.push({
+    name: 'pdf.mergeDocument',
+    title: 'Merge PDF Document',
+    description: 'Merges another PDF document (via base64 or workspace file ID) into the active document at a specified page index.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        atIndex: { type: 'integer', description: 'Page index where merged pages are inserted (defaults to end of document).' },
+        base64Data: { type: 'string', description: 'Base64 encoded PDF bytes to merge.' },
+        workspaceFileId: { type: 'string', description: 'Existing workspace file ID to merge from.' },
+      },
+    },
+    execute: async (input): Promise<WebMcpResponse<{ atIndex: number; newPageCount: number }>> => {
+      const callId = `merge_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const pageCount = ctx.pdfDoc.getPageCount();
+      const atIndex = typeof input.atIndex === 'number' ? Math.max(0, Math.min(pageCount, input.atIndex)) : pageCount;
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        if (typeof input.workspaceFileId === 'string' && input.workspaceFileId.length > 0 && ctx.editorActions) {
+          const activeId = ctx.editorStore.activeWorkspaceFileId;
+          const fileIds = activeId && activeId !== input.workspaceFileId
+            ? [activeId, input.workspaceFileId]
+            : [input.workspaceFileId];
+          await ctx.editorActions.mergeWorkspaceFiles(fileIds, atIndex);
+        } else if (typeof input.base64Data === 'string' && input.base64Data.length > 0) {
+          const bytes = base64ToUint8Array(input.base64Data);
+          const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+          ctx.pdfDoc.merge(buffer, atIndex);
+          ctx.editorStore.pageCount = ctx.pdfDoc.getPageCount();
+          ctx.editorStore.incrementRenderVersion();
+        } else {
+          return {
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'Either base64Data or workspaceFileId must be supplied.',
+            },
+          };
+        }
+
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            atIndex,
+            newPageCount: ctx.pdfDoc.getPageCount(),
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.splitDocument
+  tools.push({
+    name: 'pdf.splitDocument',
+    title: 'Split Document Pages',
+    description: 'Extracts specified pages into a new PDF document or returns base64 bytes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pages: {
+          type: 'array',
+          items: { type: 'integer' },
+          description: 'Zero-based page indices to extract.',
+        },
+        saveToWorkspace: { type: 'boolean', description: 'Whether to save extracted pages as a new workspace document.' },
+        newFileName: { type: 'string', description: 'File name for the extracted document.' },
+      },
+      required: ['pages'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ pageCount: number; byteLength: number; base64Data: string; newFileName: string }>> => {
+      const pages = Array.isArray(input.pages) ? (input.pages as number[]).filter((p) => typeof p === 'number') : [];
+      if (pages.length === 0) {
+        return {
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'pages array must contain at least one valid page index.',
+          },
+        };
+      }
+
+      const splitBytes = ctx.pdfDoc.split(pages);
+      const newFileName = typeof input.newFileName === 'string' ? input.newFileName : `extracted_${Date.now()}.pdf`;
+
+      if (input.saveToWorkspace && ctx.editorActions) {
+        const buffer = splitBytes.buffer.slice(splitBytes.byteOffset, splitBytes.byteOffset + splitBytes.byteLength) as ArrayBuffer;
+        await ctx.editorActions.loadDocumentFromBuffer(buffer, newFileName, true);
+      }
+
+      return {
+        ok: true,
+        result: {
+          pageCount: pages.length,
+          byteLength: splitBytes.byteLength,
+          base64Data: uint8ArrayToBase64(splitBytes),
+          newFileName,
+        },
+      };
+    },
+  });
+
+  // pdf.duplicatePage
+  tools.push({
+    name: 'pdf.duplicatePage',
+    title: 'Duplicate Page',
+    description: 'Duplicates an existing page at pageIndex, placing the duplicate copy immediately after it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer', description: 'Zero-based page index to duplicate.' },
+      },
+      required: ['pageIndex'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ pageIndex: number; newPageCount: number }>> => {
+      const callId = `duplicate_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const pageIndex = typeof input.pageIndex === 'number' ? input.pageIndex : 0;
+      if (pageIndex < 0 || pageIndex >= ctx.pdfDoc.getPageCount()) {
+        return {
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: `pageIndex ${pageIndex} is out of document bounds.`,
+          },
+        };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        if (ctx.editorActions && typeof ctx.editorActions.duplicatePage === 'function') {
+          await ctx.editorActions.duplicatePage(pageIndex);
+        } else {
+          ctx.pdfDoc.duplicatePage(pageIndex);
+          ctx.editorStore.pageCount = ctx.pdfDoc.getPageCount();
+          const oldTransforms = ctx.editorStore.pageTransforms;
+          if (oldTransforms) {
+            const newTransforms: Record<number, (typeof oldTransforms)[number]> = {};
+            for (const [key, val] of Object.entries(oldTransforms)) {
+              const idx = Number(key);
+              const newIdx = idx > pageIndex ? idx + 1 : idx;
+              newTransforms[newIdx] = { ...val };
+            }
+            if (oldTransforms[pageIndex]) {
+              newTransforms[pageIndex + 1] = { ...oldTransforms[pageIndex] };
+            }
+            ctx.editorStore.pageTransforms = newTransforms;
+          }
+          ctx.editorStore.incrementRenderVersion();
+        }
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            pageIndex,
+            newPageCount: ctx.pdfDoc.getPageCount(),
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.flattenPage
+  tools.push({
+    name: 'pdf.flattenPage',
+    title: 'Flatten Page Annotations',
+    description: 'Flattens interactive annotations and form fields on a page into the static content stream.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer', description: 'Zero-based page index to flatten.' },
+      },
+      required: ['pageIndex'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ pageIndex: number; flattened: boolean }>> => {
+      const callId = `flatten_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const pageIndex = typeof input.pageIndex === 'number' ? input.pageIndex : 0;
+      return ctx.sdgLock.withLock(callId, async () => {
+        ctx.pdfDoc.flattenPage(pageIndex);
+        ctx.editorStore.incrementPageVersion(pageIndex);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: { pageIndex, flattened: true },
+        };
+      });
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // Canvas Elements & Redaction Tools
+  // ---------------------------------------------------------------------------
+
+  // pdf.addElement
+  tools.push({
+    name: 'pdf.addElement',
+    title: 'Add Canvas Element',
+    description: 'Adds an overlay canvas element (text, shape, image, note, form-field) with full styling and validation options.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer' },
+        kind: { type: 'string', enum: ['text', 'shape', 'image', 'note', 'form-field'] },
+        x: { type: 'number' },
+        y: { type: 'number' },
+        width: { type: 'number' },
+        height: { type: 'number' },
+        text: { type: 'string' },
+        fill: { type: 'string' },
+        stroke: { type: 'string' },
+        strokeWidth: { type: 'number' },
+        shapeType: { type: 'string', enum: ['rectangle', 'circle', 'line', 'arrow'] },
+        imageUrl: { type: 'string' },
+        author: { type: 'string' },
+        variant: { type: 'string', enum: ['text-input', 'checkbox', 'radio', 'dropdown', 'signature', 'attachment', 'button'] },
+        label: { type: 'string' },
+        placeholder: { type: 'string' },
+        value: { type: 'string' },
+        options: { type: 'array', items: { type: 'string' } },
+        fontSize: { type: 'number' },
+        fontFamily: { type: 'string' },
+        color: { type: 'string' },
+        backgroundColor: { type: 'string' },
+        borderColor: { type: 'string' },
+        borderWidth: { type: 'number' },
+        borderStyle: { type: 'string', enum: ['solid', 'dashed', 'dotted', 'none', 'inset', 'underline'] },
+        borderRadius: { type: 'number' },
+        textAlign: { type: 'string', enum: ['left', 'center', 'right'] },
+        required: { type: 'boolean' },
+        readOnly: { type: 'boolean' },
+        isHighlight: { type: 'boolean' },
+        opacity: { type: 'number' },
+        fontWeight: { type: 'string', enum: ['normal', 'bold'] },
+        fontStyle: { type: 'string', enum: ['normal', 'italic'] },
+        underline: { type: 'boolean' },
+        strikethrough: { type: 'boolean' },
+      },
+      required: ['pageIndex', 'kind', 'x', 'y', 'width', 'height'],
+    },
+    execute: async (input: {
+      pageIndex?: number;
+      kind?: 'text' | 'shape' | 'image' | 'note' | 'form-field';
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      text?: string;
+      fill?: string;
+      stroke?: string;
+      strokeWidth?: number;
+      shapeType?: ShapeVariant;
+      imageUrl?: string;
+      author?: string;
+      variant?: FormFieldVariant;
+      label?: string;
+      placeholder?: string;
+      value?: string;
+      options?: string[];
+      fontSize?: number;
+      fontFamily?: string;
+      color?: string;
+      backgroundColor?: string;
+      borderColor?: string;
+      borderWidth?: number;
+      borderStyle?: 'solid' | 'dashed' | 'dotted' | 'none' | 'inset' | 'underline';
+      borderRadius?: number;
+      textAlign?: 'left' | 'center' | 'right';
+      required?: boolean;
+      readOnly?: boolean;
+      isHighlight?: boolean;
+      opacity?: number;
+      fontWeight?: 'normal' | 'bold';
+      fontStyle?: 'normal' | 'italic';
+      underline?: boolean;
+      strikethrough?: boolean;
+    }): Promise<WebMcpResponse<{ id: string; pageIndex: number; kind: string }>> => {
+      const callId = `add_elem_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      if (!ctx.canvasStore) {
+        return {
+          ok: false,
+          error: { code: 'INTERNAL_ERROR', message: 'Canvas store unavailable.' },
+        };
+      }
+
+      const id = ctx.canvasStore.generateId();
+      const pageIndex = typeof input.pageIndex === 'number' ? input.pageIndex : 0;
+      const kind = input.kind as 'text' | 'shape' | 'image' | 'note' | 'form-field';
+      const x = typeof input.x === 'number' ? input.x : 50;
+      const y = typeof input.y === 'number' ? input.y : 50;
+      const width = typeof input.width === 'number' ? input.width : 100;
+      const height = typeof input.height === 'number' ? input.height : 50;
+
+      let element: CanvasElement;
+
+      if (kind === 'text') {
+        element = {
+          id,
+          kind: 'text',
+          pageIndex,
+          x,
+          y,
+          width,
+          height,
+          rotation: 0,
+          locked: false,
+          visible: true,
+          flipX: false,
+          flipY: false,
+          text: typeof input.text === 'string' ? input.text : 'Sample Text',
+          fontSize: typeof input.fontSize === 'number' ? input.fontSize : 14,
+          fontFamily: typeof input.fontFamily === 'string' ? input.fontFamily : 'Inter',
+          color: typeof input.color === 'string' ? input.color : (typeof input.fill === 'string' ? input.fill : '#000000'),
+          backgroundColor: typeof input.backgroundColor === 'string' ? input.backgroundColor : undefined,
+          fontWeight: input.fontWeight === 'bold' ? 'bold' : 'normal',
+          fontStyle: input.fontStyle === 'italic' ? 'italic' : 'normal',
+          textAlign: input.textAlign || 'left',
+          underline: input.underline ?? false,
+          strikethrough: input.strikethrough ?? false,
+        };
+      } else if (kind === 'shape') {
+        element = {
+          id,
+          kind: 'shape',
+          pageIndex,
+          x,
+          y,
+          width,
+          height,
+          rotation: 0,
+          locked: false,
+          visible: true,
+          flipX: false,
+          flipY: false,
+          variant: (input.shapeType as ShapeVariant) || 'rectangle',
+          fill: typeof input.fill === 'string' ? input.fill : (input.isHighlight ? '#fde047' : '#3b82f6'),
+          stroke: typeof input.stroke === 'string' ? input.stroke : (input.isHighlight ? '#fde047' : '#1d4ed8'),
+          strokeWidth: typeof input.strokeWidth === 'number' ? input.strokeWidth : (input.isHighlight ? 0 : 1),
+          opacity: typeof input.opacity === 'number' ? input.opacity : (input.isHighlight ? 0.4 : 1),
+          isHighlight: input.isHighlight ?? false,
+          borderRadius: typeof input.borderRadius === 'number' ? input.borderRadius : undefined,
+        };
+      } else if (kind === 'image') {
+        element = {
+          id,
+          kind: 'image',
+          pageIndex,
+          x,
+          y,
+          width,
+          height,
+          rotation: 0,
+          locked: false,
+          visible: true,
+          flipX: false,
+          flipY: false,
+          src: typeof input.imageUrl === 'string' ? input.imageUrl : '',
+          objectFit: 'contain',
+          opacity: typeof input.opacity === 'number' ? input.opacity : 1,
+        };
+      } else if (kind === 'note') {
+        element = {
+          id,
+          kind: 'note',
+          pageIndex,
+          x,
+          y,
+          width,
+          height,
+          rotation: 0,
+          locked: false,
+          visible: true,
+          flipX: false,
+          flipY: false,
+          author: typeof input.author === 'string' ? input.author : 'AI Agent',
+          text: typeof input.text === 'string' ? input.text : '',
+          color: typeof input.fill === 'string' ? input.fill : '#fbbf24',
+          isOpen: false,
+        };
+      } else {
+        const variant = (input.variant as FormFieldVariant) || 'text-input';
+        element = {
+          id,
+          kind: 'form-field',
+          pageIndex,
+          x,
+          y,
+          width,
+          height,
+          rotation: 0,
+          locked: false,
+          visible: true,
+          flipX: false,
+          flipY: false,
+          variant,
+          label: typeof input.label === 'string' ? input.label : (typeof input.text === 'string' ? input.text : 'Field'),
+          placeholder: typeof input.placeholder === 'string' ? input.placeholder : '',
+          value: typeof input.value === 'string' ? input.value : '',
+          options: Array.isArray(input.options) ? input.options : undefined,
+          fontSize: typeof input.fontSize === 'number' ? input.fontSize : 13,
+          fontFamily: typeof input.fontFamily === 'string' ? input.fontFamily : 'Helvetica',
+          color: typeof input.color === 'string' ? input.color : '#111827',
+          backgroundColor: typeof input.backgroundColor === 'string' ? input.backgroundColor : '#ffffff',
+          borderColor: typeof input.borderColor === 'string' ? input.borderColor : '#d1d5db',
+          borderWidth: typeof input.borderWidth === 'number' ? input.borderWidth : 1,
+          borderStyle: input.borderStyle || 'solid',
+          borderRadius: typeof input.borderRadius === 'number' ? input.borderRadius : 4,
+          textAlign: input.textAlign || 'left',
+          required: input.required ?? false,
+          readOnly: input.readOnly ?? false,
+        };
+      }
+
+      ctx.canvasStore.addElement(element);
+      ctx.onAgentMutation({ page: pageIndex, description: `Add ${kind} element` });
+      ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+      ctx.rateLimiter.recordCall();
+
+      return {
+        ok: true,
+        result: { id, pageIndex, kind },
+      };
+    },
+  });
+
+  // pdf.listElements
+  tools.push({
+    name: 'pdf.listElements',
+    title: 'List Canvas Elements',
+    description: 'Lists all overlay canvas elements on a specific page with their styling and properties.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer', description: 'Zero-based page index.' },
+      },
+      required: ['pageIndex'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ pageIndex: number; count: number; elements: Array<Record<string, unknown>> }>> => {
+      const pageIndex = typeof input.pageIndex === 'number' ? input.pageIndex : 0;
+      const elements = ctx.canvasStore ? ctx.canvasStore.getElementsByPage(pageIndex) : [];
+      return {
+        ok: true,
+        result: {
+          pageIndex,
+          count: elements.length,
+          elements: elements.map((e) => ({
+            id: e.id,
+            kind: e.kind,
+            x: e.x,
+            y: e.y,
+            width: e.width,
+            height: e.height,
+            rotation: e.rotation,
+            locked: e.locked,
+            visible: e.visible,
+            ...(e.kind === 'form-field'
+              ? {
+                  variant: (e as FormFieldElement).variant,
+                  label: (e as FormFieldElement).label,
+                  placeholder: (e as FormFieldElement).placeholder,
+                  value: (e as FormFieldElement).value,
+                  options: (e as FormFieldElement).options,
+                  fontSize: (e as FormFieldElement).fontSize,
+                  fontFamily: (e as FormFieldElement).fontFamily,
+                  color: (e as FormFieldElement).color,
+                  backgroundColor: (e as FormFieldElement).backgroundColor,
+                  borderColor: (e as FormFieldElement).borderColor,
+                  borderWidth: (e as FormFieldElement).borderWidth,
+                  borderStyle: (e as FormFieldElement).borderStyle,
+                  borderRadius: (e as FormFieldElement).borderRadius,
+                  textAlign: (e as FormFieldElement).textAlign,
+                  required: (e as FormFieldElement).required,
+                  readOnly: (e as FormFieldElement).readOnly,
