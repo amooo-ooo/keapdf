@@ -1065,3 +1065,539 @@ export function createWebMcpTools(ctx: WebMcpContext): Array<ModelContextTool<Re
           };
         }
 
+        // Remove node
+        const idx = graph?.rootIds.indexOf(id) ?? -1;
+        const precedingId = idx > 0 ? graph?.rootIds[idx - 1] ?? null : null;
+        const followingId = idx >= 0 && idx < (graph?.rootIds.length ?? 0) - 1 ? graph?.rootIds[idx + 1] ?? null : null;
+
+        ctx.sdgBuilder.removeNode(id);
+        ctx.rateLimiter.recordCall();
+        ctx.editorStore.incrementPageVersion(node.page);
+
+        ctx.onAgentMutation({
+          page: node.page,
+          description: `Deleted block ${id}`,
+        });
+
+        return {
+          ok: true,
+          result: {
+            deletedId: id,
+            precedingId,
+            followingId,
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.setRunStyle
+  tools.push({
+    name: 'pdf.setRunStyle',
+    title: 'Format Text Run',
+    description: 'Modifies typography formatting (bold, italic, color, size) of a run without changing text.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        revision: { type: 'integer' },
+        bold: { type: 'boolean' },
+        italic: { type: 'boolean' },
+        color: { type: 'string', description: 'Hex RGB color code (e.g. #FF0000).' },
+        size: { type: 'number', description: 'Font size in points.' },
+      },
+      required: ['id'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ id: string; revision: number }>> => {
+      const callId = `style_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const runId = typeof input.id === 'string' ? input.id : '';
+      const graph = getSdg();
+      let targetRun: SdgRun | null = null;
+      let parentNode: SdgNode | null = null;
+
+      if (graph) {
+        for (const n of graph.nodes.values()) {
+          if (n.runs) {
+            const found = n.runs.find((r) => r.id === runId);
+            if (found) {
+              targetRun = found;
+              parentNode = n;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!targetRun || !parentNode) {
+        return {
+          ok: false,
+          error: {
+            code: 'NODE_NOT_FOUND',
+            message: `Run identifier "${runId}" was not found.`,
+            details: { id: runId },
+          },
+        };
+      }
+
+      if (input.bold !== undefined) targetRun.bold = Boolean(input.bold);
+      if (input.italic !== undefined) targetRun.italic = Boolean(input.italic);
+      if (typeof input.color === 'string') targetRun.color = input.color;
+      if (typeof input.size === 'number') targetRun.size = input.size;
+
+      ctx.rateLimiter.recordCall();
+      ctx.editorStore.incrementPageVersion(parentNode.page);
+      const rev = typeof input.revision === 'number' ? input.revision + 1 : 1;
+
+      return {
+        ok: true,
+        result: { id: runId, revision: rev },
+      };
+    },
+  });
+
+  // pdf.mergeBlocks
+  tools.push({
+    name: 'pdf.mergeBlocks',
+    title: 'Merge Two Blocks',
+    description: 'Combines two adjacent blocks into one, verifying the text of both blocks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        firstBlockId: { type: 'string' },
+        secondBlockId: { type: 'string' },
+        firstExpectedText: { type: 'string' },
+        secondExpectedText: { type: 'string' },
+      },
+      required: ['firstBlockId', 'secondBlockId', 'firstExpectedText', 'secondExpectedText'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ id: string; text: string }>> => {
+      const callId = `merge_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const firstId = typeof input.firstBlockId === 'string' ? input.firstBlockId : '';
+      const secondId = typeof input.secondBlockId === 'string' ? input.secondBlockId : '';
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const graph = getSdg();
+        const firstNode = graph?.nodes.get(firstId);
+        const secondNode = graph?.nodes.get(secondId);
+
+        if (!firstNode || !secondNode) {
+          return {
+            ok: false,
+            error: {
+              code: 'NODE_NOT_FOUND',
+              message: 'One or both block IDs do not exist.',
+            },
+          };
+        }
+
+        if (
+          !verifyAnchorMatch(firstNode.text, input.firstExpectedText as string) ||
+          !verifyAnchorMatch(secondNode.text, input.secondExpectedText as string)
+        ) {
+          return {
+            ok: false,
+            error: {
+              code: 'ANCHOR_MISMATCH',
+              message: 'Anchor validation failed for one or both merge blocks.',
+              details: { firstText: firstNode.text, secondText: secondNode.text },
+            },
+          };
+        }
+
+        const mergedText = `${firstNode.text} ${secondNode.text}`;
+        ctx.sdgBuilder.updateNodeText(firstId, mergedText);
+        ctx.sdgBuilder.removeNode(secondId);
+        ctx.rateLimiter.recordCall();
+        ctx.editorStore.incrementPageVersion(firstNode.page);
+
+        return {
+          ok: true,
+          result: { id: firstId, text: mergedText },
+        };
+      });
+    },
+  });
+
+  // pdf.splitBlock
+  tools.push({
+    name: 'pdf.splitBlock',
+    title: 'Split Block at Character Offset',
+    description: 'Splits an existing block into two adjacent blocks at a specified character offset.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        expectedText: { type: 'string' },
+        splitOffset: { type: 'integer' },
+      },
+      required: ['id', 'expectedText', 'splitOffset'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ firstBlockId: string; secondBlockId: string }>> => {
+      const callId = `split_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const id = typeof input.id === 'string' ? input.id : '';
+      const offset = typeof input.splitOffset === 'number' ? input.splitOffset : -1;
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const graph = getSdg();
+        const node = graph?.nodes.get(id);
+
+        if (!node) {
+          return {
+            ok: false,
+            error: { code: 'NODE_NOT_FOUND', message: `Block "${id}" not found.` },
+          };
+        }
+
+        if (!verifyAnchorMatch(node.text, input.expectedText as string)) {
+          return {
+            ok: false,
+            error: {
+              code: 'ANCHOR_MISMATCH',
+              message: 'Supplied anchor text does not match block text.',
+              details: { id, currentText: node.text },
+            },
+          };
+        }
+
+        if (offset <= 0 || offset >= node.text.length) {
+          return {
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: `Split offset ${offset} is outside bounds (1 to ${node.text.length - 1}).`,
+            },
+          };
+        }
+
+        const part1 = node.text.substring(0, offset).trim();
+        const part2 = node.text.substring(offset).trim();
+
+        ctx.sdgBuilder.updateNodeText(id, part1);
+        const newBlockKey = `p${node.page}:split:${Date.now()}`;
+        const newId = ctx.sdgBuilder.allocateNodeId(node.type, newBlockKey);
+
+        const newNode: SdgNode = {
+          ...node,
+          id: newId,
+          text: part2,
+          bbox: [node.bbox[0], node.bbox[1] + 15, node.bbox[2], node.bbox[3] + 15],
+        };
+
+        graph?.nodes.set(newId, newNode);
+        if (graph) {
+          const idx = graph.rootIds.indexOf(id);
+          graph.rootIds.splice(idx + 1, 0, newId);
+        }
+
+        ctx.rateLimiter.recordCall();
+        ctx.editorStore.incrementPageVersion(node.page);
+
+        return {
+          ok: true,
+          result: { firstBlockId: id, secondBlockId: newId },
+        };
+      });
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // 3. Structural and Annotation Tools (Section 6.6)
+  // ---------------------------------------------------------------------------
+
+  // pdf.insertPage
+  tools.push({
+    name: 'pdf.insertPage',
+    title: 'Insert Blank Page',
+    description: 'Inserts a new blank page into the document at the given index.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer', description: 'Zero-indexed insertion position.' },
+        width: { type: 'number', default: 612, description: 'Page width in points.' },
+        height: { type: 'number', default: 792, description: 'Page height in points.' },
+      },
+    },
+    execute: async (input): Promise<WebMcpResponse<{ pageIndex: number; pageCount: number }>> => {
+      const callId = `insert_page_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const pageCount = ctx.pdfDoc.getPageCount();
+        const pageIndex = typeof input.pageIndex === 'number' ? Math.max(0, Math.min(pageCount, input.pageIndex)) : pageCount;
+        const width = typeof input.width === 'number' ? input.width : 612;
+        const height = typeof input.height === 'number' ? input.height : 792;
+
+        ctx.pdfDoc.addBlankPage(pageIndex, width, height);
+        ctx.editorStore.pageCount = ctx.pdfDoc.getPageCount();
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: { pageIndex, pageCount: ctx.pdfDoc.getPageCount() },
+        };
+      });
+    },
+  });
+
+  // pdf.deletePage (Destructive per Section 7.2)
+  tools.push({
+    name: 'pdf.deletePage',
+    title: 'Delete Page',
+    description: 'Destructively deletes a page from the document. Requires explicit confirmation or proposal.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer', description: 'Zero-indexed page number to delete.' },
+      },
+      required: ['pageIndex'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ deletedPageIndex: number; remainingPages: number }>> => {
+      const callId = `del_page_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const pageIndex = typeof input.pageIndex === 'number' ? input.pageIndex : -1;
+      const pageCount = ctx.pdfDoc.getPageCount();
+
+      if (pageIndex < 0 || pageIndex >= pageCount) {
+        return {
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: `Page index ${pageIndex} is out of bounds.`,
+          },
+        };
+      }
+
+      if (pageCount <= 1) {
+        return {
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Cannot delete the only remaining page in the document.',
+          },
+        };
+      }
+
+      // Enforce Section 7.2 confirmation
+      const confirmed = await ctx.requestUserConfirmation(
+        'Confirm Page Deletion',
+        `AI Agent is requesting to delete page ${pageIndex + 1} of ${pageCount}.`
+      );
+
+      if (!confirmed) {
+        return {
+          ok: false,
+          error: {
+            code: 'CONFIRMATION_REQUIRED',
+            message: 'Page deletion requires explicit human confirmation.',
+            details: { proposedChange: `Delete page ${pageIndex}` },
+          },
+        };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        ctx.pdfDoc.deletePage(pageIndex);
+        ctx.editorStore.pageCount = ctx.pdfDoc.getPageCount();
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            deletedPageIndex: pageIndex,
+            remainingPages: ctx.pdfDoc.getPageCount(),
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.reorderPages (Destructive per Section 7.2)
+  tools.push({
+    name: 'pdf.reorderPages',
+    title: 'Reorder Document Pages',
+    description: 'Reorders pages in the document. Subject to human confirmation or prior proposal staging.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fromIndices: { type: 'array', items: { type: 'integer' } },
+        toIndex: { type: 'integer' },
+      },
+      required: ['fromIndices', 'toIndex'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ pageCount: number }>> => {
+      const callId = `reorder_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const fromIndices = Array.isArray(input.fromIndices) ? (input.fromIndices as number[]) : [];
+      const toIndex = typeof input.toIndex === 'number' ? input.toIndex : 0;
+
+      const confirmed = await ctx.requestUserConfirmation(
+        'Confirm Page Reordering',
+        `AI Agent is requesting to move pages [${fromIndices.map((i) => i + 1).join(', ')}] to index ${toIndex + 1}.`
+      );
+
+      if (!confirmed) {
+        return {
+          ok: false,
+          error: {
+            code: 'CONFIRMATION_REQUIRED',
+            message: 'Page reordering requires explicit human confirmation.',
+            details: { proposedChange: 'Reorder pages' },
+          },
+        };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        ctx.pdfDoc.reorderPages(fromIndices, toIndex);
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: { pageCount: ctx.pdfDoc.getPageCount() },
+        };
+      });
+    },
+  });
+
+  // pdf.rotatePage
+  tools.push({
+    name: 'pdf.rotatePage',
+    title: 'Rotate Page',
+    description: 'Rotates a specific page by 0, 90, 180, or 270 degrees.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer' },
+        rotation: { type: 'integer', enum: [0, 90, 180, 270] },
+      },
+      required: ['pageIndex', 'rotation'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ pageIndex: number; newRotation: number }>> => {
+      const callId = `rotate_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const pageIndex = typeof input.pageIndex === 'number' ? input.pageIndex : 0;
+      const rotation = (input.rotation as 0 | 90 | 180 | 270) || 0;
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        if (rotation === 90 || rotation === 180 || rotation === 270) {
+          ctx.pdfDoc.rotatePage(pageIndex, rotation);
+          ctx.editorStore.incrementPageVersion(pageIndex);
+        }
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: { pageIndex, newRotation: rotation },
+        };
+      });
+    },
+  });
+
+  // pdf.addComment
+  tools.push({
+    name: 'pdf.addComment',
+    title: 'Add Review Comment',
+    description: 'Attaches a review note or comment to a node with explicit agent identity attribution.',
+    annotations: {},
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Target node identifier.' },
+        text: { type: 'string', description: 'Comment note text.' },
+        authorLabel: { type: 'string', description: 'Attribution identity (e.g. "Claude Assistant").' },
+      },
+      required: ['id', 'text', 'authorLabel'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ commentId: string }>> => {
+      const id = typeof input.id === 'string' ? input.id : '';
+      const text = typeof input.text === 'string' ? input.text : '';
+      const authorLabel = typeof input.authorLabel === 'string' ? input.authorLabel : 'AI Agent';
+
+      const graph = getSdg();
+      const node = graph?.nodes.get(id);
+
+      if (!node) {
+        return {
+          ok: false,
+          error: {
+            code: 'NODE_NOT_FOUND',
+            message: `Node "${id}" not found.`,
+            details: { id },
+          },
+        };
+      }
+
+      const commentId = `comment_${Date.now()}`;
+      ctx.pdfDoc.addTextAnnotation(node.page, {
+        x: node.bbox[0],
+        y: node.bbox[1],
+        width: 150,
+        height: 80,
+        contents: `[${authorLabel}]: ${text}`,
+        author: authorLabel,
+        color: '#7c3aed',
+      });
+
+      ctx.editorStore.incrementPageVersion(node.page);
+      return {
+        ok: true,
+        result: { commentId },
+      };
+    },
+  });
+
+  // pdf.proposeEdit (Staging per Section 6.6 & 7.2)
+  tools.push({
+    name: 'pdf.proposeEdit',
+    title: 'Stage Edit Proposal',
+    description: 'Stages a proposed mutation for review without immediate application, returning a preview diff.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        operation: { type: 'string', description: 'Tool operation name (e.g. pdf.replaceText).' },
+        parameters: { type: 'object', description: 'Parameters for the operation.' },
+      },
+      required: ['operation', 'parameters'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ proposalId: string; preview: { before: unknown; after: unknown } }>> => {
+      const operation = typeof input.operation === 'string' ? input.operation : '';
+      const params = (input.parameters as Record<string, unknown>) || {};
+
+      let beforeText = '';
+      const targetId = typeof params.id === 'string' ? params.id : '';
+      if (targetId) {
+        const node = getSdg()?.nodes.get(targetId);
+        beforeText = node?.text || '';
+      }
+
+      const proposal = ctx.proposalStore.createProposal(
+        operation,
+        params,
+        {
+          before: beforeText,
+          after: params.newText ?? params,
+        },
+        async (p: Record<string, unknown>) => {
+          const targetTool = tools.find((t) => t.name === operation);
+          if (!targetTool) throw new Error(`Tool ${operation} not found.`);
+          return targetTool.execute(p, { signal: new AbortController().signal });
+        }
+      );
+
