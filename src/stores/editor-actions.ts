@@ -3267,11 +3267,16 @@ export class EditorActions {
     }
 
     if (canvasStore && canvasStore.elements.length > 0) {
-      await this.burnCanvasToPdf(canvasStore);
+      await this.service.burnElementsToDocument(canvasStore.elements);
+      canvasStore.elements = [];
+      canvasStore.clearDragState();
+      canvasStore.selectElement(null);
+      this.refreshDocument();
     }
 
     const currentBytes = await this.service.document.saveAsync(this.store.pageTransforms);
-    const imposedBytes = await applyImposition(currentBytes, config);
+    const { applyImposition: runImposition } = await import('../services/pdf/operations/imposition-ops');
+    const imposedBytes = await runImposition(currentBytes, config);
 
     const baseName = this.store.fileName.replace(/\.[^/.]+$/, '');
     let modeSuffix: string = config.type;
@@ -3302,15 +3307,15 @@ export class EditorActions {
         this.isAddingToWorkspace = wasAdding;
       }
     } else {
-      this.store.pageTransforms = {};
-      this.service.loadDocumentFromBuffer(imposedBuffer);
-      this.store.fileName = newFileName;
-      this.store.currentPageIndex = 0;
-      this.store.pageCount = this.service.document.getPageCount();
-      this.store.clearSelection();
-      this.store.pageVersions = {};
-      this.refreshDocument();
-      this.recordSnapshot('Apply Imposition', true);
+      await this.executeDocumentMutation('Apply Imposition', 0, () => {
+        this.store.pageTransforms = {};
+        this.service.loadDocumentFromBuffer(imposedBuffer);
+        this.store.fileName = newFileName;
+        this.store.currentPageIndex = 0;
+        this.store.pageCount = this.service.document.getPageCount();
+        this.store.clearSelection();
+        this.store.pageVersions = {};
+      });
     }
   }
 
@@ -3355,21 +3360,283 @@ export class EditorActions {
   async updateDocumentMetadata(updates: DocumentMetadataUpdate): Promise<void> {
     if (!this.store.isDocumentLoaded) return;
     try {
-      const { bytes } = await this.service.document.updateMetadata(updates);
-      const buffer = bytes.buffer.slice(
-        bytes.byteOffset,
-        bytes.byteOffset + bytes.byteLength
-      ) as ArrayBuffer;
+      await this.executeDocumentMutation('Update Metadata', this.store.currentPageIndex, async () => {
+        const { bytes } = await this.service.document.updateMetadata(updates);
+        const buffer = bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength
+        ) as ArrayBuffer;
 
-      if (this.store.activeWorkspaceFileId) {
-        setFileBuffer(this.store.activeWorkspaceFileId, buffer);
-      }
+        if (this.store.activeWorkspaceFileId) {
+          setFileBuffer(this.store.activeWorkspaceFileId, buffer);
+        }
 
-      this.service.loadDocumentFromBuffer(buffer);
-      this.store.incrementRenderVersion();
-      this.recordSnapshot('Update Metadata', true);
+        this.service.loadDocumentFromBuffer(buffer);
+      });
     } catch (err) {
       console.error('Failed to update document metadata:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Adds the currently selected text (or specified parameters) to the document outline.
+   * If level is omitted or set to auto, automatically infers the outline hierarchy level.
+   *
+   * @param options Optional outline configuration overrides.
+   */
+  async addTextToOutline(options?: {
+    title?: string;
+    pageIndex?: number;
+    level?: number;
+    destY?: number;
+    oldTitle?: string;
+  }): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+
+    const selectedSpan = this.store.selectedSpan?.type === 'text' ? (this.store.selectedSpan as EditableTextSpan) : null;
+    const canvasElement = this.canvasStore?.selectedElement?.kind === 'text' ? (this.canvasStore.selectedElement as TextElement) : null;
+
+    const resolvedText = (
+      options?.title ||
+      selectedSpan?.text ||
+      canvasElement?.text ||
+      ''
+    ).trim();
+
+    if (!resolvedText) return;
+
+    const targetPageIndex = options?.pageIndex ?? selectedSpan?.pageIndex ?? (canvasElement?.pageIndex ?? this.store.currentPageIndex);
+
+    let resolvedLevel = options?.level;
+    if (!resolvedLevel || resolvedLevel < 1 || resolvedLevel > 6) {
+      const { inferOutlineLevel } = await import('../services/pdf/operations/outline-ops');
+      const rawLower = (
+        selectedSpan?.rawFontFamily ||
+        selectedSpan?.fontFamily ||
+        canvasElement?.rawFontFamily ||
+        canvasElement?.fontFamily ||
+        ''
+      ).toLowerCase();
+      const isBold =
+        selectedSpan?.fontWeight === 'bold' ||
+        canvasElement?.fontWeight === 'bold' ||
+        rawLower.includes('bold') ||
+        rawLower.includes('black') ||
+        rawLower.includes('heavy') ||
+        rawLower.includes('semibold') ||
+        rawLower.includes('demibold') ||
+        rawLower.includes('extrabold');
+
+      const rawFontSize = selectedSpan?.fontSize ?? canvasElement?.fontSize ?? 12;
+      const fontSize = Math.round(rawFontSize * 10) / 10;
+
+      resolvedLevel = inferOutlineLevel({
+        text: resolvedText,
+        fontSize,
+        isBold,
+      });
+    }
+
+    let resolvedDestY = options?.destY;
+    if (resolvedDestY === undefined) {
+      try {
+        const dims = this.service.document.getPageDimensions(targetPageIndex);
+        const pageH = dims.heightPts;
+        const topY = selectedSpan?.top ?? canvasElement?.y;
+        if (topY !== undefined) {
+          resolvedDestY = Math.max(0, pageH - topY);
+        }
+      } catch {
+        resolvedDestY = undefined;
+      }
+    }
+
+    try {
+      await this.executeDocumentMutation('Add to Outline', targetPageIndex, async () => {
+        const bytes = await this.service.document.addOutlineItem({
+          title: resolvedText,
+          pageIndex: targetPageIndex,
+          level: resolvedLevel!,
+          destY: resolvedDestY,
+          oldTitle: options?.oldTitle,
+        });
+
+        const buffer = bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength
+        ) as ArrayBuffer;
+
+        if (this.store.activeWorkspaceFileId) {
+          setFileBuffer(this.store.activeWorkspaceFileId, buffer);
+        }
+
+        this.service.loadDocumentFromBuffer(buffer);
+      });
+    } catch (err) {
+      console.error('Failed to add text to outline:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Reorders outline items by moving elements from fromIndices to toIndex.
+   *
+   * @param fromIndices Source indices to move.
+   * @param toIndex Target insertion index.
+   */
+  async reorderOutline(fromIndices: number[], toIndex: number): Promise<void> {
+    if (!this.store.isDocumentLoaded || fromIndices.length === 0) return;
+
+    try {
+      await this.executeDocumentMutation('Reorder Outline', this.store.currentPageIndex, async () => {
+        const bytes = await this.service.document.reorderOutline(fromIndices, toIndex);
+        const buffer = bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength
+        ) as ArrayBuffer;
+
+        if (this.store.activeWorkspaceFileId) {
+          setFileBuffer(this.store.activeWorkspaceFileId, buffer);
+        }
+
+        this.service.loadDocumentFromBuffer(buffer);
+      });
+    } catch (err) {
+      console.error('Failed to reorder outline items:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Automatically sorts outline items in natural document reading order (top to bottom).
+   */
+  async sortOutlineTopToBottom(): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+
+    try {
+      await this.executeDocumentMutation('Sort Outline Top to Bottom', this.store.currentPageIndex, async () => {
+        const bytes = await this.service.document.sortOutlineTopToBottom();
+        const buffer = bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength
+        ) as ArrayBuffer;
+
+        if (this.store.activeWorkspaceFileId) {
+          setFileBuffer(this.store.activeWorkspaceFileId, buffer);
+        }
+
+        this.service.loadDocumentFromBuffer(buffer);
+      });
+    } catch (err) {
+      console.error('Failed to sort outline items:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Updates the heading level of an outline item at a given index.
+   *
+   * @param index Flat index of outline item.
+   * @param newLevel Desired heading level (1 to 6).
+   */
+  async updateOutlineItemLevel(index: number, newLevel: number): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+
+    try {
+      await this.executeDocumentMutation('Update Outline Level', this.store.currentPageIndex, async () => {
+        const bytes = await this.service.document.updateOutlineItemLevel(index, newLevel);
+        const buffer = bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength
+        ) as ArrayBuffer;
+
+        if (this.store.activeWorkspaceFileId) {
+          setFileBuffer(this.store.activeWorkspaceFileId, buffer);
+        }
+
+        this.service.loadDocumentFromBuffer(buffer);
+      });
+    } catch (err) {
+      console.error('Failed to update outline item level:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Automatically scans document pages for headings (H1 to H3 by default) and generates an outline.
+   *
+   * @param options Optional extraction configuration.
+   */
+  async generateAutomaticOutline(options?: { maxLevel?: number }): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+
+    const { extractAutomaticOutlineItems } = await import('../services/pdf/operations/outline-ops');
+    const pageCount = this.service.document.getPageCount();
+    const allPageSpans: EditableTextSpan[][] = [];
+    const pageHeights: number[] = [];
+
+    for (let i = 0; i < pageCount; i++) {
+      try {
+        const dims = this.service.document.getPageDimensions(i);
+        pageHeights.push(dims.heightPts);
+        const page = this.service.document.getPage(i);
+        allPageSpans.push(page.extractTextSpans());
+      } catch {
+        pageHeights.push(792);
+        allPageSpans.push([]);
+      }
+    }
+
+    const items = extractAutomaticOutlineItems(allPageSpans, pageHeights, options);
+    if (items.length === 0) return;
+
+    try {
+      await this.executeDocumentMutation('Generate Automatic Outline', this.store.currentPageIndex, async () => {
+        const bytes = await this.service.document.setOutline(items);
+        const buffer = bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength
+        ) as ArrayBuffer;
+
+        if (this.store.activeWorkspaceFileId) {
+          setFileBuffer(this.store.activeWorkspaceFileId, buffer);
+        }
+
+        this.service.loadDocumentFromBuffer(buffer);
+      });
+    } catch (err) {
+      console.error('Failed to generate automatic outline:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Removes an item from the document outline by title.
+   *
+   * @param title Title of the bookmark to remove.
+   * @param pageIndex Optional page index constraint.
+   */
+  async removeOutlineItem(title: string, pageIndex?: number): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    const targetPageIndex = pageIndex ?? this.store.currentPageIndex;
+
+    try {
+      await this.executeDocumentMutation('Remove Outline Item', targetPageIndex, async () => {
+        const bytes = await this.service.document.removeOutlineItem(title, pageIndex);
+        const buffer = bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength
+        ) as ArrayBuffer;
+
+        if (this.store.activeWorkspaceFileId) {
+          setFileBuffer(this.store.activeWorkspaceFileId, buffer);
+        }
+
+        this.service.loadDocumentFromBuffer(buffer);
+      });
+    } catch (err) {
+      console.error('Failed to remove outline item:', err);
       throw err;
     }
   }
@@ -3421,36 +3688,44 @@ export class EditorActions {
     let centerY = 300;
 
     try {
-      const dims = this.service.document.getPage(pageIdx).getDimensions();
-      centerX = Math.max(20, (dims.widthPts - defaultWidth) / 2);
-      centerY = Math.max(20, (dims.heightPts - defaultHeight) / 2);
+      if (this.service.document) {
+        const dims = this.service.document.getPage(pageIdx).getDimensions();
+        centerX = Math.max(20, (dims.widthPts - defaultWidth) / 2);
+        centerY = Math.max(20, (dims.heightPts - defaultHeight) / 2);
+      }
     } catch {
-      // Fallback
+      // Safe fallback
     }
 
-    if (canvasStore) {
-      const elementId = canvasStore.generateId();
-      canvasStore.addElement({
-        id: elementId,
-        kind: 'image',
-        pageIndex: pageIdx,
-        x: centerX,
-        y: centerY,
-        width: defaultWidth,
-        height: defaultHeight,
-        rotation: 0,
-        locked: false,
-        visible: true,
-        flipX: false,
-        flipY: false,
-        src: signature.dataUrl,
-        objectFit: 'contain',
-        opacity: 1,
-      });
-      canvasStore.selectElement(elementId);
-    }
+    const targetCanvasStore = canvasStore ?? this.canvasStore;
 
-    this.store.showEsignDialog = false;
+    try {
+      if (targetCanvasStore) {
+        const elementId = targetCanvasStore.generateId();
+        const newElement: CanvasElement = {
+          id: elementId,
+          kind: 'image',
+          pageIndex: pageIdx,
+          x: centerX,
+          y: centerY,
+          width: defaultWidth,
+          height: defaultHeight,
+          rotation: 0,
+          locked: false,
+          visible: true,
+          flipX: false,
+          flipY: false,
+          src: signature.dataUrl,
+          objectFit: 'contain',
+          opacity: 1,
+        };
+        targetCanvasStore.addElement(newElement);
+        targetCanvasStore.selectElement(elementId);
+        this.pushCommand(new AddElementCommand('Place Signature', newElement));
+      }
+    } finally {
+      this.store.showEsignDialog = false;
+    }
   }
 
   /**
@@ -3471,18 +3746,19 @@ export class EditorActions {
       });
     }
 
-    const signedBytes = await this.service.signActiveDocument(options, this.store.pageTransforms);
+    let signedBytes!: Uint8Array;
+    await this.executeDocumentMutation('Sign Document', this.store.currentPageIndex, async () => {
+      signedBytes = await this.service.signActiveDocument(options, this.store.pageTransforms);
 
-    if (this.store.activeWorkspaceFileId) {
-      const buffer = signedBytes.buffer.slice(
-        signedBytes.byteOffset,
-        signedBytes.byteOffset + signedBytes.byteLength
-      ) as ArrayBuffer;
-      setFileBuffer(this.store.activeWorkspaceFileId, buffer);
-    }
+      if (this.store.activeWorkspaceFileId) {
+        const buffer = signedBytes.buffer.slice(
+          signedBytes.byteOffset,
+          signedBytes.byteOffset + signedBytes.byteLength
+        ) as ArrayBuffer;
+        setFileBuffer(this.store.activeWorkspaceFileId, buffer);
+      }
+    });
 
-    this.store.incrementRenderVersion();
-    this.recordSnapshot('Sign Document', true);
     return signedBytes;
   }
 
@@ -3626,7 +3902,24 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
           if (wIdx > 0) {
             const prev = currentSegmentWords[wIdx - 1];
             const gap = w.left - prev.right;
-            if (gap >= Math.min(prev.fontSize, w.fontSize) * 0.18) {
+            const endsWithWs = UNICODE_TRAILING_WS_REGEX.test(segText);
+            const startsWithWs = UNICODE_LEADING_WS_REGEX.test(w.text);
+            const hasSpace =
+              !endsWithWs &&
+              !startsWithWs &&
+              (Boolean(w.hasPrecedingSpace) || gap >= Math.min(prev.fontSize, w.fontSize) * 0.12 || gap >= 0.5);
+            if (hasSpace) {
+              segText += ' ';
+            }
+          } else if (lineSegments.length > 0) {
+            const prevSeg = lineSegments[lineSegments.length - 1];
+            const endsWithWs = UNICODE_TRAILING_WS_REGEX.test(prevSeg.text);
+            const startsWithWs = UNICODE_LEADING_WS_REGEX.test(w.text);
+            const hasSpace =
+              !endsWithWs &&
+              !startsWithWs &&
+              Boolean(w.hasPrecedingSpace);
+            if (hasSpace) {
               segText += ' ';
             }
           }
@@ -3731,14 +4024,21 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
   const dominantIsBold = isBoldTypography(dominantRawFont, span.fontWeight);
   const dominantIsItalic = isItalicTypography(dominantRawFont, span.fontStyle);
 
+  const advanceBuffer = Math.max(8, Math.round(span.fontSize * 0.5 * 10) / 10);
+  const maxLineWidth = elementLines.reduce(
+    (max, l) => Math.max(max, (l.left || 0) + (l.width || 0)),
+    span.width
+  );
+  const calculatedWidth = Math.ceil(Math.max(span.width, maxLineWidth) + advanceBuffer);
+
   return {
     id,
     kind: 'text',
     pageIndex: span.pageIndex,
     x: span.left,
     y: span.top,
-    width: span.width,
-    height: span.height,
+    width: calculatedWidth,
+    height: Math.ceil(span.height + 2),
     rotation: span.rotation || 0,
     locked: false,
     visible: true,
