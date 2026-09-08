@@ -2327,98 +2327,132 @@ export class EditorActions {
     });
   }
 
-  /**
-   * Redacts text across the specified rectangles on a page.
-   * Alias for redactArea.
-   *
-   * @param pageIndex Zero-based page index.
-   * @param rects Array of bounding rectangles in DOM coordinates.
-   * @param canvasStore The canvas store to add blackout elements to.
-   */
-  redactText(pageIndex: number, rects: HighlightRect[], canvasStore: CanvasStore): void {
-    this.redactArea(pageIndex, rects, canvasStore);
+  openPageScaleDialog(): void {
+    this.store.openPageScaleDialog();
   }
 
-
-  // -- Helper for bulk operations --
-  
-  private getTargetPageIndices(defaultIndex: number): number[] {
-    const selection = useSelection();
-    const selectedPageIds = Array.from(selection.selectedIds).filter((id: string) => id.startsWith('page_'));
-    
-    if (selectedPageIds.length > 0) {
-      const indices = selectedPageIds.map((id: string) => parseInt(id.replace('page_', ''), 10));
-      // Sort descending to ensure safe mutations (deletions and insertions won't shift indices of earlier pages)
-      return indices.sort((a, b) => b - a);
-    }
-    return [defaultIndex];
+  closePageScaleDialog(): void {
+    this.store.closePageScaleDialog();
   }
 
-  // -- Page operations --
-
-  rotatePage(index: number): void {
+  async scalePage(
+    pageIndex: number,
+    options: Omit<ScalePageOptions, 'pageIndices'>,
+    scope: PageScaleScope = 'current',
+  ): Promise<void> {
     if (!this.store.isDocumentLoaded) return;
-    const indices = this.getTargetPageIndices(index);
-    for (const idx of indices) {
-      this.service.document.getPage(idx).rotate(90);
-      if (this.store.pageTransforms[idx]) {
-        this.store.pageTransforms[idx].rotation = 0;
+    const fileId = this.store.activeWorkspaceFileId;
+    if (!fileId) return;
+
+    let targetIndices: number[];
+    if (scope === 'all') {
+      targetIndices = Array.from({ length: this.store.pageCount }, (_, i) => i);
+    } else if (scope === 'selected') {
+      targetIndices = this.getTargetPageIndices(pageIndex);
+    } else {
+      targetIndices = [pageIndex];
+    }
+
+    if (targetIndices.length === 0) return;
+
+    const fullScaleOptions: ScalePageOptions = {
+      ...options,
+      pageIndices: targetIndices,
+    };
+
+    await this.executeDocumentMutation('Scale Page', pageIndex, async () => {
+      const activeBuffer = getFileBuffer(fileId);
+      const buffer = activeBuffer ?? this.service.document.save();
+      const scaledBytes = await scalePages(buffer, fullScaleOptions);
+
+      const scaledBuffer = scaledBytes.buffer.slice(
+        scaledBytes.byteOffset,
+        scaledBytes.byteOffset + scaledBytes.byteLength,
+      ) as ArrayBuffer;
+
+      // Snapshot original page dimensions before document buffer is reloaded
+      const originalPageDims = new Map<number, { width: number; height: number }>();
+      for (const idx of targetIndices) {
+        const dims = this.getPageDimensions(idx);
+        originalPageDims.set(idx, { width: dims.widthPts, height: dims.heightPts });
       }
-      this.store.incrementPageVersion(idx);
-    }
-    this.refreshDocument();
-    this.recordSnapshot('Rotate Page', true);
-  }
 
-  flattenPage(index: number): void {
-    if (!this.store.isDocumentLoaded) return;
-    const indices = this.getTargetPageIndices(index);
-    for (const idx of indices) {
-      this.service.document.getPage(idx).flatten();
-      this.store.incrementPageVersion(idx);
-    }
-    this.recordSnapshot('Flatten Page', true);
-  }
+      this.service.loadDocumentFromBuffer(scaledBuffer);
 
-  async rasterizePage(index: number): Promise<void> {
-    if (!this.store.isDocumentLoaded) return;
-    const indices = this.getTargetPageIndices(index);
-    
-    try {
-      for (const idx of indices) {
-        // Render at 3x scale for high-quality rasterization
-        const blob = await this.service.document.getPage(idx).exportAsBlob('jpeg', 3.0);
-        const buffer = await blob.arrayBuffer();
-        
-        await this.service.document.importImageAsPage(buffer, 'image/jpeg', idx);
-        this.service.document.deletePage(idx + 1);
+      // Re-project canvas overlay elements to match scaled or margin-padded geometry
+      if (this.canvasStore && this.canvasStore.elements.length > 0) {
+        const metricsLookup = (idx: number) => {
+          return originalPageDims.get(idx) ?? { width: 595.28, height: 841.89 };
+        };
+        this.canvasStore.elements = transformCanvasElementsForScale(
+          this.canvasStore.elements,
+          targetIndices,
+          metricsLookup,
+          fullScaleOptions,
+        );
+      }
+
+      this.clearSelection(true);
+      if (this.canvasStore) {
+        this.canvasStore.selectElement(null);
+        this.canvasStore.clearDragState();
+        this.canvasStore.hoveredElementId = null;
+      }
+      for (const idx of targetIndices) {
         this.store.incrementPageVersion(idx);
       }
-      this.refreshDocument();
-      useSelection().clear();
-      this.recordSnapshot('Rasterize Page', true);
-    } catch (err) {
-      console.error('Failed to rasterize pages:', err);
-    }
+    });
   }
+
+  /**
+   * Retrieve unscaled dimensions in points for a given page.
+   *
+   * @param pageIndex Zero-based page index.
+   */
+  getPageDimensions(pageIndex: number): { widthPts: number; heightPts: number } {
+    if (!this.service.document) {
+      return { widthPts: 595.28, heightPts: 841.89 };
+    }
+    return this.service.document.getPageDimensions(pageIndex);
+  }
+
 
   /**
    * Remap page indices across canvas elements, page transforms, and page versions
    * after a structural page operation.
    *
    * @param indexMap A function mapping old page indices to new page indices, or -1 for deleted pages.
+   * @param duplicateCopies Optional array of source and target page index pairs for duplicated pages.
    */
-  private remapPageIndices(indexMap: (oldIndex: number) => number): void {
-    if (!this.canvasStore) return;
-
-    // Remap canvas elements, removing those on deleted pages.
-    this.canvasStore.elements = this.canvasStore.elements
-      .map(el => {
+  private remapPageIndices(
+    indexMap: (oldIndex: number) => number,
+    duplicateCopies?: Array<{ sourceIndex: number; targetIndex: number }>,
+  ): void {
+    if (this.canvasStore) {
+      // Remap canvas elements, removing those on deleted pages.
+      const remappedElements: CanvasElement[] = [];
+      for (const el of this.canvasStore.elements) {
         const newIndex = indexMap(el.pageIndex);
-        if (newIndex < 0) return null;
-        return newIndex === el.pageIndex ? el : { ...el, pageIndex: newIndex };
-      })
-      .filter((el): el is CanvasElement => el !== null);
+        if (newIndex >= 0) {
+          remappedElements.push(newIndex === el.pageIndex ? el : { ...el, pageIndex: newIndex });
+        }
+      }
+
+      // Clone canvas elements for duplicated pages
+      if (duplicateCopies && duplicateCopies.length > 0) {
+        for (const copy of duplicateCopies) {
+          const sourceElements = this.canvasStore.elements.filter(el => el.pageIndex === copy.sourceIndex);
+          for (const el of sourceElements) {
+            remappedElements.push({
+              ...safeClone(el),
+              id: this.canvasStore.generateId(),
+              pageIndex: copy.targetIndex,
+            });
+          }
+        }
+      }
+      this.canvasStore.elements = remappedElements;
+    }
 
     // Remap page transforms.
     const oldTransforms = this.store.pageTransforms;
@@ -2426,7 +2460,15 @@ export class EditorActions {
     for (const [key, value] of Object.entries(oldTransforms)) {
       const newIndex = indexMap(Number(key));
       if (newIndex >= 0) {
-        newTransforms[newIndex] = value;
+        newTransforms[newIndex] = { ...value };
+      }
+    }
+    if (duplicateCopies && duplicateCopies.length > 0) {
+      for (const copy of duplicateCopies) {
+        const sourceTransform = oldTransforms[copy.sourceIndex];
+        if (sourceTransform) {
+          newTransforms[copy.targetIndex] = { ...sourceTransform };
+        }
       }
     }
     this.store.pageTransforms = newTransforms;
@@ -2440,62 +2482,95 @@ export class EditorActions {
         newVersions[newIndex] = value;
       }
     }
+    if (duplicateCopies && duplicateCopies.length > 0) {
+      for (const copy of duplicateCopies) {
+        newVersions[copy.targetIndex] = 1;
+      }
+    }
     this.store.pageVersions = newVersions;
   }
 
-  deletePage(index: number): void {
+  async deletePage(index: number): Promise<void> {
     if (!this.store.isDocumentLoaded || this.store.pageCount <= 1) return;
     const indices = this.getTargetPageIndices(index);
-    
-    for (const idx of indices) {
-      if (this.service.document.getPageCount() <= 1) break; // Cannot delete the last page
-      this.service.document.deletePage(idx);
-      const deletedIndex = idx;
-      this.remapPageIndices((old) => {
-        if (old === deletedIndex) return -1;
-        if (old > deletedIndex) return old - 1;
-        return old;
-      });
-    }
-    
-    this.store.currentPageIndex = Math.max(0, Math.min(this.store.currentPageIndex, this.service.document.getPageCount() - 1));
-    this.refreshDocument();
+    const deletedSet = new Set(indices);
+    const indexMap = (oldIdx: number) => {
+      if (deletedSet.has(oldIdx)) return -1;
+      let shift = 0;
+      for (const d of deletedSet) {
+        if (d < oldIdx) shift++;
+      }
+      return oldIdx - shift;
+    };
+    const targetPage = Math.max(0, Math.min(this.store.currentPageIndex, this.store.pageCount - indices.length - 1));
+
+    await this.executeDocumentMutation('Delete Page', targetPage, () => {
+      for (const idx of [...indices].sort((a, b) => b - a)) {
+        if (this.service.document.getPageCount() <= 1) break;
+        this.service.document.deletePage(idx);
+      }
+    }, indexMap);
+
     useSelection().clear();
-    this.recordSnapshot('Delete Page', true);
   }
 
-  addBlankPage(afterIndex: number): void {
+  async addBlankPage(afterIndex: number): Promise<void> {
     if (!this.store.isDocumentLoaded) return;
     const indices = this.getTargetPageIndices(afterIndex);
-    for (const idx of indices) {
-      this.service.document.addBlankPage(idx + 1);
-      const atIndex = idx + 1;
-      this.remapPageIndices((old) => old >= atIndex ? old + 1 : old);
-    }
-    this.refreshDocument();
+    const sortedIndices = [...indices].sort((a, b) => a - b);
+    const insertAfter = sortedIndices[sortedIndices.length - 1];
+    const targetIndex = insertAfter + 1;
+    const indexMap = (old: number) => (old >= targetIndex ? old + 1 : old);
+
+    await this.executeDocumentMutation('Add Blank Page', targetIndex, () => {
+      this.service.document.addBlankPage(targetIndex);
+    }, indexMap);
+
     useSelection().clear();
-    this.recordSnapshot('Add Blank Page', true);
   }
 
-  duplicatePage(index: number): void {
+  async duplicatePage(index: number | number[]): Promise<void> {
     if (!this.store.isDocumentLoaded) return;
-    const indices = this.getTargetPageIndices(index);
-    for (const idx of indices) {
-      this.service.document.duplicatePage(idx);
-    }
-    this.refreshDocument();
+    const initialIndex = Array.isArray(index) ? index[0] : index;
+    const rawIndices = Array.isArray(index) ? index : this.getTargetPageIndices(initialIndex);
+    const sortedIndices = Array.from(new Set(rawIndices)).sort((a, b) => b - a);
+    const targetIndex = initialIndex + 1;
+
+    const indexMap = (old: number) => {
+      let shift = 0;
+      for (const idx of sortedIndices) {
+        if (old > idx) shift++;
+      }
+      return old + shift;
+    };
+
+    const duplicateCopies = sortedIndices.map((idx) => ({
+      sourceIndex: idx,
+      targetIndex: indexMap(idx) + 1,
+    }));
+
+    await this.executeDocumentMutation(
+      'Duplicate Page',
+      targetIndex,
+      () => {
+        for (const idx of sortedIndices) {
+          this.service.document.duplicatePage(idx);
+        }
+      },
+      indexMap,
+      false,
+      duplicateCopies,
+    );
+
     useSelection().clear();
-    this.recordSnapshot('Duplicate Page', true);
   }
 
-  reorderPages(fromIndices: number[], toIndex: number): void {
+
+
+  async reorderPages(fromIndices: number[], toIndex: number): Promise<void> {
     if (!this.store.isDocumentLoaded || fromIndices.length === 0) return;
-    
-    const activePage = this.store.currentPageIndex;
-    
-    this.service.document.reorderPages(fromIndices, toIndex);
-    
-    this.remapPageIndices((old) => {
+
+    const indexMap = (old: number) => {
       if (fromIndices.includes(old)) {
         const sortedFrom = [...fromIndices].sort((a, b) => a - b);
         const offset = sortedFrom.indexOf(old);
@@ -2509,31 +2584,32 @@ export class EditorActions {
         }
         return newIdx;
       }
-    });
+    };
 
-    this.refreshDocument();
-    
-    // Update active page tracking so viewer doesn't jump
-    if (fromIndices.includes(activePage)) {
+    let newActivePage = this.store.currentPageIndex;
+    if (fromIndices.includes(newActivePage)) {
       const sortedFrom = [...fromIndices].sort((a, b) => a - b);
-      const offset = sortedFrom.indexOf(activePage);
-      this.store.currentPageIndex = toIndex + offset;
+      const offset = sortedFrom.indexOf(newActivePage);
+      newActivePage = toIndex + offset;
     } else {
-      let newIdx = activePage;
-      const removedBefore = fromIndices.filter(i => i < activePage).length;
+      let newIdx = newActivePage;
+      const removedBefore = fromIndices.filter(i => i < newActivePage).length;
       newIdx -= removedBefore;
       if (toIndex <= newIdx) {
         newIdx += fromIndices.length;
       }
-      this.store.currentPageIndex = newIdx;
+      newActivePage = newIdx;
     }
-    
+
+    await this.executeDocumentMutation('Reorder Pages', newActivePage, () => {
+      this.service.document.reorderPages(fromIndices, toIndex);
+    }, indexMap);
+
     const selection = useSelection();
     selection.clear();
     for (let i = 0; i < fromIndices.length; i++) {
       selection.select(`page_${toIndex + i}`, true, false);
     }
-    this.recordSnapshot('Reorder Pages', true);
   }
 
   mergePdfFromFile(file: File, atIndex: number): void {
@@ -2542,37 +2618,54 @@ export class EditorActions {
 
   async mergePdfsFromFiles(files: File[], atIndex: number): Promise<void> {
     try {
-      let currentIndex = atIndex;
-      for (const file of files) {
-        const buf = await file.arrayBuffer();
-        const previousPageCount = this.store.pageCount;
-        this.service.document.merge(buf, currentIndex);
-        this.store.pageCount = this.service.document.getPageCount();
-        currentIndex += (this.store.pageCount - previousPageCount);
-      }
-      this.refreshDocument();
-      this.recordSnapshot('Merge PDF', true);
+      await this.executeDocumentMutation('Merge Files', atIndex, async () => {
+        let currentIndex = atIndex;
+        for (const file of files) {
+          const buf = await file.arrayBuffer();
+          const previousPageCount = this.store.pageCount;
+          if (isImageFile(buf, file.name) || file.type.startsWith('image/')) {
+            await this.service.document.importImageAsPage(
+              buf,
+              file.type || inferImageMimeType(file.name),
+              currentIndex,
+            );
+          } else {
+            this.service.document.merge(buf, currentIndex);
+          }
+          this.store.pageCount = this.service.document.getPageCount();
+          currentIndex += (this.store.pageCount - previousPageCount);
+        }
+      });
     } catch (err) {
-      console.error('Failed to merge PDF files:', err);
+      console.error('Failed to merge files:', err);
     }
   }
 
   async importImagesFromFiles(files: File[], atIndex: number): Promise<void> {
     try {
-      let currentIndex = atIndex;
-      for (const file of files) {
-        const buf = await file.arrayBuffer();
-        this.service.document.importImageAsPage(buf, file.type, currentIndex);
-        currentIndex++;
-      }
-      this.refreshDocument();
-      this.recordSnapshot('Import Image Page', true);
+      await this.executeDocumentMutation('Import Image Page', atIndex, async () => {
+        let currentIndex = atIndex;
+        for (const file of files) {
+          const buf = await file.arrayBuffer();
+          await this.service.document.importImageAsPage(
+            buf,
+            file.type || inferImageMimeType(file.name),
+            currentIndex,
+          );
+          currentIndex++;
+        }
+      });
     } catch (err) {
       console.error('Failed to import images as pages:', err);
     }
   }
 
-  async extractPages(indices: number[], mode: 'split' | 'extract', rangeString: string): Promise<void> {
+  async extractPages(
+    indices: number[],
+    mode: 'split' | 'extract',
+    rangeString: string,
+    options?: { autoDownload?: boolean }
+  ): Promise<{ splitBytes: Uint8Array; newFileName: string } | void> {
     if (!this.store.isDocumentLoaded) return;
     
     try {
@@ -2580,10 +2673,12 @@ export class EditorActions {
       const splitBuffer = splitBytes.buffer.slice(splitBytes.byteOffset, splitBytes.byteOffset + splitBytes.byteLength) as ArrayBuffer;
       
       if (mode === 'split') {
-        const sortedIndices = [...indices].sort((a, b) => b - a);
-        for (const idx of sortedIndices) {
-          if (this.service.document.getPageCount() > 1) {
-            this.service.document.deletePage(idx);
+        await this.executeDocumentMutation('Split Document', this.store.currentPageIndex, () => {
+          const sortedIndices = [...indices].sort((a, b) => b - a);
+          for (const idx of sortedIndices) {
+            if (this.service.document.getPageCount() > 1) {
+              this.service.document.deletePage(idx);
+            }
           }
         }
         this.store.pageCount = this.service.document.getPageCount();
