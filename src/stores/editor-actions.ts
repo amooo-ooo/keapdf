@@ -1195,15 +1195,41 @@ export class EditorActions {
     if (this.store.inlineEdit) {
       this.submitInlineEdit();
     }
+    const oldToolId = this.store.activeTool;
+    if (this.toolRegistry && this._canvasActions) {
+      const ctx = this.getToolContext();
+      this.toolRegistry.get(oldToolId)?.onDeactivate?.(ctx);
+    }
     this.store.activeTool = tool;
+    if (this.toolRegistry && this._canvasActions) {
+      const ctx = this.getToolContext();
+      this.toolRegistry.get(tool)?.onActivate?.(ctx);
+    }
     this.store.clearSelection();
-    this.store.incrementRenderVersion();
   }
 
   // -- Zoom --
 
-  setZoom(zoom: number): void {
-    this.store.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom));
+  setZoom(zoom: number, isContinuous: boolean = false): void {
+    const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom));
+    this.store.zoom = clamped;
+
+    if (isContinuous) {
+      this.store.isZooming = true;
+      if (this.zoomDebounceTimer) {
+        clearTimeout(this.zoomDebounceTimer);
+      }
+      this.zoomDebounceTimer = setTimeout(() => {
+        this.store.isZooming = false;
+        this.zoomDebounceTimer = null;
+      }, 150);
+    } else {
+      if (this.zoomDebounceTimer) {
+        clearTimeout(this.zoomDebounceTimer);
+        this.zoomDebounceTimer = null;
+      }
+      this.store.isZooming = false;
+    }
   }
 
   zoomIn(): void {
@@ -1218,6 +1244,16 @@ export class EditorActions {
     this.setZoom(1.0);
   }
 
+  /**
+   * Cleans up any active timers and listeners owned by actions.
+   */
+  destroy(): void {
+    if (this.zoomDebounceTimer) {
+      clearTimeout(this.zoomDebounceTimer);
+      this.zoomDebounceTimer = null;
+    }
+  }
+
   // -- Text & Object editing --
 
   /**
@@ -1227,8 +1263,21 @@ export class EditorActions {
    * @param commitActiveEdit Whether to submit active inline edits before clearing.
    */
   clearSelection(commitActiveEdit: boolean = true): void {
-    if (commitActiveEdit && this.store.inlineEdit) {
-      this.submitInlineEdit();
+    if (commitActiveEdit) {
+      this.commitActiveEdits();
+    } else {
+      if (typeof window !== 'undefined' && typeof window.getSelection === 'function') {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+          sel.removeAllRanges();
+        }
+      }
+      if (typeof document !== 'undefined' && document.activeElement) {
+        const el = document.activeElement as { blur?: () => void };
+        if (typeof el.blur === 'function') {
+          el.blur();
+        }
+      }
     }
     this.store.clearSelection();
   }
@@ -1244,17 +1293,46 @@ export class EditorActions {
     if (this.store.inlineEdit) {
       this.submitInlineEdit();
     }
-    if (span.type === 'text' && this.store.isDocumentLoaded) {
+    if (span.type === 'text' && !(span as EditableTextSpan).isOcr && this.store.isDocumentLoaded) {
       try {
         const pageSpans = this.service.document.getPage(span.pageIndex).extractTextSpans();
-        const freshSpan = pageSpans.find(
-          (s) => s.id === span.id || (Math.abs(s.left - span.left) < 20 && Math.abs(s.top - span.top) < 20)
-        );
-        this.store.selectedSpan = freshSpan || span;
+        let freshSpan = pageSpans.find((s) => s.id === span.id);
+        if (!freshSpan) {
+          let minDistance = Infinity;
+          for (const s of pageSpans) {
+            const dist = Math.hypot(s.left - span.left, s.top - span.top);
+            if (dist <= 8.0 && dist < minDistance) {
+              minDistance = dist;
+              freshSpan = s;
+            }
+          }
+        }
+        const resolved = freshSpan || span;
+        if (resolved.type === 'text') {
+          const fontCandidate = (resolved as EditableTextSpan).rawFontFamily || (resolved as EditableTextSpan).fontFamily;
+          if (fontCandidate) {
+            const match = findClosestGoogleFont(fontCandidate);
+            if (match && match.confidence >= 0.65) {
+              (resolved as EditableTextSpan).matchedFontFamily = match.font;
+              loadGoogleFont(match.font);
+            }
+          }
+        }
+        this.store.selectedSpan = resolved;
       } catch {
         this.store.selectedSpan = span;
       }
     } else {
+      if (span.type === 'text') {
+        const fontCandidate = (span as EditableTextSpan).rawFontFamily || (span as EditableTextSpan).fontFamily;
+        if (fontCandidate) {
+          const match = findClosestGoogleFont(fontCandidate);
+          if (match && match.confidence >= 0.65) {
+            (span as EditableTextSpan).matchedFontFamily = match.font;
+            loadGoogleFont(match.font);
+          }
+        }
+      }
       this.store.selectedSpan = span;
     }
     this.store.inlineEdit = null;
@@ -1276,16 +1354,32 @@ export class EditorActions {
     }
 
     let targetSpan = span;
-    if (this.store.isDocumentLoaded) {
+    if (this.store.isDocumentLoaded && !span.isOcr) {
       try {
         const pageSpans = this.service.document.getPage(span.pageIndex).extractTextSpans();
-        const freshSpan = pageSpans.find(
-          (s) => s.id === span.id || (Math.abs(s.left - span.left) < 20 && Math.abs(s.top - span.top) < 20)
-        );
+        let freshSpan = pageSpans.find((s) => s.id === span.id);
+        if (!freshSpan) {
+          let minDistance = Infinity;
+          for (const s of pageSpans) {
+            const dist = Math.hypot(s.left - span.left, s.top - span.top);
+            if (dist <= 8.0 && dist < minDistance) {
+              minDistance = dist;
+              freshSpan = s;
+            }
+          }
+        }
         if (freshSpan) {
           targetSpan = freshSpan;
         }
       } catch {}
+    }
+
+    const fontCandidate = targetSpan.rawFontFamily || targetSpan.fontFamily;
+    const match = fontCandidate ? findClosestGoogleFont(fontCandidate) : null;
+    const matchedFontFamily = match && match.confidence >= 0.65 ? match.font : undefined;
+    if (matchedFontFamily) {
+      targetSpan.matchedFontFamily = matchedFontFamily;
+      loadGoogleFont(matchedFontFamily);
     }
 
     this.store.selectedSpan = targetSpan;
@@ -1293,6 +1387,7 @@ export class EditorActions {
       spanId: targetSpan.id,
       textValue: targetSpan.text,
       span: { ...targetSpan },
+      matchedFontFamily,
     };
 
     if (this.store.isDocumentLoaded) {
@@ -1301,7 +1396,6 @@ export class EditorActions {
         this.store.hiddenSpanIds.add(targetSpan.id);
         this.service.document.invalidatePage(targetSpan.pageIndex);
         this.store.incrementPageVersion(targetSpan.pageIndex);
-        this.refreshDocument();
       } catch (err) {
         console.error('Failed to hide text span during inline edit:', err);
       }
@@ -1335,6 +1429,53 @@ export class EditorActions {
     const textValue = extractedData?.text ?? inlineEdit.textValue;
     const customLines = extractedData?.lines ?? inlineEdit.styledLines;
 
+    if (span.isOcr) {
+      const isMultiLine = Boolean(
+        span.isParagraph ||
+        (span.lines && span.lines.length > 1) ||
+        (customLines && customLines.length > 1) ||
+        textValue.includes('\n')
+      );
+
+      const prevOptions: TextMutationOptions = {
+        text: span.text,
+        fontSize: span.fontSize,
+        fontFamily: span.fontFamily,
+        color: span.color,
+        backgroundColor: span.backgroundColor,
+        underline: span.underline,
+        strikethrough: span.strikethrough,
+        lineHeight: span.lineHeight,
+        fontWeight: span.fontWeight,
+        fontStyle: span.fontStyle,
+        left: span.left,
+        top: span.top,
+        lines: span.lines,
+        reflowParagraph: isMultiLine,
+      };
+
+      const newOptions: TextMutationOptions = {
+        text: textValue,
+        fontSize: span.fontSize,
+        fontFamily: span.fontFamily,
+        color: span.color,
+        backgroundColor: span.backgroundColor,
+        underline: span.underline,
+        strikethrough: span.strikethrough,
+        lineHeight: span.lineHeight,
+        fontWeight: span.fontWeight,
+        fontStyle: span.fontStyle,
+        lines: customLines || span.lines,
+        reflowParagraph: isMultiLine,
+      };
+
+      this.executeCommand(
+        new ReplaceOcrTextCommand('Edit Scanned Text', span.pageIndex, span, prevOptions, newOptions)
+      );
+      this.refreshDocument();
+      return;
+    }
+
     if (textValue.trim().length > 0) {
       // Detect if span or custom lines have mixed font sizes across lines or words
       const hasMixedFontSize =
@@ -1343,31 +1484,55 @@ export class EditorActions {
         (customLines && customLines.some((l) => Math.abs(l.fontSize - customLines[0].fontSize) > 0.2)) ||
         (customLines && customLines.some((l) => l.words && l.words.some((w) => Math.abs(w.fontSize - l.words[0].fontSize) > 0.2)));
 
-      this.applyTextMutation(
-        {
-          text: textValue,
-          fontSize: hasMixedFontSize ? undefined : span.fontSize,
-          fontFamily: span.fontFamily,
-          color: span.color,
-          lineHeight: span.lineHeight,
-          fontWeight: span.fontWeight,
-          fontStyle: span.fontStyle,
-          lines: customLines || span.lines,
-          reflowParagraph: true,
-        },
-        span,
-        false
+      const isMultiLine = Boolean(
+        span.isParagraph ||
+        (span.lines && span.lines.length > 1) ||
+        (customLines && customLines.length > 1) ||
+        textValue.includes('\n')
       );
-      this.recordSnapshot('Edit Text', true);
+
+      const prevOptions: TextMutationOptions = {
+        text: span.text,
+        fontSize: span.fontSize,
+        fontFamily: span.fontFamily,
+        color: span.color,
+        backgroundColor: span.backgroundColor,
+        underline: span.underline,
+        strikethrough: span.strikethrough,
+        lineHeight: span.lineHeight,
+        fontWeight: span.fontWeight,
+        fontStyle: span.fontStyle,
+        left: span.left,
+        top: span.top,
+        lines: span.lines,
+        reflowParagraph: isMultiLine,
+      };
+
+      const newOptions: TextMutationOptions = {
+        text: textValue,
+        fontSize: hasMixedFontSize ? undefined : span.fontSize,
+        fontFamily: span.fontFamily,
+        color: span.color,
+        backgroundColor: span.backgroundColor,
+        underline: span.underline,
+        strikethrough: span.strikethrough,
+        lineHeight: span.lineHeight,
+        fontWeight: span.fontWeight,
+        fontStyle: span.fontStyle,
+        lines: customLines || span.lines,
+        reflowParagraph: isMultiLine,
+      };
+
+      this.executeCommand(
+        new ReplaceTextCommand('Edit Text', span.pageIndex, span, prevOptions, newOptions)
+      );
     } else {
       // Emptied paragraph: delete and shift downstream lines up
-      this.service.document.getPage(span.pageIndex).deleteTextSpan(span);
-      this.service.document.invalidatePage(span.pageIndex);
-      this.store.clearSelection();
-      this.store.incrementPageVersion(span.pageIndex);
-      this.refreshDocument();
-      this.recordSnapshot('Delete Text', true);
+      this.executeCommand(
+        new DeleteTextCommand('Delete Text', span.pageIndex, span)
+      );
     }
+    this.refreshDocument();
   }
 
   /**
@@ -1380,10 +1545,16 @@ export class EditorActions {
       this.store.hiddenSpanIds.delete(inlineEdit.spanId);
       this.store.inlineEdit = null;
 
+      if (span.isOcr) {
+        this.store.incrementPageVersion(span.pageIndex);
+        this.refreshDocument();
+        return;
+      }
+
       if (this.store.isDocumentLoaded) {
         try {
-          const charsetIndex = this.service.document.fontCharsetIndex;
-          this.service.document.getPage(span.pageIndex).replaceTextSpan(
+          this.service.document.replaceTextSpan(
+            span.pageIndex,
             span,
             {
               text: span.text,
@@ -1393,10 +1564,8 @@ export class EditorActions {
               lineHeight: span.lineHeight,
               fontWeight: span.fontWeight,
               fontStyle: span.fontStyle,
-            },
-            charsetIndex
+            }
           );
-          this.service.document.invalidatePage(span.pageIndex);
           this.store.incrementPageVersion(span.pageIndex);
           this.refreshDocument();
         } catch (err) {
@@ -1410,46 +1579,260 @@ export class EditorActions {
     const spanToMutate = targetSpan || (this.store.selectedSpan?.type === 'text' ? this.store.selectedSpan as EditableTextSpan : undefined);
     if (!spanToMutate || spanToMutate.type !== 'text' || !this.store.isDocumentLoaded) return;
     const pageIndex = spanToMutate.pageIndex;
-    const charsetIndex = this.service.document.fontCharsetIndex;
-    this.service.document.getPage(pageIndex).replaceTextSpan(spanToMutate, options, charsetIndex);
-    this.service.document.invalidatePage(pageIndex);
-    this.store.incrementPageVersion(pageIndex);
-    this.refreshDocument();
 
-    try {
-      const updatedSpans = this.service.document.getPage(pageIndex).extractTextSpans();
-      const targetLeft = options.left !== undefined ? options.left : spanToMutate.left;
-      const matchingSpan = updatedSpans.find(
-        (s) => Math.abs(s.left - targetLeft) < 25 && Math.abs(s.top - spanToMutate.top) < 25
+    const prevOptions: TextMutationOptions = {
+      text: spanToMutate.text,
+      fontSize: spanToMutate.fontSize,
+      fontFamily: spanToMutate.fontFamily,
+      color: spanToMutate.color,
+      lineHeight: spanToMutate.lineHeight,
+      letterSpacing: spanToMutate.letterSpacing,
+      fontWeight: spanToMutate.fontWeight,
+      fontStyle: spanToMutate.fontStyle,
+      underline: spanToMutate.underline,
+      strikethrough: spanToMutate.strikethrough,
+      backgroundColor: spanToMutate.backgroundColor,
+      textAlign: spanToMutate.textAlign,
+      left: spanToMutate.left,
+      top: spanToMutate.top,
+      lines: spanToMutate.lines,
+      reflowParagraph: true,
+    };
+
+    if (spanToMutate.isOcr) {
+      const cmd = new ReplaceOcrTextCommand(
+        'Change Scanned Text Style',
+        pageIndex,
+        spanToMutate,
+        prevOptions,
+        options,
       );
-      if (matchingSpan) {
-        this.store.selectedSpan = matchingSpan;
+      if (recordHistory) {
+        this.executeCommand(cmd);
       } else {
-        this.store.clearSelection();
+        cmd.execute(this.getCommandContext());
       }
-    } catch {
-      this.store.clearSelection();
+      this.refreshDocument();
+      return;
     }
+
+    const cmd = new ReplaceTextCommand(
+      'Change Text Style',
+      pageIndex,
+      spanToMutate,
+      prevOptions,
+      options,
+    );
 
     if (recordHistory) {
-      this.recordSnapshot('Change Text Style', true);
+      this.executeCommand(cmd);
+    } else {
+      cmd.execute(this.getCommandContext());
     }
+    this.refreshDocument();
   }
 
-  deleteSelectedSpan(): void {
+  async deleteSelectedSpan(): Promise<void> {
     const { selectedSpan } = this.store;
     if (!selectedSpan || !this.store.isDocumentLoaded) return;
     
     if (selectedSpan.type === 'text') {
-      this.service.document.getPage(selectedSpan.pageIndex).deleteTextSpan(selectedSpan);
-    } else {
-      this.service.document.getPage(selectedSpan.pageIndex).removeObject(selectedSpan.pdfObjectIndex);
+      const textSpan = selectedSpan as EditableTextSpan;
+      if (textSpan.isOcr) {
+        await this.executeCommand(
+          new ReplaceOcrTextCommand('Delete Scanned Text', textSpan.pageIndex, textSpan, {
+            text: textSpan.text,
+            fontSize: textSpan.fontSize,
+            fontFamily: textSpan.fontFamily,
+          }, {
+            text: '',
+          })
+        );
+      } else {
+        await this.executeCommand(
+          new DeleteTextCommand('Delete Text', selectedSpan.pageIndex, selectedSpan)
+        );
+      }
+    } else if (selectedSpan.type === 'form-field') {
+      const fieldSpan = selectedSpan as EditableFormFieldSpan;
+      const fieldName = fieldSpan.fieldName || fieldSpan.name || fieldSpan.fieldId;
+      const commands: Command[] = [
+        new HideSpanCommand('Hide Form Field', fieldSpan.id),
+      ];
+      if (fieldName) {
+        commands.push(new RemoveAcroFormFieldCommand('Remove Native Form Field', fieldName));
+      }
+      await this.executeCommand(new CompoundCommand('Delete Form Field', commands));
+      this.store.clearSelection();
+    } else if ('pdfObjectIndex' in selectedSpan && typeof selectedSpan.pdfObjectIndex === 'number') {
+      await this.executeDocumentMutation('Delete Object', selectedSpan.pageIndex, () => {
+        this.service.document.getPage(selectedSpan.pageIndex).removeObject(selectedSpan.pdfObjectIndex);
+        this.service.document.invalidatePage(selectedSpan.pageIndex);
+        this.store.clearSelection();
+        this.store.incrementPageVersion(selectedSpan.pageIndex);
+      });
     }
-    this.service.document.invalidatePage(selectedSpan.pageIndex);
-    this.store.clearSelection();
-    this.store.incrementPageVersion(selectedSpan.pageIndex);
     this.refreshDocument();
-    this.recordSnapshot('Delete PDF Object', true);
+  }
+
+  /**
+   * Deletes the currently selected canvas element if one is selected.
+   */
+  deleteSelectedElement(): void {
+    if (this._canvasActions) {
+      this._canvasActions.deleteSelectedElement();
+      return;
+    }
+    const id = this.canvasStore?.selectedElementId;
+    if (id && this.canvasStore) {
+      const el = this.canvasStore.elements.find((item) => item.id === id);
+      if (el && !el.locked) {
+        const kind = el.kind ?? 'Element';
+        const index = this.canvasStore.elements.findIndex((item) => item.id === id);
+        const snapshot = safeClone(el);
+        this.canvasStore.removeElement(id);
+        this.pushCommand(new RemoveElementCommand(`Delete ${kind}`, id, snapshot, index));
+      }
+    }
+  }
+
+  /**
+   * Deletes the currently active selection across canvas elements and PDF layer spans.
+   * Prioritizes canvas layer elements, falling back to selected PDF spans.
+   */
+  async deleteSelected(): Promise<void> {
+    if (this.canvasStore?.selectedElementId) {
+      this.deleteSelectedElement();
+      return;
+    }
+    if (this.store.hasSelection) {
+      await this.deleteSelectedSpan();
+      return;
+    }
+  }
+
+  /**
+   * Erases an individual annotation candidate across canvas or PDF layers.
+   * Returns an undo command if a canvas element was deleted, or null if handled by PDF mutation.
+   */
+  async eraseCandidate(candidate: ErasableCandidate): Promise<Command | null> {
+    const targetElementId = candidate.canvasElementId || candidate.canvasElement?.id;
+    if (candidate.source === 'canvas' && targetElementId && this.canvasStore) {
+      const el = this.canvasStore.getElementById(targetElementId);
+      if (el && !el.locked) {
+        const kind = el.kind ?? 'Element';
+        const index = this.canvasStore.elements.findIndex((item) => item.id === el.id);
+        const snapshot = safeClone(el) as CanvasElement;
+        this.canvasStore.removeElement(el.id);
+        return new RemoveElementCommand(`Erase ${kind}`, el.id, snapshot, index);
+      }
+      return null;
+    }
+
+    if (candidate.source === 'pdf-annotation' && typeof candidate.pdfAnnotIndex === 'number') {
+      if (this.service?.document) {
+        const page = this.service.document.getPage(candidate.pageIndex);
+        page.removeAnnotation(candidate.pdfAnnotIndex);
+        page.generateContent();
+        this.service.document.invalidatePage(candidate.pageIndex);
+        this.store.incrementPageVersion(candidate.pageIndex);
+        this.refreshDocument();
+      }
+      return null;
+    }
+
+    if (candidate.source === 'pdf-shape' && typeof candidate.pdfObjectIndex === 'number') {
+      if (this.service?.document) {
+        const page = this.service.document.getPage(candidate.pageIndex);
+        page.removeObject(candidate.pdfObjectIndex);
+        page.generateContent();
+        this.service.document.invalidatePage(candidate.pageIndex);
+        this.store.incrementPageVersion(candidate.pageIndex);
+        this.refreshDocument();
+      }
+      return null;
+    }
+
+    if (candidate.source === 'pdf-text-highlight' && candidate.pdfSpanId) {
+      if (this.service?.document) {
+        const page = this.service.document.getPage(candidate.pageIndex);
+        const textSpans = page.extractTextSpans();
+        const targetSpan = textSpans.find((s) => s.id === candidate.pdfSpanId);
+        if (targetSpan) {
+          targetSpan.backgroundColor = undefined;
+          if (targetSpan.lines) {
+            for (const line of targetSpan.lines) {
+              line.backgroundColor = undefined;
+              if (line.words) {
+                for (const word of line.words) {
+                  word.backgroundColor = undefined;
+                }
+              }
+            }
+          }
+          this.service.document.replaceTextSpan(candidate.pageIndex, targetSpan, {
+            text: targetSpan.text,
+            fontSize: targetSpan.fontSize,
+            fontFamily: targetSpan.fontFamily,
+            color: targetSpan.color,
+            backgroundColor: undefined,
+          });
+          page.generateContent();
+          this.service.document.invalidatePage(candidate.pageIndex);
+          this.store.incrementPageVersion(candidate.pageIndex);
+          this.refreshDocument();
+        }
+      }
+      return null;
+    }
+
+    return null;
+  }
+
+  /**
+   * Commits an eraser gesture stroke with unified undo/redo history support.
+   */
+  commitEraserStroke(
+    pageIndex: number,
+    canvasCommands: Command[],
+    hadPdfMutations: boolean,
+    prevBuffer?: ArrayBuffer,
+    prevElements?: CanvasElement[]
+  ): void {
+    const fileId = this.store.activeWorkspaceFileId;
+    if (hadPdfMutations && fileId && prevBuffer && this.service?.document) {
+      try {
+        const newBufferRaw = this.service.document.save();
+        const newBuffer = newBufferRaw.buffer.slice(
+          newBufferRaw.byteOffset,
+          newBufferRaw.byteOffset + newBufferRaw.byteLength
+        ) as ArrayBuffer;
+        setFileBuffer(fileId, newBuffer);
+        const newElements = this.canvasStore ? safeClone(this.canvasStore.elements) : [];
+
+        this.pushCommand(
+          new MutateDocumentCommand(
+            'Erase Annotations',
+            fileId,
+            prevBuffer,
+            newBuffer,
+            pageIndex,
+            pageIndex,
+            prevElements,
+            newElements
+          )
+        );
+        return;
+      } catch (err) {
+        console.error('Failed to commit PDF eraser stroke:', err);
+      }
+    }
+
+    if (canvasCommands.length === 1) {
+      this.pushCommand(canvasCommands[0]);
+    } else if (canvasCommands.length > 1) {
+      this.pushCommand(new CompoundCommand('Erase Annotations', canvasCommands));
+    }
   }
 
   /**
