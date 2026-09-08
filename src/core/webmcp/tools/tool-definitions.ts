@@ -1601,3 +1601,531 @@ export function createWebMcpTools(ctx: WebMcpContext): Array<ModelContextTool<Re
         }
       );
 
+      return {
+        ok: true,
+        result: {
+          proposalId: proposal.id,
+          preview: proposal.preview,
+        },
+      };
+    },
+  });
+
+  // pdf.acceptProposal
+  tools.push({
+    name: 'pdf.acceptProposal',
+    title: 'Accept Staged Proposal',
+    description: 'Accepts and immediately applies a staged proposal.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        proposalId: { type: 'string' },
+      },
+      required: ['proposalId'],
+    },
+    execute: async (input): Promise<WebMcpResponse<unknown>> => {
+      const proposalId = typeof input.proposalId === 'string' ? input.proposalId : '';
+      try {
+        const result = await ctx.proposalStore.acceptProposal(proposalId);
+        return {
+          ok: true,
+          result,
+        };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          error: {
+            code: 'NODE_NOT_FOUND',
+            message,
+          },
+        };
+      }
+    },
+  });
+
+  // pdf.rejectProposal
+  tools.push({
+    name: 'pdf.rejectProposal',
+    title: 'Reject Staged Proposal',
+    description: 'Discards a staged proposal without applying changes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        proposalId: { type: 'string' },
+      },
+      required: ['proposalId'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ proposalId: string; status: string }>> => {
+      const proposalId = typeof input.proposalId === 'string' ? input.proposalId : '';
+      const rejected = ctx.proposalStore.rejectProposal(proposalId);
+
+      if (!rejected) {
+        return {
+          ok: false,
+          error: {
+            code: 'NODE_NOT_FOUND',
+            message: `Proposal "${proposalId}" not found.`,
+          },
+        };
+      }
+
+      return {
+        ok: true,
+        result: { proposalId, status: 'rejected' },
+      };
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // 4. Capability Tool (Section 6.7 & Section 9)
+  // ---------------------------------------------------------------------------
+
+  // pdf.getCapabilities
+  tools.push({
+    name: 'pdf.getCapabilities',
+    title: 'Get WebMCP Capabilities',
+    description: 'Returns the supported WebMCP specification version, tool capabilities, and structure source.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    execute: async (): Promise<WebMcpResponse<{
+      specVersion: string;
+      activeDocument: {
+        fileName: string;
+        fileId: string | null;
+        pageCount: number;
+        currentPageIndex: number;
+        isLoaded: boolean;
+      };
+      workspace: {
+        activeFileId: string | null;
+        activeFileName: string;
+        totalFiles: number;
+      };
+      tools: Array<{ name: string; version: string }>;
+      structureSource: string;
+    }>> => {
+      const graph = getSdg();
+      const registeredToolList = tools.map((t) => ({
+        name: t.name,
+        version: '1.0.0',
+      }));
+
+      return {
+        ok: true,
+        result: {
+          specVersion: SPEC_VERSION,
+          activeDocument: {
+            fileName: ctx.editorStore.fileName,
+            fileId: ctx.editorStore.activeWorkspaceFileId,
+            pageCount: ctx.pdfDoc.getPageCount(),
+            currentPageIndex: ctx.editorStore.currentPageIndex,
+            isLoaded: ctx.editorStore.isDocumentLoaded,
+          },
+          workspace: {
+            activeFileId: ctx.editorStore.activeWorkspaceFileId,
+            activeFileName: ctx.editorStore.fileName,
+            totalFiles: ctx.editorStore.workspaceFiles.length,
+          },
+          tools: registeredToolList,
+          structureSource: graph?.structureSource || 'synthesised',
+        },
+      };
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // 5. Visual Fallback Tool (Section 6.8)
+  // ---------------------------------------------------------------------------
+
+  // pdf.getPageImage
+  tools.push({
+    name: 'pdf.getPageImage',
+    title: 'Render Page Raster Image',
+    description: 'Renders page raster image data URL as ground truth for visual layout validation.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        page: { type: 'integer', description: 'Zero-indexed page number.' },
+        maxWidthPx: { type: 'integer', default: 1200, description: 'Maximum raster width in pixels.' },
+      },
+      required: ['page'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ page: number; imageDataUrl: string; readingOrderConfidence: number }>> => {
+      const pageIndex = typeof input.page === 'number' ? input.page : 0;
+      const maxWidthPx = typeof input.maxWidthPx === 'number' ? input.maxWidthPx : 1200;
+
+      try {
+        const page = ctx.pdfDoc.getPage(pageIndex);
+        const dims = page.getDimensions();
+        const scale = maxWidthPx / Math.max(dims.widthPts, 1);
+        const renderResult = await page.render(scale);
+        const dataUrl = renderResult.canvas.toDataURL('image/png');
+
+        return {
+          ok: true,
+          result: {
+            page: pageIndex,
+            imageDataUrl: dataUrl,
+            readingOrderConfidence: 0.95,
+          },
+        };
+      } catch (err: unknown) {
+        return {
+          ok: false,
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: `Failed rendering page raster: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        };
+      }
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // 6. Export and History Tools (Section 6.10 & 7.3)
+  // ---------------------------------------------------------------------------
+
+  // pdf.exportDocument
+  tools.push({
+    name: 'pdf.exportDocument',
+    title: 'Export Document State',
+    description: 'Retrieves current document data in PDF, flattened PDF, plain text, or raster images format.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        format: { type: 'string', enum: ['pdf', 'flattened', 'text', 'images'], default: 'pdf' },
+      },
+    },
+    execute: async (input): Promise<WebMcpResponse<{ format: string; byteLength: number; filename: string; text?: string; base64Data?: string; images?: Array<{ pageIndex: number; dataUrl: string }> }>> => {
+      const format = input.format === 'flattened' ? 'flattened' : input.format === 'text' ? 'text' : input.format === 'images' ? 'images' : 'pdf';
+      const filename = ctx.editorStore.fileName || 'document.pdf';
+
+      if (format === 'text') {
+        const pageCount = ctx.pdfDoc.getPageCount();
+        let allText = '';
+        for (let i = 0; i < pageCount; i++) {
+          const spans = ctx.pdfDoc.extractTextSpans(i);
+          const pageText = spans
+            .map((s) => s.text)
+            .filter((t) => t.trim().length > 0)
+            .join('\n');
+          allText += `--- Page ${i + 1} ---\n` + pageText + '\n\n';
+        }
+        return {
+          ok: true,
+          result: {
+            format: 'text',
+            byteLength: allText.length,
+            filename: filename.replace(/\.pdf$/i, '.txt'),
+            text: allText,
+          },
+        };
+      }
+
+      if (format === 'images') {
+        const pageCount = ctx.pdfDoc.getPageCount();
+        const pageImages: Array<{ pageIndex: number; dataUrl: string }> = [];
+        for (let i = 0; i < pageCount; i++) {
+          const page = ctx.pdfDoc.getPage(i);
+          const renderRes = await page.render(1.5, { applyDpr: false });
+          pageImages.push({
+            pageIndex: i,
+            dataUrl: renderRes.canvas.toDataURL('image/png'),
+          });
+        }
+        return {
+          ok: true,
+          result: {
+            format: 'images',
+            byteLength: 0,
+            filename: filename.replace(/\.pdf$/i, '_pages.png'),
+            images: pageImages,
+          },
+        };
+      }
+
+      let bytes: Uint8Array;
+      if (format === 'flattened') {
+        const pageCount = ctx.pdfDoc.getPageCount();
+        for (let p = 0; p < pageCount; p++) {
+          ctx.pdfDoc.flattenPage(p);
+        }
+        bytes = await ctx.pdfDoc.saveAsync();
+      } else {
+        bytes = await ctx.pdfDoc.saveAsync();
+      }
+
+      return {
+        ok: true,
+        result: {
+          format,
+          byteLength: bytes.byteLength,
+          filename,
+          base64Data: uint8ArrayToBase64(bytes),
+        },
+      };
+    },
+  });
+
+  // pdf.getChangeHistory (Section 7.3)
+  tools.push({
+    name: 'pdf.getChangeHistory',
+    title: 'Get Applied Change History',
+    description: 'Returns the history log of applied mutations in the current editing session.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    execute: async (): Promise<WebMcpResponse<{ totalChanges: number; changes: Array<{ description: string }> }>> => {
+      const historyState = ctx.historyStore?.activeCommandState;
+      const changes = historyState?.past.map((cmd) => ({
+        description: cmd.description,
+      })) || [];
+
+      return {
+        ok: true,
+        result: {
+          totalChanges: changes.length,
+          changes,
+        },
+      };
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // Workspace & Multi-Document Lifecycle Tools
+  // ---------------------------------------------------------------------------
+
+  // pdf.convertDocument
+  tools.push({
+    name: 'pdf.convertDocument',
+    title: 'Convert Document to PDF',
+    description: 'Converts an office document (DOCX, XLSX, PPTX, CSV, TSV, Markdown, HTML, JSON, plain text) to a PDF with professional vector layout and typography.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fileName: { type: 'string', description: 'Source document file name including extension (e.g., report.docx, data.xlsx, readme.md).' },
+        base64Data: { type: 'string', description: 'Base64 encoded binary data or text of the source document.' },
+        pageSize: { type: 'string', enum: ['letter', 'a4', 'legal', 'a3', 'a5'], default: 'letter', description: 'Target PDF page size.' },
+        orientation: { type: 'string', enum: ['portrait', 'landscape'], default: 'portrait', description: 'Page orientation.' },
+        margins: {
+          type: 'object',
+          properties: {
+            top: { type: 'number' },
+            bottom: { type: 'number' },
+            left: { type: 'number' },
+            right: { type: 'number' },
+          },
+          description: 'Custom page margins in points (default: 54pt / 0.75in).',
+        },
+        fontSize: { type: 'number', description: 'Base typography font size in points.' },
+        tableGridLines: { type: 'boolean', description: 'Whether to render table gridlines for spreadsheets and data tables.' },
+        loadIntoWorkspace: { type: 'boolean', description: 'Whether to automatically load the converted PDF into the active workspace editor.' },
+      },
+      required: ['fileName', 'base64Data'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ fileName: string; pageCount: number; pdfBase64: string; format: string; durationMs: number }>> => {
+      const fileName = typeof input.fileName === 'string' ? input.fileName : 'document.docx';
+      const base64Data = typeof input.base64Data === 'string' ? input.base64Data : '';
+      if (!base64Data) {
+        return {
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'base64Data parameter is required and cannot be empty.',
+          },
+        };
+      }
+
+      try {
+        const bytes = base64ToUint8Array(base64Data);
+        const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+
+        const options: { -readonly [K in keyof DocumentConversionOptions]?: DocumentConversionOptions[K] } = {};
+        if (typeof input.pageSize === 'string') {
+          options.pageSize = input.pageSize as DocumentConversionOptions['pageSize'];
+        }
+        if (typeof input.orientation === 'string') {
+          options.orientation = input.orientation as DocumentConversionOptions['orientation'];
+        }
+        if (typeof input.margins === 'object' && input.margins !== null) {
+          const m = input.margins as Record<string, unknown>;
+          options.margins = {
+            top: typeof m.top === 'number' ? m.top : 54,
+            bottom: typeof m.bottom === 'number' ? m.bottom : 54,
+            left: typeof m.left === 'number' ? m.left : 54,
+            right: typeof m.right === 'number' ? m.right : 54,
+          };
+        }
+        if (typeof input.fontSize === 'number') {
+          options.fontSize = input.fontSize;
+        }
+        if (typeof input.tableGridLines === 'boolean') {
+          options.includeGridlines = input.tableGridLines;
+        } else if (typeof input.includeGridlines === 'boolean') {
+          options.includeGridlines = input.includeGridlines;
+        }
+
+        const converted = await documentConverter.convertDocument(
+          {
+            name: fileName,
+            buffer,
+          },
+          options,
+        );
+
+        const pdfBase64 = uint8ArrayToBase64(new Uint8Array(converted.buffer));
+
+        if (input.loadIntoWorkspace && ctx.editorActions) {
+          await ctx.editorActions.loadDocumentFromBuffer(converted.buffer, converted.fileName, false);
+          ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        }
+
+        return {
+          ok: true,
+          result: {
+            fileName: converted.fileName,
+            pageCount: converted.pageCount,
+            pdfBase64,
+            format: converted.format || documentConverter.detectFormat(fileName),
+            durationMs: converted.metadata.conversionDurationMs,
+          },
+        };
+      } catch (err: unknown) {
+        return {
+          ok: false,
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: `Failed converting document to PDF: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        };
+      }
+    },
+  });
+
+  // pdf.uploadDocument
+  tools.push({
+    name: 'pdf.uploadDocument',
+    title: 'Upload Document to Workspace',
+    description: 'Uploads and loads a PDF document into the workspace from base64-encoded binary bytes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fileName: { type: 'string', description: 'File name to assign to the document.' },
+        base64Data: { type: 'string', description: 'Base64 encoded PDF binary data.' },
+        addToWorkspace: { type: 'boolean', description: 'Whether to add to workspace alongside existing files.' },
+      },
+      required: ['fileName', 'base64Data'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ fileName: string; pageCount: number; isLoaded: boolean }>> => {
+      const fileName = typeof input.fileName === 'string' ? input.fileName : 'uploaded.pdf';
+      const base64Data = typeof input.base64Data === 'string' ? input.base64Data : '';
+      if (!base64Data) {
+        return {
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'base64Data parameter is required and cannot be empty.',
+          },
+        };
+      }
+
+      try {
+        const bytes = base64ToUint8Array(base64Data);
+        const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+
+        if (ctx.editorActions) {
+          await ctx.editorActions.loadDocumentFromBuffer(buffer, fileName, Boolean(input.addToWorkspace));
+        } else {
+          ctx.pdfDoc.setRawBuffer(buffer);
+        }
+
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+
+        return {
+          ok: true,
+          result: {
+            fileName,
+            pageCount: ctx.pdfDoc.getPageCount(),
+            isLoaded: true,
+          },
+        };
+      } catch (err: unknown) {
+        return {
+          ok: false,
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: `Failed loading PDF document: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        };
+      }
+    },
+  });
+
+  // pdf.listWorkspace
+  tools.push({
+    name: 'pdf.listWorkspace',
+    title: 'List Workspace Documents',
+    description: 'Lists all open PDF documents in the editor workspace, identifying the currently active open document being viewed and edited.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    execute: async (): Promise<WebMcpResponse<{
+      activeFileId: string | null;
+      activeFileName: string;
+      activeDocument: { id: string | null; fileName: string; pageCount: number } | null;
+      totalFiles: number;
+      files: Array<{ id: string; fileName: string; sizeBytes?: number; isActive: boolean }>;
+    }>> => {
+      const files = ctx.editorStore.workspaceFiles.map((f) => ({
+        id: f.id,
+        fileName: f.fileName,
+        sizeBytes: f.sizeBytes,
+        isActive: f.id === ctx.editorStore.activeWorkspaceFileId,
+      }));
+
+      const activeFile = files.find((f) => f.isActive);
+
+      return {
+        ok: true,
+        result: {
+          activeFileId: ctx.editorStore.activeWorkspaceFileId,
+          activeFileName: ctx.editorStore.fileName,
+          activeDocument: activeFile
+            ? {
+                id: activeFile.id,
+                fileName: activeFile.fileName,
+                pageCount: ctx.pdfDoc.getPageCount(),
+              }
+            : null,
+          totalFiles: files.length,
+          files,
+        },
+      };
+    },
+  });
+
+  // pdf.switchDocument
+  tools.push({
+    name: 'pdf.switchDocument',
+    title: 'Switch Active Document',
+    description: 'Switches the active open PDF document in the workspace by fileId or fileName.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fileId: { type: 'string', description: 'Target workspace file identifier (optional if fileName is provided).' },
+        fileName: { type: 'string', description: 'Target workspace file name e.g. "sample.pdf" (optional if fileId is provided).' },
+      },
+    },
+    execute: async (input: { fileId?: string; fileName?: string }): Promise<WebMcpResponse<{ activeFileId: string; fileName: string; pageCount: number }>> => {
+      let fileId = typeof input.fileId === 'string' ? input.fileId.trim() : '';
+
