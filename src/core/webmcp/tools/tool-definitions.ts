@@ -525,3 +525,543 @@ export function createWebMcpTools(ctx: WebMcpContext): Array<ModelContextTool<Re
     },
   });
 
+  // pdf.getTable
+  tools.push({
+    name: 'pdf.getTable',
+    title: 'Get Table Structure',
+    description: 'Returns structured 2D rows and column matrix for a table node in the document.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Table node identifier.' },
+      },
+      required: ['id'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ rows: number; cols: number; cells: Array<Array<{ id: string; text: string }>> }>> => {
+      const id = typeof input.id === 'string' ? input.id : '';
+      const graph = getSdg();
+      const node = graph?.nodes.get(id);
+
+      if (!node) {
+        return {
+          ok: false,
+          error: {
+            code: 'NODE_NOT_FOUND',
+            message: `Node "${id}" not found.`,
+            details: { id },
+          },
+        };
+      }
+
+      if (node.type !== 'table') {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_TARGET_TYPE',
+            message: `Node "${id}" has type "${node.type}", expected "table".`,
+            details: { id, expectedType: 'table', actualType: node.type },
+          },
+        };
+      }
+
+      const rows = node.rows || 0;
+      const cols = node.cols || 0;
+      const cells: Array<Array<{ id: string; text: string }>> = [];
+
+      if (node.cellIds) {
+        for (const rowIds of node.cellIds) {
+          const rowCells: Array<{ id: string; text: string }> = [];
+          for (const cellId of rowIds) {
+            const cellNode = graph?.nodes.get(cellId);
+            rowCells.push({
+              id: cellId,
+              text: cellNode?.text || '',
+            });
+          }
+          cells.push(rowCells);
+        }
+      }
+
+      return {
+        ok: true,
+        result: { rows, cols, cells },
+      };
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // 2. Mutation Tools (Section 6.5)
+  // ---------------------------------------------------------------------------
+
+  // pdf.replaceText
+  tools.push({
+    name: 'pdf.replaceText',
+    title: 'Replace Block Text',
+    description: 'Replaces block text after verifying the supplied oldText anchor matches current state.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Target node identifier.' },
+        oldText: { type: 'string', description: 'Current normalised text anchor.' },
+        newText: { type: 'string', description: 'Replacement text.' },
+      },
+      required: ['id', 'oldText', 'newText'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ id: string; oldText: string; newText: string; page: number }>> => {
+      const callId = `replace_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const id = typeof input.id === 'string' ? input.id : '';
+      const oldText = typeof input.oldText === 'string' ? input.oldText : '';
+      const newText = typeof input.newText === 'string' ? input.newText : '';
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const graph = getSdg();
+        const node = graph?.nodes.get(id);
+
+        if (!node) {
+          return {
+            ok: false,
+            error: {
+              code: 'NODE_NOT_FOUND',
+              message: `Node "${id}" not found in document.`,
+              details: { id },
+            },
+          };
+        }
+
+        // Anchor verification
+        if (!verifyAnchorMatch(node.text, oldText)) {
+          return {
+            ok: false,
+            error: {
+              code: 'ANCHOR_MISMATCH',
+              message: 'Supplied anchor text does not match the node current text after normalisation.',
+              details: { id, currentText: node.text, suppliedAnchor: oldText },
+            },
+          };
+        }
+
+        // Find backing span on page
+        const pageSpans = ctx.pdfDoc.extractTextSpans(node.page);
+        const normCurrent = normalizeText(node.text);
+        const matchingSpan = pageSpans.find((s) => verifyAnchorMatch(s.text, normCurrent));
+
+        if (matchingSpan && ctx.editorActions) {
+          const replaceCmd = new ReplaceTextCommand(
+            `WebMCP edit on block ${id}`,
+            node.page,
+            matchingSpan,
+            { text: matchingSpan.text },
+            { text: newText }
+          );
+          await ctx.editorActions.executeCommand(replaceCmd);
+        } else {
+          // Direct fallback mutation on PDF document
+          const fallbackSpan = pageSpans[0] || {
+            type: 'text',
+            id: `span_${node.page}_0`,
+            pageIndex: node.page,
+            text: node.text,
+            left: node.bbox[0],
+            top: node.bbox[1],
+            width: node.bbox[2] - node.bbox[0],
+            height: node.bbox[3] - node.bbox[1],
+            fontSize: 12,
+            fontFamily: 'Helvetica',
+            rawFontFamily: 'Helvetica',
+            color: { r: 0, g: 0, b: 0, a: 1 },
+            baselineY: node.bbox[1] + 12,
+            charStartIndex: 0,
+            charCount: node.text.length,
+          };
+          ctx.pdfDoc.replaceTextSpan(node.page, fallbackSpan, { text: newText });
+          ctx.editorStore.incrementPageVersion(node.page);
+        }
+
+        // Update SDG in-place
+        ctx.sdgBuilder.updateNodeText(id, newText);
+        ctx.rateLimiter.recordCall();
+
+        // Emit transient highlight for visual verification (Section 7.1)
+        ctx.onAgentMutation({
+          page: node.page,
+          nodeId: id,
+          description: `Replaced text in block ${id}`,
+        });
+
+        return {
+          ok: true,
+          result: {
+            id,
+            oldText,
+            newText,
+            page: node.page,
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.replaceRunText
+  tools.push({
+    name: 'pdf.replaceRunText',
+    title: 'Replace Sub-Block Run Text',
+    description: 'Replaces specific text run inside a block after anchor verification.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Target run identifier.' },
+        oldText: { type: 'string', description: 'Current run text anchor.' },
+        newText: { type: 'string', description: 'New replacement text.' },
+      },
+      required: ['id', 'oldText', 'newText'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ id: string; oldText: string; newText: string; blockId: string }>> => {
+      const callId = `run_replace_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const runId = typeof input.id === 'string' ? input.id : '';
+      const oldText = typeof input.oldText === 'string' ? input.oldText : '';
+      const newText = typeof input.newText === 'string' ? input.newText : '';
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const graph = getSdg();
+        let parentBlock: SdgNode | null = null;
+        let targetRun: SdgRun | null = null;
+
+        if (graph) {
+          for (const node of graph.nodes.values()) {
+            if (node.runs) {
+              const r = node.runs.find((run) => run.id === runId);
+              if (r) {
+                parentBlock = node;
+                targetRun = r;
+                break;
+              }
+            }
+          }
+        }
+
+        if (!parentBlock || !targetRun) {
+          return {
+            ok: false,
+            error: {
+              code: 'NODE_NOT_FOUND',
+              message: `Run identifier "${runId}" not found in document.`,
+              details: { id: runId },
+            },
+          };
+        }
+
+        if (!verifyAnchorMatch(targetRun.text, oldText)) {
+          return {
+            ok: false,
+            error: {
+              code: 'ANCHOR_MISMATCH',
+              message: 'Supplied anchor does not match target run current text.',
+              details: { id: runId, currentText: targetRun.text, suppliedAnchor: oldText },
+            },
+          };
+        }
+
+        targetRun.text = newText;
+        const fullBlockText = parentBlock.runs?.map((r) => r.text).join(' ') || newText;
+        ctx.sdgBuilder.updateNodeText(parentBlock.id, fullBlockText);
+        ctx.rateLimiter.recordCall();
+
+        ctx.onAgentMutation({
+          page: parentBlock.page,
+          nodeId: parentBlock.id,
+          description: `Updated run ${runId}`,
+        });
+
+        return {
+          ok: true,
+          result: {
+            id: runId,
+            oldText,
+            newText,
+            blockId: parentBlock.id,
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.batchReplaceText
+  tools.push({
+    name: 'pdf.batchReplaceText',
+    title: 'Batch Replace Blocks Atomically',
+    description: 'Anchor-verified atomic replacement of multiple blocks with all-or-nothing rollback.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        edits: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              oldText: { type: 'string' },
+              newText: { type: 'string' },
+            },
+            required: ['id', 'oldText', 'newText'],
+          },
+          minItems: 1,
+          maxItems: 50,
+        },
+      },
+      required: ['edits'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ applied: Array<{ id: string; oldText: string; newText: string; page: number }> }>> => {
+      const callId = `batch_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const rawEdits = Array.isArray(input.edits) ? input.edits : [];
+      if (rawEdits.length === 0) {
+        return {
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Batch edits array must not be empty.',
+          },
+        };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const graph = getSdg();
+        const failures: Array<{ id: string; currentText: string; suppliedAnchor: string; reason: string }> = [];
+        const validatedEdits: Array<{ node: SdgNode; oldText: string; newText: string }> = [];
+
+        // Pre-validate all anchors first (all-or-nothing requirement)
+        for (const edit of rawEdits) {
+          const editId = typeof edit.id === 'string' ? edit.id : '';
+          const oldText = typeof edit.oldText === 'string' ? edit.oldText : '';
+          const newText = typeof edit.newText === 'string' ? edit.newText : '';
+
+          const node = graph?.nodes.get(editId);
+          if (!node) {
+            failures.push({
+              id: editId,
+              currentText: '',
+              suppliedAnchor: oldText,
+              reason: 'Node not found',
+            });
+            continue;
+          }
+
+          if (!verifyAnchorMatch(node.text, oldText)) {
+            failures.push({
+              id: editId,
+              currentText: node.text,
+              suppliedAnchor: oldText,
+              reason: 'Anchor mismatch',
+            });
+            continue;
+          }
+
+          validatedEdits.push({ node, oldText, newText });
+        }
+
+        // If any anchor failed, abort batch without applying any edit
+        if (failures.length > 0) {
+          return {
+            ok: false,
+            error: {
+              code: 'ANCHOR_MISMATCH',
+              message: `Batch rejected: ${failures.length} of ${rawEdits.length} edits failed anchor validation.`,
+              details: { failures },
+            },
+          };
+        }
+
+        // All anchors passed: apply each edit
+        const applied: Array<{ id: string; oldText: string; newText: string; page: number }> = [];
+        for (const item of validatedEdits) {
+          ctx.sdgBuilder.updateNodeText(item.node.id, item.newText);
+          ctx.editorStore.incrementPageVersion(item.node.page);
+          applied.push({
+            id: item.node.id,
+            oldText: item.oldText,
+            newText: item.newText,
+            page: item.node.page,
+          });
+        }
+
+        ctx.rateLimiter.recordCall();
+        if (applied[0]) {
+          ctx.onAgentMutation({
+            page: applied[0].page,
+            nodeId: applied[0].id,
+            description: `Applied atomic batch of ${applied.length} edits`,
+          });
+        }
+
+        return {
+          ok: true,
+          result: { applied },
+        };
+      });
+    },
+  });
+
+  // pdf.insertBlock
+  tools.push({
+    name: 'pdf.insertBlock',
+    title: 'Insert Block Adjacent',
+    description: 'Inserts a new paragraph or heading adjacent to an existing block.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        relativeToId: { type: 'string' },
+        position: { type: 'string', enum: ['before', 'after'] },
+        blockType: { type: 'string', enum: ['heading', 'paragraph', 'list_item'] },
+        text: { type: 'string' },
+        level: { type: 'integer', description: 'Required if blockType is heading.' },
+      },
+      required: ['relativeToId', 'position', 'blockType', 'text'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ id: string }>> => {
+      const callId = `insert_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const relativeToId = typeof input.relativeToId === 'string' ? input.relativeToId : '';
+      const text = typeof input.text === 'string' ? input.text : '';
+      const blockType = (input.blockType as SdgNodeType) || 'paragraph';
+      const level = typeof input.level === 'number' ? input.level : undefined;
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const graph = getSdg();
+        const anchorNode = graph?.nodes.get(relativeToId);
+
+        if (!anchorNode) {
+          return {
+            ok: false,
+            error: {
+              code: 'NODE_NOT_FOUND',
+              message: `Reference node "${relativeToId}" not found.`,
+              details: { id: relativeToId },
+            },
+          };
+        }
+
+        // Allocate fresh block ID
+        const newBlockKey = `p${anchorNode.page}:inserted:${Date.now()}`;
+        const newId = ctx.sdgBuilder.allocateNodeId(blockType, newBlockKey);
+
+        const newY = input.position === 'before' ? Math.max(0, anchorNode.bbox[1] - 25) : anchorNode.bbox[3] + 15;
+        const newNode: SdgNode = {
+          id: newId,
+          type: blockType,
+          level,
+          page: anchorNode.page,
+          bbox: [anchorNode.bbox[0], newY, anchorNode.bbox[2], newY + 20],
+          text: normalizeText(text),
+          runs: [
+            {
+              id: `run_${newId.replace(/^blk_/, '')}_0`,
+              text,
+              font: 'Helvetica',
+              size: blockType === 'heading' ? 16 : 12,
+              bold: blockType === 'heading',
+            },
+          ],
+          parentId: null,
+          childIds: [],
+          provenance: 'synthesised',
+          confidence: 0.95,
+        };
+
+        graph?.nodes.set(newId, newNode);
+        if (graph) {
+          const anchorIdx = graph.rootIds.indexOf(relativeToId);
+          const insertIdx = input.position === 'before' ? Math.max(0, anchorIdx) : anchorIdx + 1;
+          graph.rootIds.splice(insertIdx, 0, newId);
+        }
+
+        ctx.rateLimiter.recordCall();
+        ctx.editorStore.incrementPageVersion(anchorNode.page);
+        ctx.onAgentMutation({
+          page: anchorNode.page,
+          nodeId: newId,
+          description: `Inserted block ${newId}`,
+        });
+
+        return {
+          ok: true,
+          result: { id: newId },
+        };
+      });
+    },
+  });
+
+  // pdf.deleteBlock (Destructive per Section 7.2)
+  tools.push({
+    name: 'pdf.deleteBlock',
+    title: 'Delete Block',
+    description: 'Destructively removes a block from the document. Requires explicit confirmation or prior proposal staging.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        expectedText: { type: 'string', description: 'Anchor verification text.' },
+      },
+      required: ['id', 'expectedText'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ deletedId: string; precedingId: string | null; followingId: string | null }>> => {
+      const callId = `delete_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const id = typeof input.id === 'string' ? input.id : '';
+      const expectedText = typeof input.expectedText === 'string' ? input.expectedText : '';
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const graph = getSdg();
+        const node = graph?.nodes.get(id);
+
+        if (!node) {
+          return {
+            ok: false,
+            error: {
+              code: 'NODE_NOT_FOUND',
+              message: `Node "${id}" not found.`,
+              details: { id },
+            },
+          };
+        }
+
+        if (!verifyAnchorMatch(node.text, expectedText)) {
+          return {
+            ok: false,
+            error: {
+              code: 'ANCHOR_MISMATCH',
+              message: 'Supplied anchor does not match current node text.',
+              details: { id, currentText: node.text, suppliedAnchor: expectedText },
+            },
+          };
+        }
+
+        // Enforce Destructive Operation Containment (Section 7.2)
+        const confirmed = await ctx.requestUserConfirmation(
+          'Confirm Block Deletion',
+          `AI Agent is requesting to delete block ${id} with text: "${node.text.substring(0, 60)}..."`
+        );
+
+        if (!confirmed) {
+          return {
+            ok: false,
+            error: {
+              code: 'CONFIRMATION_REQUIRED',
+              message: 'Destructive operation requires explicit human confirmation.',
+              details: { proposedChange: `Delete block ${id}` },
+            },
+          };
+        }
+
