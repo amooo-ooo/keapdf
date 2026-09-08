@@ -1846,13 +1846,13 @@ export class EditorActions {
    * @param rects Array of bounding rectangles in DOM coordinates.
    * @param canvasStore The canvas store to add blackout elements to.
    */
-  redactTextRange(
+  async redactTextRange(
     pageIndex: number,
     startCharIndex: number,
     endCharIndex: number,
     rects: HighlightRect[],
     canvasStore: CanvasStore
-  ): void {
+  ): Promise<void> {
     if (!this.store.isDocumentLoaded || rects.length === 0) return;
 
     if (isSyntheticCanvasCharIndex(startCharIndex) || isSyntheticCanvasCharIndex(endCharIndex)) {
@@ -1872,43 +1872,121 @@ export class EditorActions {
           .map((ch, idx) => (idx >= minOffset && idx <= maxOffset ? ' ' : ch))
           .join('');
 
-        canvasStore.updateElement(targetElement.id, {
-          text: updatedText,
-        });
+        const oldProps: Partial<TextElement> = { text: targetElement.text };
+        const newProps: Partial<TextElement> = { text: updatedText };
+
+        if (targetElement.lines && targetElement.lines.length > 0) {
+          oldProps.lines = safeClone(targetElement.lines);
+          const updatedLines: TextElementLine[] = safeClone(targetElement.lines);
+          let offset = 0;
+          for (const line of updatedLines) {
+            if (line.segments && line.segments.length > 0) {
+              for (const seg of line.segments) {
+                const segChars = Array.from(seg.text);
+                const updatedSegText = segChars
+                  .map((ch, sIdx) => {
+                    const currentGlobal = offset + sIdx;
+                    return currentGlobal >= minOffset && currentGlobal <= maxOffset ? ' ' : ch;
+                  })
+                  .join('');
+                seg.text = updatedSegText;
+                offset += segChars.length;
+              }
+            } else if (line.text) {
+              const lineChars = Array.from(line.text);
+              const updatedLineText = lineChars
+                .map((ch, lIdx) => {
+                  const currentGlobal = offset + lIdx;
+                  return currentGlobal >= minOffset && currentGlobal <= maxOffset ? ' ' : ch;
+                })
+                .join('');
+              line.text = updatedLineText;
+              offset += lineChars.length;
+            }
+            if (offset < targetElement.text.length) {
+              if (targetElement.text[offset] === '\r' && targetElement.text[offset + 1] === '\n') {
+                offset += 2;
+              } else if (targetElement.text[offset] === '\n') {
+                offset += 1;
+              }
+            }
+          }
+          newProps.lines = updatedLines;
+        }
+
+        const addedCommands: Command[] = [
+          new UpdateElementPropertyCommand(
+            'Redact Canvas Text',
+            targetElement.id,
+            oldProps,
+            newProps,
+          ),
+        ];
+
+        canvasStore.updateElement(targetElement.id, newProps);
+
+        for (const rect of rects) {
+          if (rect.width > 0 && rect.height > 0) {
+            const blackoutShape: ShapeElement = {
+              id: canvasStore.generateId(),
+              kind: 'shape',
+              variant: 'rectangle',
+              pageIndex,
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+              rotation: targetElement.rotation || 0,
+              locked: false,
+              visible: true,
+              flipX: false,
+              flipY: false,
+              fill: '#000000',
+              stroke: '#000000',
+              strokeWidth: 0,
+              opacity: 1.0,
+            };
+            canvasStore.addElement(blackoutShape);
+            addedCommands.push(new AddElementCommand('Redact Area', blackoutShape, false));
+          }
+        }
+
+        if (addedCommands.length === 1) {
+          this.pushCommand(addedCommands[0]);
+        } else if (addedCommands.length > 1) {
+          this.pushCommand(new CompoundCommand('Redact Canvas Text', addedCommands));
+        }
       }
     } else {
-      // Redaction targeting raw PDFium content stream
-      const page = this.service.document.getPage(pageIndex);
-      page.redactTextRange(startCharIndex, endCharIndex);
-      this.service.document.invalidatePage(pageIndex);
-    }
+      await this.executeDocumentMutation('Redact Text', pageIndex, () => {
+        this.service.document.redactTextRange(pageIndex, startCharIndex, endCharIndex);
 
-    for (const rect of rects) {
-      canvasStore.addElement({
-        id: canvasStore.generateId(),
-        kind: 'shape',
-        variant: 'rectangle',
-        pageIndex,
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-        rotation: 0,
-        locked: false,
-        visible: true,
-        flipX: false,
-        flipY: false,
-        fill: '#000000',
-        stroke: '#000000',
-        strokeWidth: 0,
-        opacity: 1.0,
+        for (const rect of rects) {
+          canvasStore.addElement({
+            id: canvasStore.generateId(),
+            kind: 'shape',
+            variant: 'rectangle',
+            pageIndex,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            rotation: 0,
+            locked: false,
+            visible: true,
+            flipX: false,
+            flipY: false,
+            fill: '#000000',
+            stroke: '#000000',
+            strokeWidth: 0,
+            opacity: 1.0,
+          });
+        }
       });
     }
 
     this.store.clearSelection();
     this.store.incrementPageVersion(pageIndex);
-    this.refreshDocument();
-    this.recordSnapshot('Redact Text', true);
   }
 
   /**
@@ -1920,64 +1998,333 @@ export class EditorActions {
    * @param rects Array of bounding rectangles in DOM coordinates.
    * @param canvasStore The canvas store to add blackout elements to.
    */
-  redactArea(pageIndex: number, rects: HighlightRect[], canvasStore: CanvasStore): void {
+  async redactArea(pageIndex: number, rects: HighlightRect[], canvasStore: CanvasStore): Promise<void> {
     if (!this.store.isDocumentLoaded || rects.length === 0) return;
 
-    const page = this.service.document.getPage(pageIndex);
-    page.deleteTextInRects(rects);
-    this.service.document.invalidatePage(pageIndex);
+    await this.executeDocumentMutation('Redact Area', pageIndex, () => {
+      this.service.document.deleteTextInRects(pageIndex, rects);
 
-    // Purge or remove canvas elements on this page that are fully covered by any redaction rect
-    const pageElements = canvasStore.getElementsByPage(pageIndex);
-    for (const el of pageElements) {
-      if (el.kind === 'shape' && (el as any).fill === '#000000' && (el as any).strokeWidth === 0) {
-        continue; // preserve existing blackout rectangles
+      // Purge or remove canvas elements on this page that are fully covered by any redaction rect
+      const pageElements = canvasStore.getElementsByPage(pageIndex);
+      for (const el of pageElements) {
+        if (el.kind === 'shape' && el.fill === '#000000' && el.strokeWidth === 0) {
+          continue; // preserve existing blackout rectangles
+        }
+        for (const rect of rects) {
+          const elRight = el.x + el.width;
+          const elBottom = el.y + el.height;
+          const rectRight = rect.x + rect.width;
+          const rectBottom = rect.y + rect.height;
+
+          const isFullyCovered =
+            el.x >= rect.x - 2 &&
+            el.y >= rect.y - 2 &&
+            elRight <= rectRight + 2 &&
+            elBottom <= rectBottom + 2;
+
+          if (isFullyCovered) {
+            canvasStore.removeElement(el.id);
+            break;
+          }
+        }
       }
+
       for (const rect of rects) {
-        const elRight = el.x + el.width;
-        const elBottom = el.y + el.height;
-        const rectRight = rect.x + rect.width;
-        const rectBottom = rect.y + rect.height;
+        canvasStore.addElement({
+          id: canvasStore.generateId(),
+          kind: 'shape',
+          variant: 'rectangle',
+          pageIndex,
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+          rotation: 0,
+          locked: false,
+          visible: true,
+          flipX: false,
+          flipY: false,
+          fill: '#000000',
+          stroke: '#000000',
+          strokeWidth: 0,
+          opacity: 1.0,
+        });
+      }
+    });
 
-        const isFullyCovered =
-          el.x >= rect.x - 2 &&
-          el.y >= rect.y - 2 &&
-          elRight <= rectRight + 2 &&
-          elBottom <= rectBottom + 2;
+    this.store.clearSelection();
+    this.store.incrementPageVersion(pageIndex);
+  }
 
-        if (isFullyCovered) {
-          canvasStore.removeElement(el.id);
-          break;
+  /**
+   * Redacts text across the specified rectangles on a page.
+   * Alias for redactArea.
+   *
+   * @param pageIndex Zero-based page index.
+   * @param rects Array of bounding rectangles in DOM coordinates.
+   * @param canvasStore The canvas store to add blackout elements to.
+   */
+  async redactText(pageIndex: number, rects: HighlightRect[], canvasStore: CanvasStore): Promise<void> {
+    await this.redactArea(pageIndex, rects, canvasStore);
+  }
+
+
+  // -- Helper for bulk operations --
+  
+  private getTargetPageIndices(defaultIndex: number): number[] {
+    const selection = useSelection();
+    const selectedPageIds = Array.from(selection.selectedIds).filter((id: string) => id.startsWith('page_'));
+    
+    if (selectedPageIds.length > 0) {
+      const indices = selectedPageIds.map((id: string) => parseInt(id.replace('page_', ''), 10));
+      // Sort descending to ensure safe mutations (deletions and insertions won't shift indices of earlier pages)
+      return indices.sort((a, b) => b - a);
+    }
+    return [defaultIndex];
+  }
+
+  // -- Page operations --
+
+  rotatePage(index: number): void {
+    if (!this.store.isDocumentLoaded) return;
+    const indices = this.getTargetPageIndices(index);
+    if (indices.length === 1) {
+      this.executeCommand(new RotatePageCommand('Rotate Page', indices[0], 90));
+    } else {
+      const commands = indices.map((idx) => new RotatePageCommand('Rotate Page', idx, 90));
+      this.executeCommand(new CompoundCommand('Rotate Pages', commands));
+    }
+    this.refreshDocument();
+  }
+
+  async flattenPage(index: number): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    const indices = this.getTargetPageIndices(index);
+    await this.executeDocumentMutation('Flatten Page', this.store.currentPageIndex, () => {
+      for (const idx of indices) {
+        this.service.document.flattenPage(idx);
+      }
+    });
+  }
+
+  async rasterizePage(index: number): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    const indices = this.getTargetPageIndices(index);
+    
+    try {
+      await this.executeDocumentMutation('Rasterize Page', this.store.currentPageIndex, async () => {
+        for (const idx of indices) {
+          // Render at 3x scale for high-quality rasterization
+          const blob = await this.service.document.getPage(idx).exportAsBlob('jpeg', 3.0);
+          const buffer = await blob.arrayBuffer();
+          
+          await this.service.document.importImageAsPage(buffer, 'image/jpeg', idx);
+          this.service.document.deletePage(idx + 1);
+        }
+      });
+      useSelection().clear();
+    } catch (err) {
+      console.error('Failed to rasterize pages:', err);
+    }
+  }
+
+  // -- Page Crop operations --
+
+  startCropMode(pageIndex?: number, unit: CropUnit = 'pt', scope: CropScope = 'current'): void {
+    if (!this.store.isDocumentLoaded) return;
+    this.clearSelection(true);
+    if (this.canvasStore) {
+      this.canvasStore.selectElement(null);
+    }
+    const targetIdx = pageIndex ?? this.store.currentPageIndex;
+    this.store.activeCrop = {
+      pageIndex: targetIdx,
+      margins: { top: 0, right: 0, bottom: 0, left: 0 },
+      unit,
+      scope,
+    };
+  }
+
+  cancelCropMode(): void {
+    this.store.activeCrop = null;
+  }
+
+  updateCropMargins(margins: Partial<PageCropMargins>): void {
+    if (!this.store.activeCrop) return;
+    const cur = this.store.activeCrop.margins;
+    const newTop = margins.top !== undefined ? margins.top : cur.top;
+    const newRight = margins.right !== undefined ? margins.right : cur.right;
+    const newBottom = margins.bottom !== undefined ? margins.bottom : cur.bottom;
+    const newLeft = margins.left !== undefined ? margins.left : cur.left;
+
+    if (
+      cur.top === newTop &&
+      cur.right === newRight &&
+      cur.bottom === newBottom &&
+      cur.left === newLeft
+    ) {
+      return;
+    }
+
+    this.store.activeCrop = {
+      ...this.store.activeCrop,
+      margins: {
+        top: newTop,
+        right: newRight,
+        bottom: newBottom,
+        left: newLeft,
+      },
+    };
+  }
+
+  setCropUnit(unit: CropUnit): void {
+    if (!this.store.activeCrop) return;
+    this.store.activeCrop.unit = unit;
+  }
+
+  setCropScope(scope: CropScope): void {
+    if (!this.store.activeCrop) return;
+    this.store.activeCrop.scope = scope;
+  }
+
+  async cropPage(
+    pageIndex: number,
+    margins: PageCropMargins,
+    scope: CropScope = 'current',
+  ): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    const fileId = this.store.activeWorkspaceFileId;
+    if (!fileId) return;
+
+    let targetIndices: number[];
+    if (scope === 'all') {
+      targetIndices = Array.from({ length: this.store.pageCount }, (_, i) => i);
+    } else if (scope === 'selected') {
+      targetIndices = this.getTargetPageIndices(pageIndex);
+    } else {
+      targetIndices = [pageIndex];
+    }
+
+    if (targetIndices.length === 0) return;
+
+    const targetSet = new Set(targetIndices);
+
+    await this.executeDocumentMutation('Crop Page', pageIndex, async () => {
+      const activeBuffer = getFileBuffer(fileId);
+      const buffer = activeBuffer ?? this.service.document.save();
+      const croppedBytes = await cropPages(buffer, {
+        pageIndices: targetIndices,
+        margins,
+      });
+
+      const croppedBuffer = croppedBytes.buffer.slice(
+        croppedBytes.byteOffset,
+        croppedBytes.byteOffset + croppedBytes.byteLength,
+      ) as ArrayBuffer;
+
+      this.service.loadDocumentFromBuffer(croppedBuffer);
+
+      // Adjust canvas elements on cropped pages by subtracting top/left margins
+      if (this.canvasStore && (margins.left !== 0 || margins.top !== 0)) {
+        this.canvasStore.elements = this.canvasStore.elements.map((el) => {
+          if (targetSet.has(el.pageIndex)) {
+            return {
+              ...el,
+              x: el.x - margins.left,
+              y: el.y - margins.top,
+            };
+          }
+          return el;
+        });
+      }
+
+      this.clearSelection(true);
+      if (this.canvasStore) {
+        this.canvasStore.selectElement(null);
+        this.canvasStore.clearDragState();
+        this.canvasStore.hoveredElementId = null;
+      }
+      this.store.activeCrop = null;
+      for (const idx of targetIndices) {
+        this.store.incrementPageVersion(idx);
+      }
+    });
+  }
+
+  async resetPageCrop(pageIndex: number, scope: CropScope = 'current'): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    const fileId = this.store.activeWorkspaceFileId;
+    if (!fileId) return;
+
+    let targetIndices: number[];
+    if (scope === 'all') {
+      targetIndices = Array.from({ length: this.store.pageCount }, (_, i) => i);
+    } else if (scope === 'selected') {
+      targetIndices = this.getTargetPageIndices(pageIndex);
+    } else {
+      targetIndices = [pageIndex];
+    }
+
+    if (targetIndices.length === 0) return;
+
+    // Cache pre-reset crop offsets so canvas elements can be shifted back to original coordinates
+    const pageCropOffsets = new Map<number, { left: number; top: number }>();
+    if (this.service?.document) {
+      for (const idx of targetIndices) {
+        try {
+          const page = this.service.document.getPage(idx);
+          if (page && 'getCropInfo' in page && typeof page.getCropInfo === 'function') {
+            const cropInfo = page.getCropInfo();
+            if (cropInfo && (cropInfo.hasCropBox || cropInfo.hasCrop)) {
+              const domCropLeft = cropInfo.domCropLeft ?? cropInfo.marginLeft ?? 0;
+              const domCropTop = cropInfo.domCropTop ?? cropInfo.marginTop ?? 0;
+              pageCropOffsets.set(idx, { left: domCropLeft, top: domCropTop });
+            }
+          }
+        } catch {
+          // Page query best effort
         }
       }
     }
 
-    for (const rect of rects) {
-      canvasStore.addElement({
-        id: canvasStore.generateId(),
-        kind: 'shape',
-        variant: 'rectangle',
-        pageIndex,
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-        rotation: 0,
-        locked: false,
-        visible: true,
-        flipX: false,
-        flipY: false,
-        fill: '#000000',
-        stroke: '#000000',
-        strokeWidth: 0,
-        opacity: 1.0,
-      });
-    }
+    await this.executeDocumentMutation('Reset Page Crop', pageIndex, async () => {
+      const activeBuffer = getFileBuffer(fileId);
+      const buffer = activeBuffer ?? this.service.document.save();
+      const resetBytes = await resetCropPages(buffer, targetIndices);
 
-    this.store.clearSelection();
-    this.store.incrementPageVersion(pageIndex);
-    this.refreshDocument();
-    this.recordSnapshot('Redact Area', true);
+      const resetBuffer = resetBytes.buffer.slice(
+        resetBytes.byteOffset,
+        resetBytes.byteOffset + resetBytes.byteLength,
+      ) as ArrayBuffer;
+
+      this.service.loadDocumentFromBuffer(resetBuffer);
+
+      // Restore canvas element coordinates by adding back the previous crop margins
+      if (this.canvasStore && pageCropOffsets.size > 0) {
+        this.canvasStore.elements = this.canvasStore.elements.map((el) => {
+          const offset = pageCropOffsets.get(el.pageIndex);
+          if (offset && (offset.left !== 0 || offset.top !== 0)) {
+            return {
+              ...el,
+              x: el.x + offset.left,
+              y: el.y + offset.top,
+            };
+          }
+          return el;
+        });
+      }
+
+      this.clearSelection(true);
+      if (this.canvasStore) {
+        this.canvasStore.selectElement(null);
+        this.canvasStore.clearDragState();
+        this.canvasStore.hoveredElementId = null;
+      }
+      this.store.activeCrop = null;
+      for (const idx of targetIndices) {
+        this.store.incrementPageVersion(idx);
+      }
+    });
   }
 
   /**
