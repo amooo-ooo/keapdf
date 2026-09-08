@@ -2659,3 +2659,540 @@ export function createWebMcpTools(ctx: WebMcpContext): Array<ModelContextTool<Re
                   textAlign: (e as FormFieldElement).textAlign,
                   required: (e as FormFieldElement).required,
                   readOnly: (e as FormFieldElement).readOnly,
+                }
+              : {}),
+            ...(e.kind === 'shape'
+              ? {
+                  variant: (e as ShapeElement).variant,
+                  fill: (e as ShapeElement).fill,
+                  stroke: (e as ShapeElement).stroke,
+                  strokeWidth: (e as ShapeElement).strokeWidth,
+                  opacity: (e as ShapeElement).opacity,
+                  isHighlight: (e as ShapeElement).isHighlight,
+                }
+              : {}),
+            ...(e.kind === 'text'
+              ? {
+                  text: (e as TextElement).text,
+                  fontSize: (e as TextElement).fontSize,
+                  fontFamily: (e as TextElement).fontFamily,
+                  color: (e as TextElement).color,
+                  backgroundColor: (e as TextElement).backgroundColor,
+                  fontWeight: (e as TextElement).fontWeight,
+                  fontStyle: (e as TextElement).fontStyle,
+                  textAlign: (e as TextElement).textAlign,
+                  underline: (e as TextElement).underline,
+                  strikethrough: (e as TextElement).strikethrough,
+                }
+              : {}),
+          })),
+        },
+      };
+    },
+  });
+
+  // pdf.updateElement
+  tools.push({
+    name: 'pdf.updateElement',
+    title: 'Update Canvas Element',
+    description: 'Updates properties (position, size, colors, text, form-field styling, highlights) of a canvas element.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        x: { type: 'number' },
+        y: { type: 'number' },
+        width: { type: 'number' },
+        height: { type: 'number' },
+        text: { type: 'string' },
+        fill: { type: 'string' },
+        stroke: { type: 'string' },
+        strokeWidth: { type: 'number' },
+        opacity: { type: 'number' },
+        isHighlight: { type: 'boolean' },
+        fontSize: { type: 'number' },
+        fontFamily: { type: 'string' },
+        color: { type: 'string' },
+        backgroundColor: { type: 'string' },
+        borderColor: { type: 'string' },
+        borderWidth: { type: 'number' },
+        borderStyle: { type: 'string', enum: ['solid', 'dashed', 'dotted', 'none', 'inset', 'underline'] },
+        borderRadius: { type: 'number' },
+        textAlign: { type: 'string', enum: ['left', 'center', 'right'] },
+        required: { type: 'boolean' },
+        readOnly: { type: 'boolean' },
+        value: { type: 'string' },
+        options: { type: 'array', items: { type: 'string' } },
+        label: { type: 'string' },
+        placeholder: { type: 'string' },
+        variant: { type: 'string', enum: ['text-input', 'checkbox', 'radio', 'dropdown', 'signature', 'attachment', 'button'] },
+        underline: { type: 'boolean' },
+        strikethrough: { type: 'boolean' },
+      },
+      required: ['id'],
+    },
+    execute: async (input: {
+      id?: string;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      text?: string;
+      fill?: string;
+      stroke?: string;
+      strokeWidth?: number;
+      opacity?: number;
+      isHighlight?: boolean;
+      fontSize?: number;
+      fontFamily?: string;
+      color?: string;
+      backgroundColor?: string;
+      borderColor?: string;
+      borderWidth?: number;
+      borderStyle?: 'solid' | 'dashed' | 'dotted' | 'none' | 'inset' | 'underline';
+      borderRadius?: number;
+      textAlign?: 'left' | 'center' | 'right';
+      required?: boolean;
+      readOnly?: boolean;
+      value?: string;
+      options?: string[];
+      label?: string;
+      placeholder?: string;
+      variant?: FormFieldVariant;
+      underline?: boolean;
+      strikethrough?: boolean;
+    }): Promise<WebMcpResponse<{ id: string; updated: boolean }>> => {
+      const id = typeof input.id === 'string' ? input.id : '';
+      if (!ctx.canvasStore) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Canvas store unavailable.' } };
+      }
+
+      const existing = ctx.canvasStore.getElementById(id);
+      if (!existing) {
+        return { ok: false, error: { code: 'NODE_NOT_FOUND', message: `Element "${id}" not found.` } };
+      }
+
+      const patch: Record<string, unknown> = {};
+      if (typeof input.x === 'number') patch.x = input.x;
+      if (typeof input.y === 'number') patch.y = input.y;
+      if (typeof input.width === 'number') patch.width = input.width;
+      if (typeof input.height === 'number') patch.height = input.height;
+      if (typeof input.text === 'string') patch.text = input.text;
+      if (typeof input.fill === 'string') patch.fill = input.fill;
+      if (typeof input.stroke === 'string') patch.stroke = input.stroke;
+      if (typeof input.strokeWidth === 'number') patch.strokeWidth = input.strokeWidth;
+      if (typeof input.opacity === 'number') patch.opacity = input.opacity;
+      if (typeof input.isHighlight === 'boolean') patch.isHighlight = input.isHighlight;
+      if (typeof input.fontSize === 'number') patch.fontSize = input.fontSize;
+      if (typeof input.fontFamily === 'string') patch.fontFamily = input.fontFamily;
+      if (typeof input.color === 'string') patch.color = input.color;
+      if (typeof input.backgroundColor === 'string') patch.backgroundColor = input.backgroundColor;
+      if (typeof input.borderColor === 'string') patch.borderColor = input.borderColor;
+      if (typeof input.borderWidth === 'number') patch.borderWidth = input.borderWidth;
+      if (typeof input.borderStyle === 'string') patch.borderStyle = input.borderStyle;
+      if (typeof input.borderRadius === 'number') patch.borderRadius = input.borderRadius;
+      if (typeof input.textAlign === 'string') patch.textAlign = input.textAlign;
+      if (typeof input.required === 'boolean') patch.required = input.required;
+      if (typeof input.readOnly === 'boolean') patch.readOnly = input.readOnly;
+      if (typeof input.value === 'string') patch.value = input.value;
+      if (Array.isArray(input.options)) patch.options = input.options;
+      if (typeof input.label === 'string') patch.label = input.label;
+      if (typeof input.placeholder === 'string') patch.placeholder = input.placeholder;
+      if (typeof input.variant === 'string') patch.variant = input.variant;
+      if (typeof input.underline === 'boolean') patch.underline = input.underline;
+      if (typeof input.strikethrough === 'boolean') patch.strikethrough = input.strikethrough;
+
+      ctx.canvasStore.updateElement(id, patch);
+      ctx.onAgentMutation({ page: existing.pageIndex, description: `Update element ${id}` });
+      ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+
+      return {
+        ok: true,
+        result: { id, updated: true },
+      };
+    },
+  });
+
+  // pdf.deleteElement
+  tools.push({
+    name: 'pdf.deleteElement',
+    title: 'Delete Canvas Element',
+    description: 'Removes an overlay canvas element by its identifier.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+      },
+      required: ['id'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ id: string; deleted: boolean }>> => {
+      const id = typeof input.id === 'string' ? input.id : '';
+      if (!ctx.canvasStore) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Canvas store unavailable.' } };
+      }
+
+      const existing = ctx.canvasStore.getElementById(id);
+      if (!existing) {
+        return { ok: false, error: { code: 'NODE_NOT_FOUND', message: `Element "${id}" not found.` } };
+      }
+
+      const pageIndex = existing.pageIndex;
+      ctx.canvasStore.removeElement(id);
+      ctx.onAgentMutation({ page: pageIndex, description: `Delete element ${id}` });
+      ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+
+      return {
+        ok: true,
+        result: { id, deleted: true },
+      };
+    },
+  });
+
+  // pdf.burnElements
+  tools.push({
+    name: 'pdf.burnElements',
+    title: 'Bake Canvas Overlays into PDF',
+    description: 'Bakes and burns all active canvas overlay elements directly into the PDF content stream.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    execute: async (): Promise<WebMcpResponse<{ burnedCount: number; status: string }>> => {
+      const callId = `burn_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      if (!ctx.canvasStore || !ctx.editorActions) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Canvas store or editor actions unavailable.' } };
+      }
+
+      const elementsToBurn = [...ctx.canvasStore.elements];
+      if (elementsToBurn.length === 0) {
+        return {
+          ok: true,
+          result: { burnedCount: 0, status: 'No canvas elements to burn.' },
+        };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        await ctx.editorActions!.applyCanvasComponentsToPdf(elementsToBurn, () => {
+          ctx.canvasStore!.elements = [];
+        });
+
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: { burnedCount: elementsToBurn.length, status: 'success' },
+        };
+      });
+    },
+  });
+
+  // pdf.applyRedaction
+  tools.push({
+    name: 'pdf.applyRedaction',
+    title: 'Apply Redaction',
+    description: 'Permanently redacts and removes text or areas within specified bounding boxes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer', description: 'Zero-based page index.' },
+        rects: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              x: { type: 'number' },
+              y: { type: 'number' },
+              width: { type: 'number' },
+              height: { type: 'number' },
+            },
+            required: ['x', 'y', 'width', 'height'],
+          },
+          description: 'Array of bounding rectangles in PDF points to permanently redact.',
+        },
+      },
+      required: ['pageIndex', 'rects'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ pageIndex: number; redactedRectsCount: number }>> => {
+      const callId = `redact_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const pageIndex = typeof input.pageIndex === 'number' ? input.pageIndex : 0;
+      const rawRects = Array.isArray(input.rects) ? input.rects : [];
+      const rects: HighlightRect[] = rawRects.map((r: Record<string, unknown>) => ({
+        x: Number(r.x) || 0,
+        y: Number(r.y) || 0,
+        width: Number(r.width) || 10,
+        height: Number(r.height) || 10,
+      }));
+
+      if (rects.length === 0) {
+        return {
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: 'rects array must contain at least one rectangle.' },
+        };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        if (ctx.editorActions && ctx.canvasStore) {
+          await ctx.editorActions.redactArea(pageIndex, rects, ctx.canvasStore);
+        } else {
+          ctx.pdfDoc.deleteTextInRects(pageIndex, rects);
+          ctx.editorStore.incrementPageVersion(pageIndex);
+        }
+
+        ctx.onAgentMutation({ page: pageIndex, description: `Applied ${rects.length} redactions` });
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: { pageIndex, redactedRectsCount: rects.length },
+        };
+      });
+    },
+  });
+
+  // pdf.sanitizeDocument
+  tools.push({
+    name: 'pdf.sanitizeDocument',
+    title: 'Sanitize Document',
+    description: 'Inspects and permanently strips metadata, attachments, hidden text, or annotations.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        removeMetadata: { type: 'boolean', default: true },
+        removeAttachments: { type: 'boolean', default: true },
+        removeAnnotations: { type: 'boolean', default: false },
+        removeJavascript: { type: 'boolean', default: true },
+      },
+    },
+    execute: async (input): Promise<WebMcpResponse<{ sanitized: boolean; details: Record<string, unknown> }>> => {
+      const callId = `sanitize_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      if (!ctx.editorActions) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Editor actions unavailable.' } };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const options: SanitizeOptions = {
+          removeMetadata: input.removeMetadata !== false,
+          removeXmpMetadata: input.removeMetadata !== false,
+          removeAttachments: input.removeAttachments !== false,
+          removeJavascript: input.removeJavascript !== false,
+          removeAnnotations: Boolean(input.removeAnnotations),
+          removeLinks: false,
+          removeFormFields: false,
+          removeBookmarks: false,
+          removePieceInfo: true,
+          removeThumbnails: false,
+          removeStructTree: false,
+        };
+
+        const summary = await ctx.editorActions!.sanitizeCurrentDocument(options);
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            sanitized: true,
+            details: {
+              metadataCleared: summary.metadataCleared,
+              attachmentsRemoved: summary.attachmentsRemoved,
+              annotationsRemoved: summary.annotationsRemoved,
+            },
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.compressDocument
+  tools.push({
+    name: 'pdf.compressDocument',
+    title: 'Compress Document',
+    description: 'Compresses PDF document using lossless structural packing, balanced lossy downsampling, or flat-image rasterization.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        level: {
+          type: 'string',
+          enum: ['lossless', 'recommended', 'strong', 'flat_image', 'custom'],
+          default: 'recommended',
+          description: 'Compression preset tier to apply.',
+        },
+        imageQuality: {
+          type: 'number',
+          minimum: 0.1,
+          maximum: 1.0,
+          description: 'Lossy JPEG compression quality from 0.1 to 1.0.',
+        },
+        maxDpi: {
+          type: 'integer',
+          description: 'Maximum image resolution cap in DPI (e.g. 72, 96, 150, 200, 300).',
+        },
+        removeMetadata: {
+          type: 'boolean',
+          description: 'Whether to strip document metadata and XMP packets.',
+        },
+        removeThumbnails: {
+          type: 'boolean',
+          default: true,
+          description: 'Whether to strip embedded page thumbnails.',
+        },
+        download: {
+          type: 'boolean',
+          default: false,
+          description: 'Whether to trigger client-side download of the compressed PDF.',
+        },
+        saveToWorkspace: {
+          type: 'boolean',
+          default: false,
+          description: 'Whether to save compressed PDF as a new workspace document.',
+        },
+      },
+    },
+    execute: async (input): Promise<WebMcpResponse<{
+      compressed: boolean;
+      originalSizeBytes: number;
+      compressedSizeBytes: number;
+      savingsBytes: number;
+      savingsPercentage: number;
+      level: string;
+      imagesCompressed: number;
+      pagesRasterized: number;
+      base64Data?: string;
+    }>> => {
+      const callId = `compress_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const level = (typeof input.level === 'string' ? input.level : 'recommended') as CompressionLevel;
+        const options: CompressOptions = {
+          level,
+          imageQuality: typeof input.imageQuality === 'number' ? input.imageQuality : undefined,
+          maxDpi: typeof input.maxDpi === 'number' ? input.maxDpi : undefined,
+          removeMetadata: typeof input.removeMetadata === 'boolean' ? input.removeMetadata : undefined,
+          removeThumbnails: input.removeThumbnails !== false,
+        };
+
+        let summary: CompressSummary;
+        let compressedBytes: Uint8Array | undefined = undefined;
+
+        if (input.download && ctx.editorActions) {
+          summary = await ctx.editorActions.compressAndDownload(options);
+        } else if (input.saveToWorkspace && ctx.editorActions) {
+          summary = await ctx.editorActions.compressAsNewWorkspaceFile(options);
+        } else if (ctx.editorActions) {
+          summary = await ctx.editorActions.compressCurrentDocument(options);
+        } else {
+          const res = await ctx.pdfDoc.compress(options, ctx.editorStore.pageTransforms);
+          summary = res.summary;
+          compressedBytes = res.bytes;
+        }
+
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            compressed: summary.savingsBytes > 0,
+            originalSizeBytes: summary.originalSizeBytes,
+            compressedSizeBytes: summary.compressedSizeBytes,
+            savingsBytes: summary.savingsBytes,
+            savingsPercentage: summary.savingsPercentage,
+            level: options.level,
+            imagesCompressed: summary.imagesCompressed,
+            pagesRasterized: summary.pagesRasterized,
+            base64Data: compressedBytes ? uint8ArrayToBase64(compressedBytes) : undefined,
+          },
+        };
+      });
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // Document Metadata & Digital Signature Inspection Tools
+  // ---------------------------------------------------------------------------
+
+  // pdf.getMetadata
+  tools.push({
+    name: 'pdf.getMetadata',
+    title: 'Get Document Metadata',
+    description: 'Retrieves standard and custom PDF document metadata (title, author, subject, keywords, etc.).',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    execute: async (): Promise<WebMcpResponse<Record<string, unknown>>> => {
+      if (ctx.editorActions) {
+        const meta = await ctx.editorActions.getExtendedDocumentMetadata();
+        return {
+          ok: true,
+          result: meta as unknown as Record<string, unknown>,
+        };
+      }
+      const meta = ctx.pdfDoc.getMetadata();
+      return {
+        ok: true,
+        result: meta as unknown as Record<string, unknown>,
+      };
+    },
+  });
+
+  // pdf.updateMetadata
+  tools.push({
+    name: 'pdf.updateMetadata',
+    title: 'Update Document Metadata',
+    description: 'Updates document metadata properties (title, author, subject, keywords, creator, producer, custom fields).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+        author: { type: 'string' },
+        subject: { type: 'string' },
+        keywords: { type: 'string' },
+        creator: { type: 'string' },
+        producer: { type: 'string' },
+        customFields: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              key: { type: 'string' },
+              value: { type: 'string' },
+            },
+            required: ['key', 'value'],
+          },
+        },
+      },
+    },
+    execute: async (input): Promise<WebMcpResponse<{ updated: boolean }>> => {
+      const callId = `meta_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      if (!ctx.editorActions) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Editor actions unavailable.' } };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const customMetadata: Record<string, string> = {};
+        if (Array.isArray(input.customFields)) {
+          for (const item of input.customFields as Array<{ key: string; value: string }>) {
+            if (item && item.key) {
+              customMetadata[String(item.key)] = String(item.value);
+            }
+          }
+        }
+
