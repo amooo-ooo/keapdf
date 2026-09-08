@@ -3724,3 +3724,535 @@ export function createWebMcpTools(ctx: WebMcpContext): Array<ModelContextTool<Re
       const opacity = typeof input.opacity === 'number' ? Math.max(0.05, Math.min(1, input.opacity)) : 0.4;
       const mode = input.mode === 'pdf' ? 'pdf' : 'canvas';
 
+      return ctx.sdgLock.withLock(callId, async () => {
+        let targetRects: Array<{ x: number; y: number; width: number; height: number }> = [];
+
+        if (typeof input.x === 'number' && typeof input.y === 'number' && typeof input.width === 'number' && typeof input.height === 'number') {
+          targetRects.push({ x: input.x, y: input.y, width: input.width, height: input.height });
+        } else if (typeof input.query === 'string' && input.query.trim().length > 0) {
+          const page = ctx.pdfDoc.getPage(pageIndex);
+          const pageText = page ? page.extractTextSpans().map((s) => s.text).join(' ') : '';
+          const q = input.query.toLowerCase();
+          const rawChars = page && typeof page.extractCharacters === 'function' ? page.extractCharacters() : [];
+          const canvasElements = ctx.canvasStore ? ctx.canvasStore.getElementsByPage(pageIndex) : [];
+          const unifiedChars = getUnifiedPageCharacters(pageIndex, rawChars, canvasElements);
+          let searchIdx = 0;
+          while (true) {
+            const foundIdx = pageText.toLowerCase().indexOf(q, searchIdx);
+            if (foundIdx === -1) break;
+            const matchEnd = foundIdx + q.length - 1;
+            const rects = calculateUnifiedHighlightRects(unifiedChars, foundIdx, matchEnd);
+            targetRects.push(...rects);
+            searchIdx = foundIdx + q.length;
+          }
+        } else if (typeof input.charStartIndex === 'number' && typeof input.charEndIndex === 'number') {
+          const page = ctx.pdfDoc.getPage(pageIndex);
+          const rawChars = page && typeof page.extractCharacters === 'function' ? page.extractCharacters() : [];
+          const canvasElements = ctx.canvasStore ? ctx.canvasStore.getElementsByPage(pageIndex) : [];
+          const unifiedChars = getUnifiedPageCharacters(pageIndex, rawChars, canvasElements);
+          targetRects = calculateUnifiedHighlightRects(unifiedChars, input.charStartIndex, input.charEndIndex);
+        }
+
+        if (targetRects.length === 0) {
+          return {
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'No matching text characters or geometric rectangle provided for highlight.',
+            },
+          };
+        }
+
+        const highlightIds: string[] = [];
+
+        if (mode === 'pdf') {
+          for (const rect of targetRects) {
+            ctx.pdfDoc.addHighlightAnnotation(pageIndex, {
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+              fill: color,
+            });
+          }
+          ctx.editorStore.incrementPageVersion(pageIndex);
+        } else {
+          if (!ctx.canvasStore) {
+            return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Canvas store unavailable.' } };
+          }
+          for (const rect of targetRects) {
+            const hid = ctx.canvasStore.generateId();
+            const elem: CanvasElement = {
+              id: hid,
+              kind: 'shape',
+              pageIndex,
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+              rotation: 0,
+              locked: false,
+              visible: true,
+              flipX: false,
+              flipY: false,
+              variant: 'rectangle',
+              fill: color,
+              stroke: color,
+              strokeWidth: 0,
+              opacity,
+              isHighlight: true,
+            };
+            ctx.canvasStore.addElement(elem);
+            highlightIds.push(hid);
+          }
+        }
+
+        ctx.onAgentMutation({ page: pageIndex, description: `Add highlight on page ${pageIndex}` });
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            pageIndex,
+            highlightCount: targetRects.length,
+            highlightIds,
+            rects: targetRects,
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.clearHighlights
+  tools.push({
+    name: 'pdf.clearHighlights',
+    title: 'Clear Highlights',
+    description: 'Removes highlight elements from a specified page or across the entire document.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer', description: 'Zero-based page index (clears all pages if omitted).' },
+      },
+    },
+    execute: async (input: { pageIndex?: number }): Promise<WebMcpResponse<{ clearedCount: number; pageIndex?: number }>> => {
+      const callId = `clear_hl_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      if (!ctx.canvasStore) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Canvas store unavailable.' } };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        let cleared = 0;
+        const toRemove: string[] = [];
+
+        for (const el of ctx.canvasStore!.elements) {
+          if (el.kind === 'shape' && (el as ShapeElement).isHighlight) {
+            if (input.pageIndex === undefined || el.pageIndex === input.pageIndex) {
+              toRemove.push(el.id);
+            }
+          }
+        }
+
+        for (const id of toRemove) {
+          ctx.canvasStore!.removeElement(id);
+          cleared++;
+        }
+
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            clearedCount: cleared,
+            pageIndex: input.pageIndex,
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.styleTextRange
+  tools.push({
+    name: 'pdf.styleTextRange',
+    title: 'Style Text Character Range',
+    description: 'Applies partial styling (bold, italic, color, highlight background, underline, strikethrough) to a character range.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        elementId: { type: 'string', description: 'Canvas text element ID to partially style.' },
+        pageIndex: { type: 'integer', description: 'Zero-based page index.' },
+        startIndex: { type: 'integer', description: 'Start character offset in element text.' },
+        endIndex: { type: 'integer', description: 'End character offset in element text.' },
+        fontWeight: { type: 'string', enum: ['normal', 'bold'] },
+        fontStyle: { type: 'string', enum: ['normal', 'italic'] },
+        color: { type: 'string', description: 'CSS text color string (e.g. "#ff0000").' },
+        backgroundColor: { type: 'string', description: 'CSS background highlight color (e.g. "rgba(254, 240, 138, 0.6)").' },
+        underline: { type: 'boolean' },
+        strikethrough: { type: 'boolean' },
+      },
+      required: ['elementId', 'startIndex', 'endIndex'],
+    },
+    execute: async (input: {
+      elementId?: string;
+      pageIndex?: number;
+      startIndex?: number;
+      endIndex?: number;
+      fontWeight?: 'normal' | 'bold';
+      fontStyle?: 'normal' | 'italic';
+      color?: string;
+      backgroundColor?: string;
+      underline?: boolean;
+      strikethrough?: boolean;
+    }): Promise<WebMcpResponse<{
+      elementId: string;
+      styledText: string;
+      segmentCount: number;
+    }>> => {
+      const callId = `style_range_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const elementId = typeof input.elementId === 'string' ? input.elementId : '';
+      const start = typeof input.startIndex === 'number' ? input.startIndex : 0;
+      const end = typeof input.endIndex === 'number' ? input.endIndex : 0;
+
+      if (!ctx.canvasStore) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Canvas store unavailable.' } };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const elem = ctx.canvasStore!.getElementById(elementId) as TextElement | undefined;
+        if (!elem || elem.kind !== 'text') {
+          return {
+            ok: false,
+            error: {
+              code: 'NODE_NOT_FOUND',
+              message: `Canvas text element "${elementId}" not found.`,
+            },
+          };
+        }
+
+        const styled = applyStyleToCanvasElement(elem, start, end, {
+          fontWeight: input.fontWeight,
+          fontStyle: input.fontStyle,
+          color: input.color,
+          backgroundColor: input.backgroundColor,
+          underline: input.underline,
+          strikethrough: input.strikethrough,
+        });
+
+        ctx.canvasStore!.updateElement(elementId, {
+          lines: styled.lines,
+          segments: styled.segments,
+        });
+
+        ctx.onAgentMutation({ page: elem.pageIndex, description: `Style text range in ${elementId}` });
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            elementId,
+            styledText: elem.text.slice(start, end),
+            segmentCount: styled.segments.length,
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.listSignatures
+  tools.push({
+    name: 'pdf.listSignatures',
+    title: 'List Saved Signatures',
+    description: 'Retrieves all user signatures stored in the workspace for placement.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    execute: async (): Promise<WebMcpResponse<{ count: number; signatures: Array<Omit<SavedSignature, 'dataUrl'>> }>> => {
+      const saved = getSavedSignatures();
+      return {
+        ok: true,
+        result: {
+          count: saved.length,
+          signatures: saved.map((s) => ({
+            id: s.id,
+            title: s.title,
+            type: s.type,
+            color: s.color,
+            createdAt: s.createdAt,
+            isDefault: s.isDefault,
+            aspectRatio: s.aspectRatio,
+            fontFamily: s.fontFamily,
+            text: s.text,
+          })),
+        },
+      };
+    },
+  });
+
+  // pdf.addSignature
+  tools.push({
+    name: 'pdf.addSignature',
+    title: 'Add Electronic Signature',
+    description: 'Places a user signature onto a document page from saved signatures or generated signature image data.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer', description: 'Target page index.' },
+        x: { type: 'number', description: 'X position in page points.' },
+        y: { type: 'number', description: 'Y position in page points.' },
+        width: { type: 'number', default: 160, description: 'Width in points.' },
+        height: { type: 'number', default: 60, description: 'Height in points.' },
+        signatureId: { type: 'string', description: 'Saved signature ID from pdf.listSignatures.' },
+        dataUrl: { type: 'string', description: 'Base64 image data URL of signature.' },
+        text: { type: 'string', description: 'Typed text for auto-generated signature.' },
+        fontFamily: { type: 'string', default: 'Caveat, cursive', description: 'Font for typed signature.' },
+        color: { type: 'string', default: '#0f172a', description: 'Ink color for signature.' },
+      },
+      required: ['pageIndex', 'x', 'y'],
+    },
+    execute: async (input: {
+      pageIndex?: number;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      signatureId?: string;
+      dataUrl?: string;
+      text?: string;
+      fontFamily?: string;
+      color?: string;
+    }): Promise<WebMcpResponse<{ id: string; pageIndex: number; width: number; height: number }>> => {
+      const callId = `sig_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      if (!ctx.canvasStore) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Canvas store unavailable.' } };
+      }
+
+      const pageIndex = typeof input.pageIndex === 'number' ? input.pageIndex : 0;
+      const x = typeof input.x === 'number' ? input.x : 100;
+      const y = typeof input.y === 'number' ? input.y : 100;
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        let signatureDataUrl = input.dataUrl;
+        let sigWidth = input.width || 160;
+        let sigHeight = input.height || 60;
+
+        if (!signatureDataUrl && input.signatureId) {
+          const saved = getSavedSignatures();
+          const target = saved.find((s) => s.id === input.signatureId);
+          if (target) {
+            signatureDataUrl = target.dataUrl;
+            if (target.aspectRatio > 0) {
+              sigHeight = Math.round(sigWidth / target.aspectRatio);
+            }
+          }
+        }
+
+        if (!signatureDataUrl && input.text) {
+          const typedSig = saveSignature({
+            title: `Signature by ${input.text}`,
+            type: 'type',
+            dataUrl: '',
+            text: input.text,
+            fontFamily: input.fontFamily || 'Caveat',
+            color: input.color || '#0f172a',
+            isDefault: false,
+            aspectRatio: 2.5,
+          });
+          signatureDataUrl = typedSig.dataUrl;
+        }
+
+        if (!signatureDataUrl) {
+          const defaultSig = getDefaultSignature();
+          if (defaultSig) {
+            signatureDataUrl = defaultSig.dataUrl;
+            if (defaultSig.aspectRatio > 0) {
+              sigHeight = Math.round(sigWidth / defaultSig.aspectRatio);
+            }
+          }
+        }
+
+        if (!signatureDataUrl) {
+          return {
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'No signature found. Provide dataUrl, signatureId, or text.',
+            },
+          };
+        }
+
+        const id = ctx.canvasStore!.generateId();
+        const element: CanvasElement = {
+          id,
+          kind: 'image',
+          pageIndex,
+          x,
+          y,
+          width: sigWidth,
+          height: sigHeight,
+          rotation: 0,
+          locked: false,
+          visible: true,
+          flipX: false,
+          flipY: false,
+          src: signatureDataUrl,
+          objectFit: 'contain',
+          opacity: 1,
+        };
+
+        ctx.canvasStore!.addElement(element);
+        ctx.onAgentMutation({ page: pageIndex, description: `Place electronic signature` });
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            id,
+            pageIndex,
+            width: sigWidth,
+            height: sigHeight,
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.detectScannedPages
+  tools.push({
+    name: 'pdf.detectScannedPages',
+    title: 'Detect Scanned Pages',
+    description: 'Inspects document pages to detect image-only scanned pages with low or no native vector text.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    execute: async (_input): Promise<WebMcpResponse<{
+      scannedPages: number[];
+      totalPages: number;
+      detections: Array<{ pageIndex: number; isScanned: boolean; confidence: number; reason: string }>;
+    }>> => {
+      const ocrService = OcrService.getInstance();
+      const detectedMap = ocrService.detectDocumentScannedPages(ctx.pdfDoc);
+      const totalPages = ctx.pdfDoc.getPageCount();
+      const scannedPages: number[] = [];
+      const detections: Array<{ pageIndex: number; isScanned: boolean; confidence: number; reason: string }> = [];
+
+      for (let i = 0; i < totalPages; i++) {
+        const det = detectedMap.get(i) || ocrService.isPageScanned(ctx.pdfDoc.getPage(i));
+        if (det.isScanned) {
+          scannedPages.push(i);
+        }
+        detections.push({
+          pageIndex: i,
+          isScanned: det.isScanned,
+          confidence: det.confidence,
+          reason: det.reason,
+        });
+      }
+
+      return {
+        ok: true,
+        result: {
+          scannedPages,
+          totalPages,
+          detections,
+        },
+      };
+    },
+  });
+
+  // pdf.ocrPage
+  tools.push({
+    name: 'pdf.ocrPage',
+    title: 'Recognize Text on Page (OCR)',
+    description: 'Performs optical character recognition on a scanned page and optionally embeds a searchable text layer.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: {
+          type: 'integer',
+          minimum: 0,
+          description: 'Zero-based page index to run OCR recognition on.',
+        },
+        language: {
+          type: 'string',
+          default: 'eng',
+          description: 'Tesseract language code (e.g. eng, spa, fra, deu).',
+        },
+        autoEmbed: {
+          type: 'boolean',
+          default: true,
+          description: 'Whether to embed an invisible searchable text layer into the PDF content stream.',
+        },
+      },
+      required: ['pageIndex'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{
+      pageIndex: number;
+      recognizedLines: number;
+      recognizedWords: number;
+      fullText: string;
+      embedded: boolean;
+    }>> => {
+      const pageIndex = Number(input.pageIndex);
+      const language = (input.language as string) || 'eng';
+      const autoEmbed = input.autoEmbed !== false;
+
+      const pageCount = ctx.pdfDoc.getPageCount();
+      if (pageIndex < 0 || pageIndex >= pageCount) {
+        return {
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: `Page index ${pageIndex} is out of bounds (0-${pageCount - 1}).`,
+          },
+        };
+      }
+
+      if (!ctx.editorActions) {
+        return {
+          ok: false,
+          error: { code: 'INTERNAL_ERROR', message: 'Editor actions not initialized.' },
+        };
+      }
+
+      const result = await ctx.editorActions.runOcrOnPage(pageIndex, { language, autoEmbed });
+      if (!result) {
+        return {
+          ok: false,
+          error: { code: 'INTERNAL_ERROR', message: `OCR recognition failed on page ${pageIndex + 1}.` },
+        };
+      }
+
+      ctx.onAgentMutation({ page: pageIndex, description: `OCR text recognition on page ${pageIndex + 1}` });
+      ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+      ctx.rateLimiter.recordCall();
+
+      return {
+        ok: true,
+        result: {
+          pageIndex,
+          recognizedLines: result.lines.length,
+          recognizedWords: result.words.length,
+          fullText: result.text,
+          embedded: autoEmbed,
+        },
+      };
+    },
+  });
+
+  return tools;
+}
