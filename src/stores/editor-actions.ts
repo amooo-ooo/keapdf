@@ -2680,9 +2680,9 @@ export class EditorActions {
               this.service.document.deletePage(idx);
             }
           }
-        }
-        this.store.pageCount = this.service.document.getPageCount();
-        this.store.currentPageIndex = Math.max(0, Math.min(this.store.currentPageIndex, this.store.pageCount - 1));
+          this.store.pageCount = this.service.document.getPageCount();
+          this.store.currentPageIndex = Math.max(0, Math.min(this.store.currentPageIndex, this.store.pageCount - 1));
+        });
         this.refreshDocument();
       }
       
@@ -2712,6 +2712,12 @@ export class EditorActions {
       } finally {
         this.isAddingToWorkspace = wasAdding;
       }
+
+      if (options?.autoDownload) {
+        downloadBytes(splitBytes, newFileName, 'application/pdf');
+      }
+
+      return { splitBytes, newFileName };
     } catch (err) {
       console.error('Failed to extract pages:', err);
       throw err;
@@ -2720,17 +2726,25 @@ export class EditorActions {
 
   // -- Text overlay --
 
-  addTextOverlay(
+  async addTextOverlay(
     pageIndex: number,
     text: string,
     posX: number,
     posY: number,
     fontSize: number,
-  ): void {
+  ): Promise<void> {
     if (!this.store.isDocumentLoaded) return;
-    this.service.document.getPage(pageIndex).drawText({text, x: posX, y: posY, fontSize: fontSize, color: '#000000', fontFamily: 'Helvetica'});
-    this.store.incrementPageVersion(pageIndex);
-    this.recordSnapshot('Add Text Overlay', true);
+    await this.executeDocumentMutation('Add Text Overlay', pageIndex, () => {
+      this.service.document.drawText(pageIndex, {
+        text,
+        x: posX,
+        y: posY,
+        fontSize,
+        color: '#000000',
+        fontFamily: 'Helvetica',
+      });
+      this.store.incrementPageVersion(pageIndex);
+    });
   }
 
   // -- Export --
@@ -2741,23 +2755,29 @@ export class EditorActions {
     );
     if (!this.store.isDocumentLoaded || (elements.length === 0 && !hasTransforms)) return;
     try {
-      await this.service.applyCanvasElementsToPdf(elements, this.store.pageTransforms);
-      
-      const affectedPages = new Set(elements.map(e => e.pageIndex));
-      for (const pIdx of Object.keys(this.store.pageTransforms)) {
-        affectedPages.add(parseInt(pIdx, 10));
-      }
-      for (const pageIndex of affectedPages) {
-        this.store.incrementPageVersion(pageIndex);
-      }
-      
-      this.store.pageTransforms = {};
-      this.refreshDocument();
+      await this.executeDocumentMutation('Bake Canvas Components', this.store.currentPageIndex, async () => {
+        await this.service.applyCanvasElementsToPdf(elements, this.store.pageTransforms);
+        
+        const affectedPages = new Set(elements.map(e => e.pageIndex));
+        for (const pIdx of Object.keys(this.store.pageTransforms)) {
+          affectedPages.add(parseInt(pIdx, 10));
+        }
+        for (const pageIndex of affectedPages) {
+          this.store.incrementPageVersion(pageIndex);
+        }
+        
+        this.store.pageTransforms = {};
+
+        if (this.canvasStore) {
+          this.canvasStore.elements = [];
+          this.canvasStore.clearDragState();
+          this.canvasStore.selectElement(null);
+        }
+      });
       
       if (onApplied) {
         onApplied();
       }
-      this.recordSnapshot('Bake Canvas Components', true);
     } catch (err) {
       console.error('Failed to apply canvas components to PDF:', err);
     }
@@ -2770,26 +2790,32 @@ export class EditorActions {
     if (!this.store.isDocumentLoaded || !hasTransforms) return;
 
     try {
-      const finalBytes = await this.service.document.saveAsync(this.store.pageTransforms);
-      const bufferArray = finalBytes.buffer.slice(finalBytes.byteOffset, finalBytes.byteOffset + finalBytes.byteLength) as ArrayBuffer;
-      this.service.loadDocumentFromBuffer(bufferArray);
-      this.store.pageTransforms = {};
-      this.refreshDocument();
-      this.recordSnapshot('Bake Page Transforms', true);
+      await this.executeDocumentMutation('Bake Page Transforms', this.store.currentPageIndex, async () => {
+        const finalBytes = await this.service.document.saveAsync(this.store.pageTransforms);
+        const bufferArray = finalBytes.buffer.slice(finalBytes.byteOffset, finalBytes.byteOffset + finalBytes.byteLength) as ArrayBuffer;
+        this.service.loadDocumentFromBuffer(bufferArray);
+        this.store.pageTransforms = {};
+      });
     } catch (err) {
       console.error('Failed to bake page transforms into PDF:', err);
     }
   }
 
-  extractObjectToCanvas(type: 'image' | 'shape' | 'text', span: EditableImageSpan | EditableShapeSpan | EditableTextSpan, canvasStore: CanvasStore): string | undefined {
+  async extractObjectToCanvas(
+    type: 'image' | 'shape' | 'text' | 'form-field',
+    span: EditableImageSpan | EditableShapeSpan | EditableTextSpan | EditableFormFieldSpan,
+    canvasStore: CanvasStore
+  ): Promise<string | undefined> {
     if (!this.store.isDocumentLoaded) return;
     if (!canvasStore) return;
 
     const newId = canvasStore.generateId();
 
+    let extractedElement: CanvasElement | null = null;
+
     if (type === 'image') {
       const imgSpan = span as EditableImageSpan;
-      canvasStore.elements.push({
+      extractedElement = {
         id: newId,
         kind: 'image',
         pageIndex: imgSpan.pageIndex,
@@ -2805,10 +2831,11 @@ export class EditorActions {
         src: imgSpan.src,
         opacity: 1,
         objectFit: 'fill'
-      } as CanvasElement);
+      } as CanvasElement;
+      canvasStore.elements.push(extractedElement);
     } else if (type === 'shape') {
       const shapeSpan = span as EditableShapeSpan;
-      canvasStore.elements.push({
+      extractedElement = {
         id: newId,
         kind: 'shape',
         variant: 'rectangle',
@@ -2826,17 +2853,66 @@ export class EditorActions {
         stroke: 'transparent',
         strokeWidth: 0,
         opacity: 1,
-      } as CanvasElement);
+      } as CanvasElement;
+      canvasStore.elements.push(extractedElement);
     } else if (type === 'text') {
       const textSpan = span as EditableTextSpan;
-      const textElement = buildTextElementFromSpan(textSpan, newId);
-      canvasStore.elements.push(textElement);
-      this.service.document.getPage(span.pageIndex).hideTextSpan(textSpan);
+      extractedElement = buildTextElementFromSpan(textSpan, newId);
+      canvasStore.elements.push(extractedElement);
+      this.store.hiddenSpanIds.add(span.id);
+    } else if (type === 'form-field') {
+      const formSpan = span as EditableFormFieldSpan;
+      const sourceFieldName = formSpan.fieldName || formSpan.name || formSpan.fieldId;
+      extractedElement = {
+        id: newId,
+        kind: 'form-field',
+        variant: formSpan.variant,
+        pageIndex: formSpan.pageIndex,
+        x: formSpan.left,
+        y: formSpan.top,
+        width: formSpan.width,
+        height: formSpan.height,
+        rotation: formSpan.rotation || 0,
+        locked: false,
+        visible: true,
+        flipX: false,
+        flipY: false,
+        label: formSpan.fieldName || formSpan.fieldId,
+        placeholder: formSpan.placeholder || (typeof formSpan.value === 'string' ? formSpan.value : ''),
+        value: typeof formSpan.value === 'string' ? formSpan.value : (formSpan.value ? 'true' : ''),
+        options: formSpan.options ? [...formSpan.options] : undefined,
+        readOnly: formSpan.readOnly ?? false,
+        required: formSpan.required ?? false,
+        fontSize: formSpan.fontSize ?? 13,
+        fontFamily: formSpan.fontFamily ?? 'Helvetica',
+        color: formSpan.color ?? '#111827',
+        backgroundColor: formSpan.backgroundColor ?? '#ffffff',
+        borderColor: formSpan.borderColor ?? '#d1d5db',
+        borderWidth: formSpan.borderWidth ?? 1,
+        borderStyle: formSpan.borderStyle ?? 'solid',
+        borderRadius: formSpan.borderRadius ?? 4,
+        textAlign: formSpan.textAlign ?? 'left',
+        sourceFieldName,
+        originalSpan: formSpan,
+      } as CanvasElement;
+      canvasStore.elements.push(extractedElement);
       this.store.hiddenSpanIds.add(span.id);
     }
 
-    if (type !== 'text') {
-      this.service.document.getPage(span.pageIndex).removeObject((span as EditableImageSpan | EditableShapeSpan).pdfObjectIndex);
+    const mutateCmd = await this.executeDocumentMutation('Extract Object', span.pageIndex, () => {
+      if (type === 'text') {
+        this.service.document.getPage(span.pageIndex).hideTextSpan(span as EditableTextSpan);
+      } else if (type === 'form-field') {
+        const sourceFieldName = (span as EditableFormFieldSpan).fieldName || (span as EditableFormFieldSpan).name || (span as EditableFormFieldSpan).fieldId;
+        if (sourceFieldName && typeof this.service?.document?.markAcroFormFieldRemoved === 'function') {
+          this.service.document.markAcroFormFieldRemoved(sourceFieldName);
+        }
+      } else {
+        this.service.document.getPage(span.pageIndex).removeObject((span as EditableImageSpan | EditableShapeSpan).pdfObjectIndex);
+      }
+    }, undefined, true);
+
+    if (type !== 'text' && type !== 'form-field') {
       this.store.hiddenSpanIds.add(span.id);
     }
 
@@ -2853,7 +2929,22 @@ export class EditorActions {
     // so this acts as an eager default for non-interaction extraction paths.
     canvasStore.selectElement(newId);
 
-    this.recordSnapshot('Extract Object to Canvas', true);
+    if (extractedElement && mutateCmd) {
+      const subCommands: Command[] = [
+        mutateCmd,
+        new HideSpanCommand('Hide Span', span.id),
+        new AddElementCommand('Add Extracted Element', extractedElement, true),
+      ];
+      if (type === 'form-field') {
+        const fieldName = (span as EditableFormFieldSpan).fieldName || (span as EditableFormFieldSpan).name || (span as EditableFormFieldSpan).fieldId;
+        if (fieldName) {
+          subCommands.unshift(new RemoveAcroFormFieldCommand('Remove Native Form Field', fieldName));
+        }
+      }
+      this.pushCommand(
+        new CompoundCommand('Extract Object to Canvas', subCommands)
+      );
+    }
 
     return newId;
   }
@@ -2861,145 +2952,33 @@ export class EditorActions {
   async exportPdf(canvasStore?: CanvasStore): Promise<void> {
     if (!this.store.isDocumentLoaded) return;
     try {
+      if (this.exportRegistry?.has('pdf')) {
+        const handler = this.exportRegistry.get('pdf');
+        if (handler && this.canvasStore) {
+          await handler.export({
+            editorStore: this.store,
+            canvasStore: this.canvasStore,
+            actions: this,
+            service: this.service,
+            canvasElements: (canvasStore ?? this.canvasStore).elements,
+            pageTransforms: this.store.pageTransforms,
+          });
+          return;
+        }
+      }
+
       if (canvasStore && canvasStore.elements.length > 0) {
-        await this.burnCanvasToPdf(canvasStore);
+        await this.service.burnElementsToDocument(canvasStore.elements);
+        canvasStore.elements = [];
+        canvasStore.clearDragState();
+        canvasStore.selectElement(null);
+        this.refreshDocument();
       }
       const bytes = await this.service.document.saveAsync(this.store.pageTransforms);
       downloadBytes(bytes, `edited_${this.store.fileName}`, 'application/pdf');
     } catch (err) {
       console.error('Failed to export PDF:', err);
     }
-  }
-
-  private async burnCanvasToPdf(canvasStore: CanvasStore): Promise<void> {
-    const pageCount = this.service.document.getPageCount();
-    for (const el of canvasStore.elements) {
-      if (el.pageIndex >= pageCount) continue;
-      const page = this.service.document.getPage(el.pageIndex);
-      if (el.kind === 'text') {
-        page.drawText({
-          text: el.text,
-          x: el.x,
-          y: el.y,
-          width: el.width,
-          height: el.height,
-          fontSize: el.fontSize,
-          fontFamily: el.fontFamily,
-          rawFontFamily: el.rawFontFamily,
-          color: el.color,
-          fontWeight: el.fontWeight,
-          fontStyle: el.fontStyle,
-          lineHeight: el.lineHeight,
-          lines: el.lines,
-          segments: el.segments,
-          rotation: el.rotation,
-          flipX: el.flipX,
-          flipY: el.flipY
-        });
-      } else if (el.kind === 'shape') {
-        if (el.variant === 'rectangle') {
-          page.drawRectangle({
-            x: el.x, y: el.y, width: el.width, height: el.height,
-            fill: el.fill, stroke: el.stroke, strokeWidth: el.strokeWidth,
-            rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
-          });
-        } else if (el.variant === 'circle') {
-          page.drawCircle({
-            x: el.x, y: el.y, width: el.width, height: el.height,
-            fill: el.fill, stroke: el.stroke, strokeWidth: el.strokeWidth,
-            rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
-          });
-        } else if (el.variant === 'line') {
-          page.drawLine({
-            x: el.x, y: el.y, width: el.width, height: el.height,
-            stroke: el.stroke, strokeWidth: el.strokeWidth,
-            rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
-          });
-        } else if (el.variant === 'arrow') {
-          page.drawArrow({
-            x: el.x, y: el.y, width: el.width, height: el.height,
-            stroke: el.stroke, strokeWidth: el.strokeWidth,
-            rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
-          });
-        }
-      } else if (el.kind === 'path') {
-        page.drawPath({
-          points: el.points,
-          x: el.x, y: el.y, width: el.width, height: el.height,
-          stroke: el.stroke, strokeWidth: el.strokeWidth,
-          opacity: el.opacity, isHighlight: el.isHighlight,
-          rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
-        });
-      } else if (el.kind === 'image') {
-        if (el.src) {
-          const imgData = await this.getImageDataFromSrc(el.src);
-          page.drawImage({
-            id: el.id,
-            x: el.x, y: el.y, width: el.width, height: el.height,
-            objectFit: el.objectFit as any,
-            imageData: {
-              width: imgData.width,
-              height: imgData.height,
-              imgData: imgData
-            },
-            rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
-          });
-        }
-      } else if (el.kind === 'form-field') {
-        page.drawFormFieldPlaceholder({
-          id: el.id,
-          variant: el.variant,
-          label: el.label,
-          placeholder: el.placeholder,
-          x: el.x, y: el.y, width: el.width, height: el.height,
-          rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
-        });
-        page.addAcroFormField({
-          id: el.id,
-          variant: el.variant,
-          label: el.label,
-          placeholder: el.placeholder,
-          x: el.x, y: el.y, width: el.width, height: el.height,
-          rotation: el.rotation, flipX: el.flipX, flipY: el.flipY
-        });
-      } else if (el.kind === 'note') {
-        page.addTextAnnotation({
-          x: el.x,
-          y: el.y,
-          width: el.width,
-          height: el.height,
-          author: el.author,
-          contents: el.text,
-          color: el.color,
-        });
-      }
-    }
-
-    canvasStore.elements = [];
-    canvasStore.clearDragState();
-    canvasStore.selectElement(null);
-    this.refreshDocument();
-  }
-
-  private async getImageDataFromSrc(src: string): Promise<ImageData> {
-    return new Promise((resolve, reject) => {
-      const img = new window.Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          reject(new Error('Failed to get 2D context'));
-          return;
-        }
-        ctx.drawImage(img, 0, 0);
-        resolve(ctx.getImageData(0, 0, img.width, img.height));
-      };
-      img.onerror = reject;
-      img.crossOrigin = 'anonymous';
-      img.src = src;
-    });
   }
 
   // -- Organizer view toggle --
@@ -3034,24 +3013,21 @@ export class EditorActions {
     if (!this.store.isDocumentLoaded) {
       throw new Error('No document loaded');
     }
-    const summary = await this.service.sanitizeActiveDocument(options, this.store.pageTransforms);
-    this.store.pageTransforms = {};
-    this.refreshDocument();
+    let summary!: SanitizeSummary;
+    await this.executeDocumentMutation('Sanitize Document', this.store.currentPageIndex, async () => {
+      summary = await this.service.sanitizeActiveDocument(options, this.store.pageTransforms);
+      this.store.pageTransforms = {};
+    });
 
     if (this.store.activeWorkspaceFileId) {
       const activeFile = this.service.getFile(this.store.activeWorkspaceFileId);
       if (activeFile) {
-        const savedBytes = this.service.document.save();
-        const bufferArray = savedBytes.buffer.slice(
-          savedBytes.byteOffset,
-          savedBytes.byteOffset + savedBytes.byteLength
-        ) as ArrayBuffer;
-        setFileBuffer(activeFile.id, bufferArray);
-        activeFile.sizeBytes = bufferArray.byteLength;
+        const docBuffer = getFileBuffer(this.store.activeWorkspaceFileId);
+        if (docBuffer) {
+          activeFile.sizeBytes = docBuffer.byteLength;
+        }
       }
     }
-
-    this.recordSnapshot('Sanitize Document', true);
 
     return summary;
   }
@@ -3087,6 +3063,191 @@ export class EditorActions {
       this.isAddingToWorkspace = wasAdding;
     }
     return summary;
+  }
+
+  openCompressDialog(preset: CompressionLevel = 'recommended'): void {
+    if (!this.store.isDocumentLoaded) return;
+    this.store.compressInitialPreset = preset;
+    this.store.showCompressDialog = true;
+  }
+
+  closeCompressDialog(): void {
+    this.store.showCompressDialog = false;
+  }
+
+  async inspectDocumentForCompression(): Promise<CompressionInspection> {
+    if (!this.store.isDocumentLoaded) {
+      throw new Error('No document loaded');
+    }
+    return this.service.inspectCompression(this.store.pageTransforms);
+  }
+
+  async compressCurrentDocument(options: CompressOptions): Promise<CompressSummary> {
+    if (!this.store.isDocumentLoaded) {
+      throw new Error('No document loaded');
+    }
+    let summary!: CompressSummary;
+    await this.executeDocumentMutation('Compress Document', this.store.currentPageIndex, async () => {
+      summary = await this.service.compressActiveDocument(options, this.store.pageTransforms);
+      this.store.pageTransforms = {};
+    });
+
+    if (this.store.activeWorkspaceFileId) {
+      const activeFile = this.service.getFile(this.store.activeWorkspaceFileId);
+      if (activeFile) {
+        const docBuffer = getFileBuffer(this.store.activeWorkspaceFileId);
+        if (docBuffer) {
+          activeFile.sizeBytes = docBuffer.byteLength;
+        }
+      }
+    }
+
+    return summary;
+  }
+
+  async compressAndDownload(options: CompressOptions): Promise<CompressSummary> {
+    if (!this.store.isDocumentLoaded) {
+      throw new Error('No document loaded');
+    }
+    const { bytes, summary } = await this.service.compressToBytes(options, this.store.pageTransforms);
+    const baseName = this.store.fileName.replace(/\.[^/.]+$/, '');
+    downloadBytes(bytes, `compressed_${baseName}.pdf`, 'application/pdf');
+    return summary;
+  }
+
+  async compressAsNewWorkspaceFile(options: CompressOptions): Promise<CompressSummary> {
+    if (!this.store.isDocumentLoaded) {
+      throw new Error('No document loaded');
+    }
+    const { bytes, summary } = await this.service.compressToBytes(options, this.store.pageTransforms);
+    const bufferArray = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength
+    ) as ArrayBuffer;
+
+    const baseName = this.store.fileName.replace(/\.[^/.]+$/, '');
+    const newFileName = `compressed_${baseName}.pdf`;
+
+    const wasAdding = this.isAddingToWorkspace;
+    try {
+      this.isAddingToWorkspace = true;
+      await this.loadDocumentFromBuffer(bufferArray, newFileName);
+    } finally {
+      this.isAddingToWorkspace = wasAdding;
+    }
+    return summary;
+  }
+
+  // -- Optical Character Recognition (OCR) Actions --
+
+  /**
+   * Scans document pages to detect image-only scanned pages without native text.
+   */
+  detectScannedPages(): void {
+    if (!this.store.isDocumentLoaded) return;
+    try {
+      const ocrService = OcrService.getInstance();
+      const detected = ocrService.detectDocumentScannedPages(this.service.document);
+      const scannedSet = new Set<number>();
+      for (const [idx] of detected) {
+        scannedSet.add(idx);
+      }
+      this.store.scannedPages = scannedSet;
+    } catch (err) {
+      console.error('Failed to detect scanned pages:', err);
+    }
+  }
+
+  /**
+   * Opens the OCR recognition dialog.
+   */
+  openOcrDialog(): void {
+    if (!this.store.isDocumentLoaded) return;
+    this.store.showOcrDialog = true;
+  }
+
+  /**
+   * Closes the OCR recognition dialog.
+   */
+  closeOcrDialog(): void {
+    this.store.showOcrDialog = false;
+  }
+
+  /**
+   * Runs OCR text recognition on a specific page.
+   *
+   * @param pageIndex Zero-based page index.
+   * @param options Recognition options (language, autoEmbed searchable layer).
+   * @return Promise resolving to recognized OcrPageResult or null on error.
+   */
+  async runOcrOnPage(
+    pageIndex: number,
+    options?: { language?: string; autoEmbed?: boolean }
+  ): Promise<OcrPageResult | null> {
+    if (!this.store.isDocumentLoaded) return null;
+    const pageCount = this.store.pageCount;
+    if (pageIndex < 0 || pageIndex >= pageCount) return null;
+
+    this.store.isOcrRunning = true;
+    this.store.ocrProgress = {
+      pageIndex,
+      progress: 0,
+      status: 'Initializing OCR engine...',
+    };
+
+    try {
+      const ocrService = OcrService.getInstance();
+      const page = this.service.document.getPage(pageIndex);
+      const result = await ocrService.recognizePage(page, {
+        language: options?.language || 'eng',
+        scale: 1.5,
+        onProgress: (p) => {
+          this.store.ocrProgress = {
+            pageIndex,
+            progress: p.progress,
+            status: p.status,
+          };
+        },
+      });
+
+      const updatedResults = new Map(this.store.pageOcrResults);
+      updatedResults.set(pageIndex, result);
+      this.store.pageOcrResults = updatedResults;
+
+      // Invalidate page span cache so PdfPageView re-extracts with OCR spans merged
+      this.service.document.clearCachedPageSpans(pageIndex);
+      this.store.incrementPageVersion(pageIndex);
+      this.store.incrementRenderVersion();
+
+      if (options?.autoEmbed) {
+        await this.executeCommand(
+          new ApplyOcrLayerCommand('Embed Searchable Text Layer', pageIndex, result)
+        );
+      }
+
+      return result;
+    } catch (err) {
+      console.error('Failed to run OCR on page:', err);
+      return null;
+    } finally {
+      this.store.isOcrRunning = false;
+      this.store.ocrProgress = null;
+    }
+  }
+
+  /**
+   * Runs OCR text recognition across multiple pages or the entire document.
+   */
+  async runOcrOnDocument(options?: {
+    language?: string;
+    autoEmbed?: boolean;
+    pageIndices?: number[];
+  }): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    const targets = options?.pageIndices ?? Array.from({ length: this.store.pageCount }, (_, i) => i);
+    for (const pageIdx of targets) {
+      await this.runOcrOnPage(pageIdx, options);
+    }
   }
 
   /**
