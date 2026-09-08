@@ -3196,3 +3196,531 @@ export function createWebMcpTools(ctx: WebMcpContext): Array<ModelContextTool<Re
           }
         }
 
+        const updates: DocumentMetadataUpdate = {
+          title: typeof input.title === 'string' ? input.title : undefined,
+          author: typeof input.author === 'string' ? input.author : undefined,
+          subject: typeof input.subject === 'string' ? input.subject : undefined,
+          keywords: typeof input.keywords === 'string' ? input.keywords : undefined,
+          creator: typeof input.creator === 'string' ? input.creator : undefined,
+          producer: typeof input.producer === 'string' ? input.producer : undefined,
+          customMetadata: Object.keys(customMetadata).length > 0 ? customMetadata : undefined,
+        };
+
+        await ctx.editorActions!.updateDocumentMetadata(updates);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: { updated: true },
+        };
+      });
+    },
+  });
+
+  // pdf.validateSignatures
+  tools.push({
+    name: 'pdf.validateSignatures',
+    title: 'Validate Digital Signatures',
+    description: 'Inspects and cryptographically validates digital certificates and PAdES/PKCS#7 signatures.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    execute: async (): Promise<WebMcpResponse<{ signaturesCount: number; signatures: unknown[] }>> => {
+      if (!ctx.editorActions) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Editor actions unavailable.' } };
+      }
+
+      const results = await ctx.editorActions.validateActiveDocumentSignatures();
+      return {
+        ok: true,
+        result: {
+          signaturesCount: results.length,
+          signatures: results,
+        },
+      };
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // Transform Controls, Imposition & Watermarking Tools
+  // ---------------------------------------------------------------------------
+
+  // pdf.transformElement
+  tools.push({
+    name: 'pdf.transformElement',
+    title: 'Transform Canvas Element',
+    description: 'Applies geometric transformations (rotation, scaling, horizontal/vertical flipping, offsets) to a canvas element.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Identifier of the target canvas element.' },
+        rotation: { type: 'number', description: 'Rotation angle in degrees (0 to 360).' },
+        flipX: { type: 'boolean', description: 'Horizontal reflection flag.' },
+        flipY: { type: 'boolean', description: 'Vertical reflection flag.' },
+        scale: { type: 'number', description: 'Proportional scaling factor (e.g. 1.5 for 150%).' },
+        deltaX: { type: 'number', description: 'Horizontal coordinate offset in PDF points.' },
+        deltaY: { type: 'number', description: 'Vertical coordinate offset in PDF points.' },
+      },
+      required: ['id'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ id: string; transformed: boolean; bounds: { x: number; y: number; width: number; height: number; rotation: number } }>> => {
+      const callId = `transform_elem_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      if (!ctx.canvasStore) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Canvas store unavailable.' } };
+      }
+
+      const id = typeof input.id === 'string' ? input.id : '';
+      const existing = ctx.canvasStore.getElementById(id);
+      if (!existing) {
+        return { ok: false, error: { code: 'NODE_NOT_FOUND', message: `Element "${id}" not found.` } };
+      }
+
+      const patch: Record<string, unknown> = {};
+      if (typeof input.rotation === 'number') patch.rotation = (input.rotation % 360 + 360) % 360;
+      if (typeof input.flipX === 'boolean') patch.flipX = input.flipX;
+      if (typeof input.flipY === 'boolean') patch.flipY = input.flipY;
+      if (typeof input.deltaX === 'number') patch.x = existing.x + input.deltaX;
+      if (typeof input.deltaY === 'number') patch.y = existing.y + input.deltaY;
+      if (typeof input.scale === 'number' && input.scale > 0) {
+        patch.width = Math.max(5, existing.width * input.scale);
+        patch.height = Math.max(5, existing.height * input.scale);
+        if ('fontSize' in existing && typeof existing.fontSize === 'number') {
+          patch.fontSize = Math.max(4, existing.fontSize * input.scale);
+        }
+      }
+
+      ctx.canvasStore.updateElement(id, patch);
+      const updated = ctx.canvasStore.getElementById(id) || existing;
+      ctx.onAgentMutation({ page: existing.pageIndex, description: `Transformed element ${id}` });
+      ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+      ctx.rateLimiter.recordCall();
+
+      return {
+        ok: true,
+        result: {
+          id,
+          transformed: true,
+          bounds: {
+            x: updated.x,
+            y: updated.y,
+            width: updated.width,
+            height: updated.height,
+            rotation: updated.rotation,
+          },
+        },
+      };
+    },
+  });
+
+  // pdf.positionText
+  tools.push({
+    name: 'pdf.positionText',
+    title: 'Position Native Text Span',
+    description: 'Relocates a native PDF text span or block to new coordinates in PDF point space.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer', description: 'Zero-based page index.' },
+        id: { type: 'string', description: 'Target text node or span ID.' },
+        left: { type: 'number', description: 'New absolute left coordinate in PDF points.' },
+        top: { type: 'number', description: 'New absolute top coordinate in PDF points.' },
+        deltaX: { type: 'number', description: 'Relative horizontal offset in PDF points.' },
+        deltaY: { type: 'number', description: 'Relative vertical offset in PDF points.' },
+      },
+      required: ['pageIndex', 'id'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ pageIndex: number; id: string; left: number; top: number }>> => {
+      const callId = `pos_text_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const pageIndex = typeof input.pageIndex === 'number' ? input.pageIndex : 0;
+      const id = typeof input.id === 'string' ? input.id : '';
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const spans = ctx.pdfDoc.extractTextSpans(pageIndex);
+        const target = spans.find((s) => s.id === id) || spans[0];
+        if (!target) {
+          return { ok: false, error: { code: 'NODE_NOT_FOUND', message: `Text span "${id}" not found on page ${pageIndex}.` } };
+        }
+
+        const newLeft = typeof input.left === 'number' ? input.left : typeof input.deltaX === 'number' ? target.left + input.deltaX : target.left;
+        const newTop = typeof input.top === 'number' ? input.top : typeof input.deltaY === 'number' ? target.top + input.deltaY : target.top;
+
+        if (ctx.editorActions) {
+          const cmd = new PositionTextCommand(`Reposition text ${id}`, pageIndex, target, target.left, target.top, newLeft, newTop);
+          await ctx.editorActions.executeCommand(cmd);
+        } else {
+          ctx.pdfDoc.positionTextSpan(pageIndex, target, newLeft, newTop);
+          ctx.editorStore.incrementPageVersion(pageIndex);
+        }
+
+        ctx.onAgentMutation({ page: pageIndex, description: `Repositioned text ${id}` });
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: { pageIndex, id, left: newLeft, top: newTop },
+        };
+      });
+    },
+  });
+
+  // pdf.applyImposition
+  tools.push({
+    name: 'pdf.applyImposition',
+    title: 'Apply Document Imposition',
+    description: 'Rearranges and combines document pages into N-Up, Booklet, Posterize, or Continuous layouts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['nup', 'booklet', 'single-page', 'posterize', 'cut-stack'], description: 'Imposition layout type.' },
+        sheetSize: { type: 'string', default: 'source' },
+        orientation: { type: 'string', enum: ['auto', 'portrait', 'landscape'], default: 'auto' },
+        gridPreset: { type: 'string', default: '2x2' },
+        cols: { type: 'integer' },
+        rows: { type: 'integer' },
+        marginPts: { type: 'number', default: 18 },
+        gutterPts: { type: 'number', default: 10 },
+        drawPageBorders: { type: 'boolean', default: false },
+        drawCutMarks: { type: 'boolean', default: false },
+        drawFoldLine: { type: 'boolean', default: true },
+        bookletBindingSide: { type: 'string', enum: ['left', 'right', 'top'], default: 'left' },
+        destination: { type: 'string', enum: ['replace', 'workspace'], default: 'replace' },
+      },
+      required: ['type'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ type: string; pageCount: number; destination: string }>> => {
+      const callId = `imposition_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      if (!ctx.editorActions) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Editor actions unavailable.' } };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const impositionType = input.type as 'nup' | 'booklet' | 'single-page' | 'posterize' | 'cut-stack';
+        const destination = input.destination === 'workspace' ? 'workspace' : 'replace';
+
+        let config: ImpositionConfig;
+        if (impositionType === 'booklet') {
+          config = {
+            type: 'booklet',
+            sheetSize: (input.sheetSize as 'source-2x') || 'source-2x',
+            orientation: (input.orientation as 'landscape') || 'landscape',
+            bindingSide: (input.bookletBindingSide as 'left' | 'right' | 'top') || 'left',
+            outputMode: 'duplex',
+            autoPad: true,
+            creepPtsPerSheet: 0.1,
+            marginPts: typeof input.marginPts === 'number' ? input.marginPts : 18,
+            gutterPts: typeof input.gutterPts === 'number' ? input.gutterPts : 10,
+            drawPageBorders: Boolean(input.drawPageBorders),
+            drawFoldLine: input.drawFoldLine !== false,
+          };
+        } else if (impositionType === 'single-page') {
+          config = {
+            type: 'single-page',
+            layout: 'vertical-strip',
+            marginPts: typeof input.marginPts === 'number' ? input.marginPts : 18,
+            spacingPts: typeof input.gutterPts === 'number' ? input.gutterPts : 10,
+            backgroundColor: '#ffffff',
+            drawPageBorders: Boolean(input.drawPageBorders),
+          };
+        } else if (impositionType === 'posterize') {
+          config = {
+            type: 'posterize',
+            sheetSize: 'A4',
+            orientation: 'portrait',
+            tileScale: 2.0,
+            overlapPts: 18,
+            marginPts: 18,
+            drawCutGuides: true,
+            drawSheetNumbers: true,
+            sourcePageIndex: 0,
+          };
+        } else if (impositionType === 'cut-stack') {
+          config = {
+            type: 'cut-stack',
+            sheetSize: 'A4',
+            orientation: 'auto',
+            grid: { cols: 2, rows: 1 },
+            marginPts: typeof input.marginPts === 'number' ? input.marginPts : 18,
+            gutterPts: typeof input.gutterPts === 'number' ? input.gutterPts : 10,
+            drawCutMarks: Boolean(input.drawCutMarks),
+            drawPageBorders: Boolean(input.drawPageBorders),
+          };
+        } else {
+          // nup
+          config = {
+            type: 'nup',
+            sheetSize: (input.sheetSize as 'A4') || 'A4',
+            orientation: (input.orientation as 'auto') || 'auto',
+            grid: {
+              cols: typeof input.cols === 'number' ? input.cols : 2,
+              rows: typeof input.rows === 'number' ? input.rows : 2,
+            },
+            pageFlow: 'horizontal',
+            marginPts: typeof input.marginPts === 'number' ? input.marginPts : 18,
+            gutterPts: typeof input.gutterPts === 'number' ? input.gutterPts : 10,
+            drawPageBorders: Boolean(input.drawPageBorders),
+            drawCutMarks: Boolean(input.drawCutMarks),
+            autoRotateSubpages: true,
+          };
+        }
+
+        await ctx.editorActions!.applyImposition(config, destination, ctx.canvasStore || undefined);
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            type: impositionType,
+            pageCount: ctx.pdfDoc.getPageCount(),
+            destination,
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.addWatermark
+  tools.push({
+    name: 'pdf.addWatermark',
+    title: 'Add Document Watermark',
+    description: 'Places a semi-transparent text watermark across document pages.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Watermark text (e.g. "CONFIDENTIAL", "DRAFT").' },
+        color: { type: 'string', default: 'rgba(220, 38, 38, 0.25)', description: 'CSS color string with alpha transparency.' },
+        fontSize: { type: 'number', default: 54, description: 'Font size in points.' },
+        rotation: { type: 'number', default: -45, description: 'Watermark rotation angle in degrees.' },
+        pageRange: { type: 'string', default: 'all', description: 'Target pages: "all" or comma-separated indices "0, 1, 2".' },
+      },
+      required: ['text'],
+    },
+    execute: async (input): Promise<WebMcpResponse<{ text: string; pagesWatermarked: number }>> => {
+      const callId = `watermark_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const text = typeof input.text === 'string' ? input.text : 'SAMPLE';
+      const color = typeof input.color === 'string' ? input.color : 'rgba(220, 38, 38, 0.25)';
+      const fontSize = typeof input.fontSize === 'number' ? input.fontSize : 54;
+      const rotation = typeof input.rotation === 'number' ? input.rotation : -45;
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        const totalPages = ctx.pdfDoc.getPageCount();
+        let targetPages: number[] = [];
+
+        if (input.pageRange === 'all' || !input.pageRange) {
+          targetPages = Array.from({ length: totalPages }, (_, i) => i);
+        } else {
+          targetPages = String(input.pageRange)
+            .split(',')
+            .map((s) => parseInt(s.trim(), 10))
+            .filter((n) => !isNaN(n) && n >= 0 && n < totalPages);
+        }
+
+        for (const pageIdx of targetPages) {
+          const dims = ctx.pdfDoc.getPageDimensions(pageIdx);
+          const cx = dims.widthPts / 2;
+          const cy = dims.heightPts / 2;
+          const textWidth = text.length * fontSize * 0.55;
+          const textHeight = fontSize * 1.2;
+
+          ctx.pdfDoc.drawText(pageIdx, {
+            text,
+            x: cx - textWidth / 2,
+            y: cy - textHeight / 2,
+            width: textWidth,
+            height: textHeight,
+            fontSize,
+            fontFamily: 'Helvetica',
+            color,
+            rotation,
+            fontWeight: 'bold',
+          });
+          ctx.editorStore.incrementPageVersion(pageIdx);
+          ctx.onAgentMutation({ page: pageIdx, description: `Watermark applied: "${text}"` });
+        }
+
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            text,
+            pagesWatermarked: targetPages.length,
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.promoteToCanvas
+  tools.push({
+    name: 'pdf.promoteToCanvas',
+    title: 'Promote PDF Object to Canvas',
+    description: 'Promotes a native PDF object (AcroForm field, text span, shape, or image) to an interactive canvas element.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer', description: 'Zero-based page index containing the object.' },
+        type: {
+          type: 'string',
+          enum: ['form-field', 'text', 'shape', 'image'],
+          description: 'Type of native PDF object to promote.',
+        },
+        targetId: {
+          type: 'string',
+          description: 'Field name (e.g. "demo.first_name"), span ID, or object identifier to promote.',
+        },
+      },
+      required: ['pageIndex', 'type', 'targetId'],
+    },
+    execute: async (input: { pageIndex?: number; type?: string; targetId?: string }): Promise<WebMcpResponse<{
+      id: string;
+      kind: string;
+      pageIndex: number;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    }>> => {
+      const callId = `promote_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const pageIndex = typeof input.pageIndex === 'number' ? input.pageIndex : 0;
+      const type = (input.type as 'form-field' | 'text' | 'shape' | 'image') || 'form-field';
+      const targetId = typeof input.targetId === 'string' ? input.targetId.trim() : '';
+
+      if (!ctx.canvasStore || !ctx.editorActions) {
+        return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Canvas store or actions unavailable.' } };
+      }
+
+      return ctx.sdgLock.withLock(callId, async () => {
+        let spanToPromote: EditableSpan | null = null;
+
+        if (type === 'form-field') {
+          const formSpans = ctx.pdfDoc.extractFormFieldSpans(pageIndex);
+          spanToPromote = formSpans.find(
+            (s) => s.fieldName === targetId || s.fieldId === targetId || s.id === targetId
+          ) || null;
+          if (!spanToPromote && formSpans.length > 0) {
+            const idx = parseInt(targetId, 10);
+            if (!isNaN(idx) && idx >= 0 && idx < formSpans.length) {
+              spanToPromote = formSpans[idx];
+            }
+          }
+        } else if (type === 'text') {
+          const spans = ctx.pdfDoc.extractTextSpans(pageIndex);
+          spanToPromote = spans.find((s) => s.id === targetId || s.text.includes(targetId)) || null;
+        } else if (type === 'image') {
+          const page = ctx.pdfDoc.getPage(pageIndex);
+          const objects = page ? page.extractObjects() : { images: [], shapes: [] };
+          spanToPromote = objects.images.find((img) => img.id === targetId || String(img.pdfObjectIndex) === targetId) || null;
+        } else if (type === 'shape') {
+          const page = ctx.pdfDoc.getPage(pageIndex);
+          const objects = page ? page.extractObjects() : { images: [], shapes: [] };
+          spanToPromote = objects.shapes.find((sh) => sh.id === targetId || String(sh.pdfObjectIndex) === targetId) || null;
+        }
+
+        if (!spanToPromote) {
+          return {
+            ok: false,
+            error: {
+              code: 'NODE_NOT_FOUND',
+              message: `Native ${type} object "${targetId}" not found on page ${pageIndex}.`,
+            },
+          };
+        }
+
+        const newId = await ctx.editorActions!.extractObjectToCanvas(type, spanToPromote, ctx.canvasStore!);
+        if (!newId) {
+          return {
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: `Failed extracting ${type} object to canvas.` },
+          };
+        }
+
+        const promoted = ctx.canvasStore!.getElementById(newId);
+        ctx.onAgentMutation({ page: pageIndex, description: `Promote ${type} "${targetId}" to canvas` });
+        ctx.sdgBuilder.buildGraph(ctx.pdfDoc, ctx.canvasStore);
+        ctx.rateLimiter.recordCall();
+
+        return {
+          ok: true,
+          result: {
+            id: newId,
+            kind: promoted?.kind || type,
+            pageIndex,
+            x: promoted?.x ?? spanToPromote.left,
+            y: promoted?.y ?? spanToPromote.top,
+            width: promoted?.width ?? spanToPromote.width,
+            height: promoted?.height ?? spanToPromote.height,
+          },
+        };
+      });
+    },
+  });
+
+  // pdf.addHighlight
+  tools.push({
+    name: 'pdf.addHighlight',
+    title: 'Add Highlight Annotation',
+    description: 'Highlights a text range, keyword matches, or rectangular area with customizable color and opacity.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageIndex: { type: 'integer', description: 'Zero-based page index.' },
+        charStartIndex: { type: 'integer', description: 'Starting character index in page text stream.' },
+        charEndIndex: { type: 'integer', description: 'Ending character index in page text stream.' },
+        query: { type: 'string', description: 'Text string/keyword to search and highlight on the page.' },
+        x: { type: 'number', description: 'X coordinate for rectangular area highlight.' },
+        y: { type: 'number', description: 'Y coordinate for rectangular area highlight.' },
+        width: { type: 'number', description: 'Width for rectangular area highlight.' },
+        height: { type: 'number', description: 'Height for rectangular area highlight.' },
+        color: { type: 'string', default: '#fde047', description: 'CSS color string for highlight (default yellow #fde047).' },
+        opacity: { type: 'number', default: 0.4, description: 'Opacity between 0 and 1 (default 0.4).' },
+        mode: { type: 'string', enum: ['canvas', 'pdf'], default: 'canvas', description: 'Target highlight layer.' },
+      },
+      required: ['pageIndex'],
+    },
+    execute: async (input: {
+      pageIndex?: number;
+      charStartIndex?: number;
+      charEndIndex?: number;
+      query?: string;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      color?: string;
+      opacity?: number;
+      mode?: 'canvas' | 'pdf';
+    }): Promise<WebMcpResponse<{
+      pageIndex: number;
+      highlightCount: number;
+      highlightIds: string[];
+      rects: Array<{ x: number; y: number; width: number; height: number }>;
+    }>> => {
+      const callId = `highlight_${Date.now()}`;
+      const rateErr = checkMutationPreconditions(callId);
+      if (rateErr) return rateErr;
+
+      const pageIndex = typeof input.pageIndex === 'number' ? input.pageIndex : 0;
+      const color = typeof input.color === 'string' ? input.color : '#fde047';
+      const opacity = typeof input.opacity === 'number' ? Math.max(0.05, Math.min(1, input.opacity)) : 0.4;
+      const mode = input.mode === 'pdf' ? 'pdf' : 'canvas';
+
