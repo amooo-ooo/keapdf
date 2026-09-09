@@ -1,15 +1,15 @@
+import type { EditableTextSpan, TextLine } from '../core/types';
+
 /**
  * UI-specific type definitions for editor state management.
  * Keeps core/types.ts focused on PDFium data contracts.
  */
 
 /** Active editing tool in the toolbar. */
-export type EditorTool = 'select' | 'hand' | 'text' | 'place' | 'highlight' | 'pen' | 'signature' | 'note' | 'redact';
+export type EditorTool = 'select' | 'hand' | 'text' | 'place' | 'highlight' | 'pen' | 'signature' | 'note' | 'redact' | 'eraser';
 
 /** Content mode for the left panel. */
 export type LeftPanelMode = 'workspace' | 'components' | 'annotate' | 'imposition' | 'tools' | 'settings';
-
-import type { EditableTextSpan, TextLine } from '../core/types';
 
 /** State for an active inline text edit on the canvas. */
 export interface InlineEditState {
@@ -17,6 +17,7 @@ export interface InlineEditState {
   textValue: string;
   span: EditableTextSpan;
   styledLines?: TextLine[];
+  matchedFontFamily?: string;
 }
 
 /** Visual transform applied to a PDF page on the canvas. */
@@ -32,3 +33,23 @@ export const DEFAULT_PAGE_TRANSFORM: Readonly<PageTransform> = {
   scaleX: 1,
   scaleY: 1,
 };
+
+/** Measurement unit for page cropping margins. */
+export type CropUnit = 'pt' | 'in' | 'mm';
+
+/** Target scope for page cropping operations. */
+export type CropScope = 'current' | 'all' | 'selected';
+
+/** Active crop interaction state for the editor. */
+export interface ActiveCropState {
+  pageIndex: number;
+  margins: {
+    top: number;
+    right: number;
+    bottom: number;
+    left: number;
+  };
+  unit: CropUnit;
+  scope: CropScope;
+}
+

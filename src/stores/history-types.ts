@@ -1,12 +1,23 @@
 /**
- * Type definitions for the PDF editor history and undo/redo system.
+ * Type definitions for the command-based history and undo/redo system.
  */
 
+import type { Command } from '../core/command';
 import type { CanvasElement } from './canvas-types';
 import type { PageTransform } from './types';
 
 /**
- * Immutable snapshot representing a discrete state in the editor history.
+ * Command-based history state for a single workspace file.
+ */
+export interface FileCommandHistory {
+  /** Stack of past commands for undo. */
+  past: Command[];
+  /** Stack of future commands for redo. */
+  future: Command[];
+}
+
+/**
+ * Immutable snapshot representing a discrete state in the editor history (for baseline tracking).
  */
 export interface HistorySnapshot {
   /** Unique snapshot identifier. */
@@ -43,14 +54,4 @@ export interface FileHistoryState {
   present: HistorySnapshot | null;
   /** Stack of future snapshots for redo. */
   future: HistorySnapshot[];
-}
-
-/**
- * Options for recording a history snapshot.
- */
-export interface SnapshotOptions {
-  /** Whether to force serialization of the underlying PDFium document. */
-  forcePdfSave?: boolean;
-  /** Optional key for coalescing consecutive rapid mutations. */
-  coalesceKey?: string;
 }

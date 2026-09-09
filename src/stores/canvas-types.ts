@@ -4,17 +4,26 @@
  * that render on top of PDF pages and can be dragged, resized, and edited.
  */
 
-/** Supported canvas element kinds. */
-export type CanvasElementKind = 'text' | 'image' | 'shape' | 'form-field' | 'path' | 'note';
+/** Built-in canvas element kinds. */
+export type BuiltinCanvasElementKind = 'text' | 'image' | 'shape' | 'form-field' | 'path' | 'note';
+
+/** Supported canvas element kinds, open to extension by plugins. */
+export type CanvasElementKind = BuiltinCanvasElementKind | (string & {});
 
 /** Shape sub-types for the shape element kind. */
 export type ShapeVariant = 'rectangle' | 'circle' | 'line' | 'arrow';
 
 /** Form field sub-types. */
-export type FormFieldVariant = 'text-input' | 'checkbox' | 'radio' | 'dropdown' | 'signature' | 'attachment';
+export type FormFieldVariant = 'text-input' | 'checkbox' | 'radio' | 'dropdown' | 'signature' | 'attachment' | 'button';
 
 /** Resize handle positions around an element bounding box. */
 export type HandlePosition = 'top-left' | 'top' | 'top-right' | 'right' | 'bottom-right' | 'bottom' | 'bottom-left' | 'left';
+
+/** 2D point coordinate in PDF points. */
+export interface Point {
+  x: number;
+  y: number;
+}
 
 /** Base properties shared by all canvas elements. */
 export interface CanvasElementBase {
@@ -32,7 +41,7 @@ export interface CanvasElementBase {
   flipY: boolean;
 }
 
-import type { EditableTextSpan } from '../core/types';
+import type { EditableTextSpan, EditableFormFieldSpan } from '../core/types';
 
 /** A styled segment or portion of text within a line or element. */
 export interface TextSegment {
@@ -50,10 +59,16 @@ export interface TextSegment {
   fontStyle?: 'normal' | 'italic';
   /** CSS color string (e.g. hex #000000 or rgba). */
   color?: string;
+  /** Background highlight color string (e.g. rgba). */
+  backgroundColor?: string;
   /** Character index in the original text stream if extracted from PDF. */
   charStartIndex?: number;
   /** Character count in this segment. */
   charCount?: number;
+  /** Whether segment has underline decoration. */
+  underline?: boolean;
+  /** Whether segment has strikethrough decoration. */
+  strikethrough?: boolean;
   /** Width in PDF points. */
   width?: number;
   /** Height in PDF points. */
@@ -86,6 +101,12 @@ export interface TextElementLine {
   baselineY?: number;
   /** Dominant font size for this line. */
   fontSize?: number;
+  /** Whether line has underline decoration. */
+  underline?: boolean;
+  /** Whether line has strikethrough decoration. */
+  strikethrough?: boolean;
+  /** Background highlight color for the line. */
+  backgroundColor?: string;
 }
 
 /** Text box element. */
@@ -99,8 +120,11 @@ export interface TextElement extends CanvasElementBase {
   backgroundColor?: string;
   fontWeight: 'normal' | 'bold';
   fontStyle: 'normal' | 'italic';
+  underline?: boolean;
+  strikethrough?: boolean;
   textAlign: 'left' | 'center' | 'right';
   lineHeight?: number;
+  letterSpacing?: string;
   lines?: TextElementLine[];
   segments?: TextSegment[];
   originalSpan?: EditableTextSpan;
@@ -131,6 +155,23 @@ export interface FormFieldElement extends CanvasElementBase {
   variant: FormFieldVariant;
   label: string;
   placeholder: string;
+  fontSize?: number;
+  fontFamily?: string;
+  color?: string;
+  backgroundColor?: string;
+  borderColor?: string;
+  borderWidth?: number;
+  borderStyle?: 'solid' | 'dashed' | 'dotted' | 'none' | 'inset' | 'underline';
+  borderRadius?: number;
+  textAlign?: 'left' | 'center' | 'right';
+  required?: boolean;
+  readOnly?: boolean;
+  value?: string;
+  options?: string[];
+  /** Original native AcroForm field name if extracted or promoted from the document. */
+  sourceFieldName?: string;
+  /** Original native AcroForm field span if extracted or promoted from the document. */
+  originalSpan?: EditableFormFieldSpan;
 }
 
 /** Path element for freehand drawing and highlights. */
@@ -152,8 +193,11 @@ export interface NoteElement extends CanvasElementBase {
   isOpen: boolean;
 }
 
-/** Discriminated union of all canvas element types. */
-export type CanvasElement = TextElement | ImageElement | ShapeElement | FormFieldElement | PathElement | NoteElement;
+/** Built-in discriminated union of standard canvas element types. */
+export type BuiltinCanvasElement = TextElement | ImageElement | ShapeElement | FormFieldElement | PathElement | NoteElement;
+
+/** Union of all canvas element types, open to custom plugin element extension. */
+export type CanvasElement = BuiltinCanvasElement | (CanvasElementBase & { kind: string; [key: string]: unknown });
 
 /** Active drag/resize interaction state. */
 export interface DragState {
@@ -166,10 +210,25 @@ export interface DragState {
   originY: number;
   originWidth: number;
   originHeight: number;
+  originPageIndex?: number; // element page index at drag start
+  grabOffsetX?: number; // pointer offset X from element.x in page points at drag start
+  grabOffsetY?: number; // pointer offset Y from element.y in page points at drag start
+  originPoints?: Point[]; // path points snapshot at drag start
   originRotation?: number; // element rotation at drag start (used for rotate mode)
   originFontSize?: number; // font size at drag start (used for scaling text)
   originLines?: TextElementLine[]; // lines snapshot at drag start
   originSegments?: TextSegment[]; // segments snapshot at drag start
+}
+
+/** Active drag-and-drop ghost preview indicator on the canvas. */
+export interface DropPreviewState {
+  pageIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  kind: CanvasElementKind;
+  label?: string;
 }
 
 /** Data transferred during a sidebar drag-to-canvas operation. */
@@ -182,10 +241,25 @@ export interface ElementDropPayload {
   fontSize?: number;
   fontWeight?: 'normal' | 'bold';
   fontFamily?: string;
+  width?: number;
+  height?: number;
+  color?: string;
+  backgroundColor?: string;
+  borderColor?: string;
+  borderWidth?: number;
+  borderStyle?: 'solid' | 'dashed' | 'dotted' | 'none' | 'inset' | 'underline';
+  borderRadius?: number;
+  textAlign?: 'left' | 'center' | 'right';
+  placeholder?: string;
+  value?: string;
+  options?: string[];
+  required?: boolean;
+  readOnly?: boolean;
+  src?: string;
 }
 
-/** Default dimensions for newly created elements (in PDF points). */
-export const ELEMENT_DEFAULTS: Record<CanvasElementKind, { width: number; height: number }> = {
+/** Default dimensions for newly created built-in elements (in PDF points). */
+export const ELEMENT_DEFAULTS: Record<BuiltinCanvasElementKind, { width: number; height: number }> = {
   text: { width: 150, height: 30 },
   image: { width: 200, height: 150 },
   shape: { width: 100, height: 100 },
