@@ -1,30 +1,50 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { tick } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
-  import { useEditorActions } from '../../stores/editor-actions';
+  import { useEditorActions, ZOOM_MIN, ZOOM_MAX, type ScrollTargetOptions } from '../../stores/editor-actions';
   import { useCanvasStore } from '../../stores/canvas.svelte';
   import { useCanvasActions } from '../../stores/canvas-actions';
-  import type { ElementDropPayload } from '../../stores/canvas-types';
-  import { screenToPageCoords } from '../../utils/geometry';
+  import {
+    ELEMENT_DEFAULTS,
+    type ElementDropPayload,
+    type BuiltinCanvasElementKind
+  } from '../../stores/canvas-types';
+  import {
+    screenToPageCoordsWithMetrics,
+    capturePageMetrics,
+    type CachedPageMetrics,
+    calculatePageCenteringScroll,
+    resolveTargetPageIndex,
+    calculateOutOfBoundsScrollSpeeds,
+    calculatePageLayoutDimensions,
+    type PageLayoutBound,
+    type PageLayoutDimensions,
+    computePageVerticalOffsets,
+    resolvePageIndexFromOffsets,
+    type PageVerticalOffset,
+  } from '../../utils/geometry';
   import PdfPageView from './PdfPageView.svelte';
   import PageOrganizerPanel from '../panels/PageOrganizerPanel.svelte';
 
   import { Button } from '$lib/components/ui/button/index.js';
-  import { FileText } from 'lucide-svelte';
+  import { FileText, Globe, AlertCircle, Files, FileType } from 'lucide-svelte';
+  import { documentConverter } from '../../services/conversion';
+  import { useFeatureFlagStore } from '../../core/feature-flags';
 
   const store = useEditorStore();
   const actions = useEditorActions();
   const canvasStore = useCanvasStore();
   const canvasActions = useCanvasActions();
+  const featureFlags = useFeatureFlagStore();
 
   let viewportEl: HTMLElement | null = $state(null);
 
   let isSpaceDown = $state(false);
   let isPanning = $state(false);
-  let panStartX = $state(0);
-  let panStartY = $state(0);
-  let scrollStartX = $state(0);
-  let scrollStartY = $state(0);
+  let panStartX = 0;
+  let panStartY = 0;
+  let scrollStartX = 0;
+  let scrollStartY = 0;
   
   let activePointerId: number | null = null;
   let activePointerTarget: Element | null = null;
@@ -47,8 +67,13 @@
 
     if (canvasStore.selectedElement) {
       if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        e.preventDefault();
         canvasActions.deleteSelectedElement();
       } else if (e.key === 'Escape') {
+        e.stopImmediatePropagation();
+        e.stopPropagation();
         canvasStore.selectElement(null);
       }
     }
@@ -63,7 +88,8 @@
   }
 
   function handlePointerDown(e: PointerEvent): void {
-    if ((isSpaceDown && e.button === 0) || e.button === 1) { // Space+Left or Middle click
+    const shouldPan = (store.activeTool === 'hand' && e.button === 0) || (isSpaceDown && e.button === 0) || e.button === 1;
+    if (shouldPan) {
       e.preventDefault();
       isPanning = true;
       panStartX = e.clientX;
@@ -86,6 +112,137 @@
     }
   }
 
+  let autoScrollRafId: number | null = null;
+  let autoScrollSpeedX = 0;
+  let autoScrollSpeedY = 0;
+  let lastDragClientX: number | null = null;
+  let lastDragClientY: number | null = null;
+  interface CachedPageLayout {
+    pageIndex: number;
+    offsetTop: number;
+    offsetBottom: number;
+  }
+  let cachedPageLayouts: CachedPageLayout[] | null = null;
+  let cachedTargetPageIndex: number | null = null;
+  let cachedTargetLayerEl: HTMLElement | null = null;
+  let dropRafId: number | null = null;
+  let cachedDropPageMetrics: { pageIndex: number; metrics: CachedPageMetrics; pageEl: HTMLElement } | null = null;
+  let latestDragClientX = 0;
+  let latestDragClientY = 0;
+  let latestDragTarget: HTMLElement | null = null;
+
+  function initDragPageLayouts(): void {
+    if (!viewportEl) return;
+    const viewportRect = viewportEl.getBoundingClientRect();
+    const currentScrollTop = viewportEl.scrollTop;
+    const pageContainers = Array.from(viewportEl.querySelectorAll<HTMLElement>('[data-page-index]'));
+    const layouts: CachedPageLayout[] = [];
+    for (const container of pageContainers) {
+      const attr = container.getAttribute('data-page-index');
+      if (attr !== null) {
+        const idx = parseInt(attr, 10);
+        if (!isNaN(idx)) {
+          const rect = container.getBoundingClientRect();
+          const offsetTop = rect.top - viewportRect.top + currentScrollTop;
+          const offsetBottom = rect.bottom - viewportRect.top + currentScrollTop;
+          layouts.push({ pageIndex: idx, offsetTop, offsetBottom });
+        }
+      }
+    }
+    layouts.sort((a, b) => a.pageIndex - b.pageIndex);
+    cachedPageLayouts = layouts;
+  }
+
+  function performDragMove(clientX: number, clientY: number): void {
+    if (!canvasStore.dragState || canvasStore.dragState.mode !== 'move' || !viewportEl) return;
+    const draggedElement = canvasStore.elements.find(el => el.id === canvasStore.dragState?.elementId);
+    if (!draggedElement) return;
+
+    // Resolve target page based on vertical pointer position and midpoint thresholds
+    let targetPageIndex = draggedElement.pageIndex;
+    if (store.pageCount > 1) {
+      if (!cachedPageLayouts) {
+        initDragPageLayouts();
+      }
+      if (cachedPageLayouts && cachedPageLayouts.length > 0) {
+        const viewportRect = viewportEl.getBoundingClientRect();
+        const currentScrollTop = viewportEl.scrollTop;
+        const pageBounds: PageLayoutBound[] = cachedPageLayouts.map((c) => ({
+          pageIndex: c.pageIndex,
+          top: c.offsetTop - currentScrollTop + viewportRect.top,
+          bottom: c.offsetBottom - currentScrollTop + viewportRect.top,
+        }));
+        targetPageIndex = resolveTargetPageIndex(clientY, pageBounds, draggedElement.pageIndex);
+      }
+    }
+
+    if (targetPageIndex !== cachedTargetPageIndex || !cachedTargetLayerEl) {
+      cachedTargetPageIndex = targetPageIndex;
+      const targetPageSelector = `[data-page-index="${targetPageIndex}"]`;
+      cachedTargetLayerEl = (
+        viewportEl.querySelector(`${targetPageSelector} [data-canvas-layer]`) ??
+        viewportEl.querySelector(`${targetPageSelector} [data-page-element]`)
+      ) as HTMLElement | null;
+    }
+
+    if (cachedTargetLayerEl) {
+      const targetPt = store.getPageTransform(targetPageIndex);
+      canvasActions.updateDrag(clientX, clientY, cachedTargetLayerEl, store.zoom, targetPt, targetPageIndex);
+    }
+  }
+
+  function updateAutoScroll(clientX: number, clientY: number): void {
+    if (!viewportEl || !canvasStore.dragState || canvasStore.dragState.mode !== 'move') {
+      stopAutoScroll();
+      return;
+    }
+
+    const rect = viewportEl.getBoundingClientRect();
+    const { speedX, speedY } = calculateOutOfBoundsScrollSpeeds(clientX, clientY, rect);
+
+    autoScrollSpeedX = speedX;
+    autoScrollSpeedY = speedY;
+
+    if (speedX === 0 && speedY === 0) {
+      stopAutoScroll();
+      return;
+    }
+
+    if (autoScrollRafId === null) {
+      startAutoScroll();
+    }
+  }
+
+  function startAutoScroll(): void {
+    if (autoScrollRafId !== null) return;
+    const step = () => {
+      if (viewportEl && (autoScrollSpeedX !== 0 || autoScrollSpeedY !== 0) && canvasStore.dragState) {
+        if (autoScrollSpeedY !== 0) {
+          viewportEl.scrollTop += autoScrollSpeedY;
+        }
+        if (autoScrollSpeedX !== 0) {
+          viewportEl.scrollLeft += autoScrollSpeedX;
+        }
+        if (lastDragClientX !== null && lastDragClientY !== null && canvasStore.dragState.mode === 'move') {
+          performDragMove(lastDragClientX, lastDragClientY);
+        }
+        autoScrollRafId = requestAnimationFrame(step);
+      } else {
+        stopAutoScroll();
+      }
+    };
+    autoScrollRafId = requestAnimationFrame(step);
+  }
+
+  function stopAutoScroll(): void {
+    if (autoScrollRafId !== null) {
+      cancelAnimationFrame(autoScrollRafId);
+      autoScrollRafId = null;
+    }
+    autoScrollSpeedX = 0;
+    autoScrollSpeedY = 0;
+  }
+
   function handlePointerMove(e: PointerEvent): void {
     if (isPanning && viewportEl) {
       e.preventDefault();
@@ -97,28 +254,34 @@
       const draggedElement = canvasStore.elements.find(el => el.id === canvasStore.dragState?.elementId);
       if (!draggedElement) return;
 
-      // Prefer the dedicated canvas layer for coordinate conversion.
-      // Falls back to any page element layer for backward compatibility.
-      const pageSelector = `[data-page-index="${draggedElement.pageIndex}"]`;
-      const layerEl = (
-        viewportEl.querySelector(`${pageSelector} [data-canvas-layer]`) ??
-        viewportEl.querySelector(`${pageSelector} [data-page-element]`)
-      ) as HTMLElement | null;
-      if (!layerEl) return;
-
-      const pt = store.getPageTransform(draggedElement.pageIndex);
-
       if (canvasStore.dragState.mode === 'move') {
-        canvasActions.updateDrag(e.clientX, e.clientY, layerEl, store.zoom, pt);
-      } else if (canvasStore.dragState.mode === 'resize') {
-        canvasActions.updateResize(e.clientX, e.clientY, layerEl, store.zoom, e.shiftKey, pt);
-      } else if (canvasStore.dragState.mode === 'rotate') {
-        canvasActions.updateRotate(e.clientX, e.clientY, layerEl, store.zoom, pt);
+        lastDragClientX = e.clientX;
+        lastDragClientY = e.clientY;
+        updateAutoScroll(e.clientX, e.clientY);
+        performDragMove(e.clientX, e.clientY);
+      } else {
+        const pageSelector = `[data-page-index="${draggedElement.pageIndex}"]`;
+        const layerEl = (
+          viewportEl.querySelector(`${pageSelector} [data-canvas-layer]`) ??
+          viewportEl.querySelector(`${pageSelector} [data-page-element]`)
+        ) as HTMLElement | null;
+        if (!layerEl) return;
+
+        const pt = store.getPageTransform(draggedElement.pageIndex);
+        if (canvasStore.dragState.mode === 'resize') {
+          canvasActions.updateResize(e.clientX, e.clientY, layerEl, store.zoom, e.shiftKey, pt);
+        } else if (canvasStore.dragState.mode === 'rotate') {
+          canvasActions.updateRotate(e.clientX, e.clientY, layerEl, store.zoom, pt);
+        }
       }
     }
   }
 
   function handlePointerUp(): void {
+    stopAutoScroll();
+    lastDragClientX = null;
+    lastDragClientY = null;
+
     if (isPanning) {
       isPanning = false;
       try {
@@ -143,6 +306,9 @@
         canvasActions.endRotate();
       }
     }
+    cachedPageLayouts = null;
+    cachedTargetPageIndex = null;
+    cachedTargetLayerEl = null;
   }
 
   function handleWindowClick(e: MouseEvent): void {
@@ -173,14 +339,66 @@
   }
 
   function handleWindowBlur(): void {
+    stopAutoScroll();
     isSpaceDown = false;
     isPanning = false;
   }
 
+
   let scrollRafId: number | null = null;
+  let isCentering = false;
+  let cachedVerticalOffsets: PageVerticalOffset[] | null = null;
+  let cachedFirstPageOffsetTop: number | null = null;
+
+  function invalidatePageOffsetsCache(): void {
+    cachedVerticalOffsets = null;
+    cachedFirstPageOffsetTop = null;
+  }
+
+  function getPageVerticalOffsets(): PageVerticalOffset[] {
+    if (cachedVerticalOffsets) return cachedVerticalOffsets;
+    if (!viewportEl || store.pageCount === 0) return [];
+
+    let currentY: number = cachedFirstPageOffsetTop !== null ? cachedFirstPageOffsetTop : 0;
+    if (cachedFirstPageOffsetTop === null) {
+      if (contentEl) {
+        const firstChild = contentEl.querySelector('[data-page-index="0"]') as HTMLElement | null;
+        currentY = firstChild ? firstChild.offsetTop : (viewportEl.clientHeight * 0.2);
+      } else {
+        currentY = viewportEl.clientHeight * 0.2;
+      }
+      cachedFirstPageOffsetTop = currentY;
+    }
+
+    const layouts: PageLayoutDimensions[] = [];
+    for (let i = 0; i < store.pageCount; i++) {
+      layouts.push(getPageLayout(i));
+    }
+
+    cachedVerticalOffsets = computePageVerticalOffsets(layouts, currentY);
+    return cachedVerticalOffsets;
+  }
+
+  function resolvePageIndexAtScrollY(targetScrollY: number): number {
+    if (!viewportEl || store.pageCount <= 1) return 0;
+    const offsets = getPageVerticalOffsets();
+    return resolvePageIndexFromOffsets(targetScrollY, offsets);
+  }
+
+  function computeCurrentPage(): void {
+    if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0 || store.showOrganizerView || isCentering || store.isZooming) return;
+
+    const viewportCenterScrollY = viewportEl.scrollTop + viewportEl.clientHeight / 2;
+    const resolvedIndex = resolvePageIndexAtScrollY(viewportCenterScrollY);
+
+    if (resolvedIndex !== store.currentPageIndex) {
+      actions.setCurrentPageFromScroll(resolvedIndex);
+    }
+  }
 
   function handleScroll(): void {
-    if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0 || store.showOrganizerView) return;
+    cachedDropPageMetrics = null;
+    if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0 || store.showOrganizerView || isCentering || store.isZooming) return;
     if (scrollRafId !== null) return;
 
     scrollRafId = requestAnimationFrame(() => {
@@ -189,67 +407,109 @@
     });
   }
 
-  function computeCurrentPage(): void {
-    if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0 || store.showOrganizerView) return;
+  function centerPage(pageIndex: number = 0, behavior: ScrollBehavior = 'instant', options?: ScrollTargetOptions): void {
+    if (!viewportEl || !contentEl || !store.isDocumentLoaded || store.pageCount === 0 || canvasStore.dragState) return;
+    const pageEl = viewportEl.querySelector(`[data-page-index="${pageIndex}"]`) as HTMLElement | null;
+    if (!pageEl) return;
 
-    const viewportRect = viewportEl.getBoundingClientRect();
-    const viewportCenterY = viewportRect.top + viewportRect.height / 2;
+    // Find the visible canvas opening between LeftPanel and RightPanel.
+    // Falls back to viewportEl if .editor-shell-canvas is not present (e.g. in headless tests).
+    const visibleContainer = (document.querySelector('.editor-shell-canvas') as HTMLElement | null) ?? viewportEl;
 
-    let closestPage = store.currentPageIndex;
-    let minDistance = Infinity;
+    const pageRect = pageEl.getBoundingClientRect();
+    const visibleRect = visibleContainer.getBoundingClientRect();
 
-    const pageEls = viewportEl.querySelectorAll('[data-page-index]');
-    const centers: {idx: number, y: number}[] = [];
-    
-    for (let i = 0; i < pageEls.length; i++) {
-      const pageEl = pageEls[i] as HTMLElement;
-      const idxAttr = pageEl.getAttribute('data-page-index');
-      if (idxAttr === null) continue;
-      const idx = parseInt(idxAttr, 10);
-      
-      const pageRect = pageEl.getBoundingClientRect();
-      const pageCenter = pageRect.top + pageRect.height / 2;
-      centers.push({ idx, y: pageCenter });
+    let targetScrollLeft: number;
+    let targetScrollTop: number;
 
-      const distance = Math.abs(viewportCenterY - pageCenter);
-      if (distance < minDistance) {
-        minDistance = distance;
-        closestPage = idx;
+    // When elements have valid rendered dimensions, compute exact screen-space centering.
+    if (pageRect.width > 0 && visibleRect.width > 0 && pageRect.height > 0 && visibleRect.height > 0) {
+      const currentScrollLeft = viewportEl.scrollLeft;
+      const currentScrollTop = viewportEl.scrollTop;
+
+      const pageCenterX = pageRect.left + pageRect.width / 2;
+      const visibleCenterX = visibleRect.left + visibleRect.width / 2;
+      const deltaX = pageCenterX - visibleCenterX;
+      targetScrollLeft = Math.max(0, currentScrollLeft + deltaX);
+
+      // Determine target vertical position on screen if specified
+      let targetScreenY: number | null = null;
+      if (options?.targetTop !== undefined) {
+        let unscaledH = 792;
+        try {
+          unscaledH = actions.service.document.getPageDimensions(pageIndex).heightPts || 792;
+        } catch {}
+        const scaleFactor = pageRect.height / unscaledH;
+        targetScreenY = pageRect.top + options.targetTop * scaleFactor;
+      } else if (options?.destY !== undefined) {
+        let unscaledH = 792;
+        try {
+          unscaledH = actions.service.document.getPageDimensions(pageIndex).heightPts || 792;
+        } catch {}
+        const scaleFactor = pageRect.height / unscaledH;
+        const targetTop = Math.max(0, unscaledH - options.destY);
+        targetScreenY = pageRect.top + targetTop * scaleFactor;
       }
-    }
 
-    if (closestPage !== store.currentPageIndex) {
-      actions.setCurrentPageFromScroll(closestPage);
-    }
-
-    centers.sort((a, b) => a.idx - b.idx);
-    
-    let frac = closestPage;
-    for (let i = 0; i < centers.length - 1; i++) {
-       const c1 = centers[i];
-       const c2 = centers[i+1];
-       if (viewportCenterY >= c1.y && viewportCenterY <= c2.y) {
-          const ratio = (viewportCenterY - c1.y) / (c2.y - c1.y);
-          frac = c1.idx + ratio;
-          break;
-       }
-    }
-    
-    if (centers.length > 0) {
-      if (viewportCenterY < centers[0].y) {
-         frac = centers[0].idx;
-      } else if (viewportCenterY > centers[centers.length - 1].y) {
-         frac = centers[centers.length - 1].idx;
+      if (targetScreenY !== null) {
+        const visibleCenterY = visibleRect.top + visibleRect.height / 2;
+        const deltaY = targetScreenY - visibleCenterY;
+        targetScrollTop = Math.max(0, currentScrollTop + deltaY);
+      } else if (pageRect.height <= visibleRect.height) {
+        const pageCenterY = pageRect.top + pageRect.height / 2;
+        const visibleCenterY = visibleRect.top + visibleRect.height / 2;
+        const deltaY = pageCenterY - visibleCenterY;
+        targetScrollTop = Math.max(0, currentScrollTop + deltaY);
+      } else {
+        const deltaY = pageRect.top - (visibleRect.top + 24);
+        targetScrollTop = Math.max(0, currentScrollTop + deltaY);
       }
+    } else {
+      // Fallback for headless environments or unrendered layout boxes.
+      const viewportRect = viewportEl.getBoundingClientRect();
+      const visibleOffsetX = visibleRect.width > 0 && viewportRect.width > 0
+        ? Math.max(0, visibleRect.left - viewportRect.left)
+        : 0;
+      const visibleOffsetY = visibleRect.height > 0 && viewportRect.height > 0
+        ? Math.max(0, visibleRect.top - viewportRect.top)
+        : 0;
+
+      const scrollOffsets = calculatePageCenteringScroll({
+        viewportWidth: viewportEl.clientWidth,
+        viewportHeight: viewportEl.clientHeight,
+        contentWidth: contentEl.scrollWidth,
+        pageOffsetLeft: pageEl.offsetLeft,
+        pageOffsetTop: pageEl.offsetTop,
+        pageWidth: pageEl.offsetWidth,
+        pageHeight: pageEl.offsetHeight,
+        visibleOffsetX,
+        visibleWidth: visibleContainer.clientWidth || viewportEl.clientWidth,
+        visibleOffsetY,
+        visibleHeight: visibleContainer.clientHeight || viewportEl.clientHeight,
+      });
+      targetScrollLeft = scrollOffsets.scrollLeft;
+      targetScrollTop = scrollOffsets.scrollTop;
     }
-    store.scrollFraction = frac;
+
+    isCentering = true;
+    viewportEl.scrollTo({
+      left: Math.round(targetScrollLeft),
+      top: Math.round(targetScrollTop),
+      behavior,
+    });
+
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        isCentering = false;
+      });
+    } else {
+      isCentering = false;
+    }
   }
 
   $effect(() => {
-    actions.registerScrollCallback((idx) => {
-      if (!viewportEl) return;
-      const el = viewportEl.querySelector(`[data-page-index="${idx}"]`);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'center' });
+    actions.registerScrollCallback((idx, scrollOptions) => {
+      centerPage(idx, scrollOptions?.behavior ?? 'smooth', scrollOptions);
     });
     return () => actions.registerScrollCallback(() => {});
   });
