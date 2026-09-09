@@ -514,40 +514,67 @@
     return () => actions.registerScrollCallback(() => {});
   });
 
+  let lastCenteredDocKey = $state<string | null>(null);
+
+  $effect(() => {
+    if (!store.isDocumentLoaded || !viewportEl || store.showOrganizerView || store.pageCount === 0) {
+      return;
+    }
+
+    const docKey = `${store.activeWorkspaceFileId ?? store.fileName}`;
+    if (lastCenteredDocKey !== docKey) {
+      lastCenteredDocKey = docKey;
+      if (canvasStore.dragState || store.inlineEdit || canvasStore.editingElementId) return;
+      void tick().then(() => {
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => {
+            if (!canvasStore.dragState && !store.inlineEdit && !canvasStore.editingElementId) {
+              centerPage(store.currentPageIndex, 'instant');
+            }
+          });
+        } else {
+          if (!canvasStore.dragState && !store.inlineEdit && !canvasStore.editingElementId) {
+            centerPage(store.currentPageIndex, 'instant');
+          }
+        }
+      });
+    }
+  });
+
   let contentEl: HTMLElement | null = $state(null);
 
   $effect(() => {
-    if (!contentEl || !viewportEl) return;
-    
-    let previousWidth = 0;
-    let previousHeight = 0;
-    let lastZoom = untrack(() => store.zoom);
-    
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (entry) {
-        const newWidth = entry.contentRect.width;
-        const newHeight = entry.contentRect.height;
-        const currentZoom = untrack(() => store.zoom);
-        
-        if (previousWidth > 0 && previousHeight > 0) {
-          if (lastZoom === currentZoom) {
-            const deltaW = newWidth - previousWidth;
-            const deltaH = newHeight - previousHeight;
-            viewportEl!.scrollLeft += deltaW / 2;
-            viewportEl!.scrollTop += deltaH / 2;
-          }
-        }
-        
-        previousWidth = newWidth;
-        previousHeight = newHeight;
-        lastZoom = currentZoom;
+    if (!viewportEl) return;
+
+    const visibleContainer = (document.querySelector('.editor-shell-canvas') as HTMLElement | null) ?? viewportEl;
+
+    const observer = new ResizeObserver(() => {
+      if (!isCentering && !canvasStore.dragState && store.isDocumentLoaded && store.pageCount > 0 && !store.showOrganizerView && !store.isZooming) {
+        centerPage(store.currentPageIndex, 'instant');
       }
     });
-    
-    observer.observe(contentEl);
+
+    observer.observe(visibleContainer);
+
     return () => observer.disconnect();
   });
+
+  $effect(() => {
+    void store.zoom;
+    void store.pageCount;
+    void store.renderVersion;
+    invalidatePageOffsetsCache();
+  });
+
+
+
+  function handleWindowResize(): void {
+    cachedDropPageMetrics = null;
+    cachedPageLayouts = null;
+    invalidatePageOffsetsCache();
+    if (!store.isDocumentLoaded || !viewportEl || store.pageCount === 0 || store.showOrganizerView || canvasStore.dragState || store.isZooming) return;
+    centerPage(store.currentPageIndex, 'instant');
+  }
 
   let wheelRafId: number | null = null;
   let pendingWheelDy = 0;
@@ -561,7 +588,7 @@
       let dy = e.deltaY;
       if (e.deltaMode === 1) dy *= 33;
       else if (e.deltaMode === 2) dy *= 100;
-      
+
       pendingWheelDy += dy;
       lastWheelEvent = e;
 
@@ -577,13 +604,13 @@
         lastWheelEvent = null;
 
         const currentZoom = store.zoom;
-        const zoomFactor = Math.pow(2, -dyToApply / 140); 
-        const newZoom = Math.max(0.25, Math.min(5.0, currentZoom * zoomFactor));
-        
+        const zoomFactor = Math.pow(2, -dyToApply / 140);
+        const newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, currentZoom * zoomFactor));
+
         if (newZoom === currentZoom) return;
 
         let anchorEl = document.elementFromPoint(targetEvent.clientX, targetEvent.clientY)?.closest('[data-page-index]') as HTMLElement | null;
-        
+
         if (!anchorEl) {
           const pageEls = Array.from(viewportEl.querySelectorAll('[data-page-index]')) as HTMLElement[];
           let minDistance = Infinity;
@@ -605,18 +632,19 @@
         const percentX = (targetEvent.clientX - rect.left) / rect.width;
         const percentY = (targetEvent.clientY - rect.top) / rect.height;
 
+        invalidatePageOffsetsCache();
         actions.setZoom(newZoom);
         await tick();
 
         // Guard against component unmount during the tick.
         if (!viewportEl) return;
 
-        const newAnchorEl = viewportEl.querySelector(`[data-page-index="${anchorIdx}"]`) as HTMLElement;
+        const newAnchorEl = viewportEl.querySelector(`[data-page-index="${anchorIdx}"]`) as HTMLElement | null;
         if (newAnchorEl) {
           const newRect = newAnchorEl.getBoundingClientRect();
           const currentPointX = newRect.left + (newRect.width * percentX);
           const currentPointY = newRect.top + (newRect.height * percentY);
-          
+
           viewportEl.scrollLeft += (currentPointX - targetEvent.clientX);
           viewportEl.scrollTop += (currentPointY - targetEvent.clientY);
         }
@@ -624,53 +652,253 @@
     }
   }
 
+  function cancelDropRaf(): void {
+    if (dropRafId !== null) {
+      cancelAnimationFrame(dropRafId);
+      dropRafId = null;
+    }
+  }
+
+  function resolveDropTargetPage(
+    target: HTMLElement | null
+  ): { pageIndex: number; pageEl: HTMLElement } | null {
+    if (!viewportEl) return null;
+
+    // Direct ancestor resolution via event target without forced layout reflow
+    const pageWrapper = (target?.closest('[data-page-index]') ?? null) as HTMLElement | null;
+    if (pageWrapper) {
+      const pageIndexAttr = pageWrapper.getAttribute('data-page-index');
+      if (pageIndexAttr !== null) {
+        const pageIndex = parseInt(pageIndexAttr, 10);
+        if (!isNaN(pageIndex)) {
+          const pageEl = (pageWrapper.querySelector('[data-page-element]') ?? pageWrapper) as HTMLElement;
+          return { pageIndex, pageEl };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function computeDropPreview(clientX: number, clientY: number, target: HTMLElement | null): void {
+    const payload = canvasStore.activeDropPayload;
+    if (!payload) {
+      canvasStore.clearDropState();
+      cachedDropPageMetrics = null;
+      return;
+    }
+
+    const resolved = resolveDropTargetPage(target);
+    if (!resolved) {
+      canvasStore.dropPreview = null;
+      canvasStore.activeDropPageIndex = null;
+      return;
+    }
+
+    const { pageIndex, pageEl } = resolved;
+
+    // Zero-DOM-reflow arithmetic conversion using cached page metrics
+    if (!cachedDropPageMetrics || cachedDropPageMetrics.pageIndex !== pageIndex || cachedDropPageMetrics.pageEl !== pageEl) {
+      cachedDropPageMetrics = {
+        pageIndex,
+        pageEl,
+        metrics: capturePageMetrics(pageEl),
+      };
+    }
+
+    const pt = store.getPageTransform(pageIndex);
+    const coords = screenToPageCoordsWithMetrics(clientX, clientY, cachedDropPageMetrics.metrics, store.zoom, pt);
+
+    // Fast zero-WASM page dimensions resolution
+    const dims = actions.service.document?.getPageDimensions(pageIndex);
+    const maxW = dims?.widthPts ?? (cachedDropPageMetrics.metrics.rect.width / store.zoom);
+    const maxH = dims?.heightPts ?? (cachedDropPageMetrics.metrics.rect.height / store.zoom);
+
+    // Outlines should not appear until the element being dragged is on the page
+    if (coords.x < 0 || coords.x > maxW || coords.y < 0 || coords.y > maxH) {
+      canvasStore.dropPreview = null;
+      canvasStore.activeDropPageIndex = null;
+      return;
+    }
+
+    canvasStore.activeDropPageIndex = pageIndex;
+
+    const defaultDims = ELEMENT_DEFAULTS[payload.kind as BuiltinCanvasElementKind] ?? { width: 150, height: 30 };
+    const w = payload.width ?? defaultDims.width;
+    const h = payload.height ?? defaultDims.height;
+
+    let previewX = coords.x - w / 2;
+    let previewY = coords.y - h / 2;
+
+    previewX = Math.max(0, Math.min(maxW - w, previewX));
+    previewY = Math.max(0, Math.min(maxH - h, previewY));
+
+    const roundedX = Math.round(previewX);
+    const roundedY = Math.round(previewY);
+    const current = canvasStore.dropPreview;
+
+    if (
+      current &&
+      current.pageIndex === pageIndex &&
+      current.x === roundedX &&
+      current.y === roundedY &&
+      current.width === w &&
+      current.height === h &&
+      current.kind === payload.kind
+    ) {
+      return;
+    }
+
+    canvasStore.setDropPreview({
+      pageIndex,
+      x: roundedX,
+      y: roundedY,
+      width: w,
+      height: h,
+      kind: payload.kind,
+      label: payload.label ?? payload.text ?? payload.kind,
+    });
+  }
+
   function handleDragOver(e: DragEvent): void {
     e.preventDefault();
-    if (e.dataTransfer) {
-      const hasElement = e.dataTransfer.types.includes('application/x-canvas-element');
-      const hasFile = e.dataTransfer.types.includes('Files');
-      if (hasElement || hasFile) {
-        store.isDraggingOver = true;
+    if (!e.dataTransfer) return;
+
+    const hasElement = e.dataTransfer.types.includes('application/x-canvas-element');
+    const hasFile = e.dataTransfer.types.includes('Files');
+
+    if (hasFile && !hasElement) {
+      store.isDraggingOver = true;
+      canvasStore.dropPreview = null;
+      canvasStore.activeDropPageIndex = null;
+      return;
+    }
+
+    if (hasElement) {
+      store.isDraggingOver = false;
+      e.dataTransfer.dropEffect = 'copy';
+
+      latestDragClientX = e.clientX;
+      latestDragClientY = e.clientY;
+      latestDragTarget = e.target as HTMLElement | null;
+
+      if (dropRafId === null) {
+        dropRafId = requestAnimationFrame(() => {
+          dropRafId = null;
+          computeDropPreview(latestDragClientX, latestDragClientY, latestDragTarget);
+        });
       }
     }
   }
 
   function handleDragLeave(e: DragEvent): void {
     e.preventDefault();
-    store.isDraggingOver = false;
+    if (!e.relatedTarget || !viewportEl?.contains(e.relatedTarget as Node)) {
+      cancelDropRaf();
+      store.isDraggingOver = false;
+      canvasStore.clearDropState();
+      cachedDropPageMetrics = null;
+    }
   }
 
   function handleDrop(e: DragEvent): void {
     e.preventDefault();
+    cancelDropRaf();
     store.isDraggingOver = false;
 
     const elementData = e.dataTransfer?.getData('application/x-canvas-element');
-    if (elementData) {
-      try {
-        const payload: ElementDropPayload = JSON.parse(elementData);
-        const target = document.elementFromPoint(e.clientX, e.clientY);
-        const pageEl = target?.closest('[data-page-element]') as HTMLElement | null;
-        const pageWrapper = target?.closest('[data-page-index]') as HTMLElement | null;
+    const payload: ElementDropPayload | null = elementData
+      ? (() => {
+          try {
+            return JSON.parse(elementData) as ElementDropPayload;
+          } catch {
+            return null;
+          }
+        })()
+      : canvasStore.activeDropPayload;
 
-        if (pageEl && pageWrapper) {
-          const pageIndexAttr = pageWrapper.getAttribute('data-page-index');
-          const pageIndex = pageIndexAttr !== null ? parseInt(pageIndexAttr, 10) : store.currentPageIndex;
-          const pt = store.getPageTransform(pageIndex);
-          const coords = screenToPageCoords(e.clientX, e.clientY, pageEl, store.zoom, pt);
-          canvasActions.dropElement(payload, pageIndex, coords.x, coords.y);
-        } else {
-          canvasActions.dropElement(payload, store.currentPageIndex, 200, 300);
-        }
-      } catch (err) {
-        console.error('Failed to parse element drop data:', err);
+    if (payload) {
+      const resolved = resolveDropTargetPage(e.target as HTMLElement | null);
+      if (!resolved) {
+        canvasStore.clearDropState();
+        cachedDropPageMetrics = null;
+        return;
       }
+
+      const { pageIndex, pageEl } = resolved;
+      const dims = actions.service.document?.getPageDimensions(pageIndex);
+      const pt = store.getPageTransform(pageIndex);
+      const metrics = capturePageMetrics(pageEl);
+      const coords = screenToPageCoordsWithMetrics(e.clientX, e.clientY, metrics, store.zoom, pt);
+
+      const maxW = dims?.widthPts ?? (metrics.rect.width / store.zoom);
+      const maxH = dims?.heightPts ?? (metrics.rect.height / store.zoom);
+
+      if (coords.x < 0 || coords.x > maxW || coords.y < 0 || coords.y > maxH) {
+        canvasStore.clearDropState();
+        cachedDropPageMetrics = null;
+        return;
+      }
+
+      const defaultDims = ELEMENT_DEFAULTS[payload.kind as BuiltinCanvasElementKind] ?? { width: 150, height: 30 };
+      const w = payload.width ?? defaultDims.width;
+      const h = payload.height ?? defaultDims.height;
+
+      let dropX = coords.x - w / 2;
+      let dropY = coords.y - h / 2;
+
+      if (canvasStore.dropPreview && canvasStore.dropPreview.pageIndex === pageIndex) {
+        dropX = canvasStore.dropPreview.x;
+        dropY = canvasStore.dropPreview.y;
+      } else {
+        dropX = Math.max(0, Math.min(maxW - w, dropX));
+        dropY = Math.max(0, Math.min(maxH - h, dropY));
+      }
+
+      canvasActions.dropElement(payload, pageIndex, Math.round(dropX), Math.round(dropY));
+      actions.setCurrentPageFromScroll(pageIndex);
+      canvasStore.clearDropState();
+      cachedDropPageMetrics = null;
       return;
     }
 
-    const file = e.dataTransfer?.files[0];
-    if (file && file.type === 'application/pdf') {
-      actions.loadDocumentFromFile(file);
+    const files = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+    if (files.length > 0) {
+      if (!store.isDocumentLoaded) {
+        if (
+          files.length === 1 &&
+          (files[0].type === 'application/pdf' ||
+            files[0].name.toLowerCase().endsWith('.pdf') ||
+            documentConverter.isConvertible(files[0].name, undefined, files[0].type))
+        ) {
+          actions.loadDocumentFromFile(files[0]);
+        } else {
+          actions.mergeAndLoadFiles(files);
+        }
+      } else if (
+        files[0].type === 'application/pdf' ||
+        files[0].name.toLowerCase().endsWith('.pdf') ||
+        documentConverter.isConvertible(files[0].name, undefined, files[0].type)
+      ) {
+        actions.loadDocumentFromFile(files[0]);
+      }
     }
+
+    canvasStore.clearDropState();
+  }
+
+  function getPageLayout(pageIdx: number): PageLayoutDimensions {
+    void store.renderVersion;
+    void store.pageVersions[pageIdx];
+    const dims = actions.service.document?.getPageDimensions(pageIdx) ?? { widthPts: 612, heightPts: 792 };
+    const pageTransform = store.getPageTransform(pageIdx);
+    return calculatePageLayoutDimensions({
+      widthPts: dims.widthPts,
+      heightPts: dims.heightPts,
+      zoom: store.zoom,
+      pageTransform: pageTransform,
+      isLastPage: pageIdx === store.pageCount - 1,
+    });
   }
 </script>
 
@@ -681,14 +909,21 @@
   onpointerup={handlePointerUp}
   onclick={handleWindowClick}
   onblur={handleWindowBlur}
+  onresize={handleWindowResize}
+  ondragend={() => {
+    cancelDropRaf();
+    canvasStore.clearDropState();
+    cachedDropPageMetrics = null;
+  }}
 />
 
-<div class="h-full w-full flex flex-col min-h-0 overflow-hidden relative {isPanning ? 'panning-active' : (isSpaceDown ? 'space-down' : '')}">
-  {#if isSpaceDown || isPanning}
+<div class="h-full w-full flex flex-col min-h-0 overflow-hidden relative {isPanning ? 'panning-active' : (isSpaceDown || store.activeTool === 'hand' ? 'space-down' : '')}">
+  {#if isSpaceDown || isPanning || store.activeTool === 'hand'}
     <div 
       class="absolute inset-0 z-[9999]"
       onpointerdown={handlePointerDown}
       oncontextmenu={(e) => { e.preventDefault(); }}
+      onwheel={handleWheel}
       role="presentation"
     ></div>
   {/if}
@@ -715,20 +950,54 @@
   >
     {#if store.isDraggingOver}
       <div class="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm pointer-events-none border-2 border-dashed border-primary">
-        <div class="text-xl font-semibold text-primary">Drop PDF file here to open</div>
+        <div class="text-xl font-semibold text-primary">
+          {store.isDocumentLoaded ? 'Drop PDF or convertible document here to open' : 'Drop PDF, Office, spreadsheet, or image files here to open or merge'}
+        </div>
       </div>
     {/if}
 
     {#if !store.isDocumentLoaded}
       <div class="flex h-full w-full items-center justify-center">
-        <div class="flex flex-col items-center justify-center gap-3 text-muted-foreground">
+        <div class="flex flex-col items-center justify-center gap-3 text-muted-foreground max-w-md text-center p-4">
           <FileText class="h-12 w-12 stroke-[1.5]" />
           <h2 class="text-lg font-semibold text-foreground">No Document Loaded</h2>
-          <p class="text-xs text-muted-foreground">Drag and drop a PDF file here or open one to start editing.</p>
-          <Button size="sm" onclick={() => actions.triggerFileOpen()}>Open PDF File</Button>
+          <p class="text-xs text-muted-foreground">
+            Open a local PDF file, convert office documents, spreadsheets, and markdown to PDF, merge multiple files, or choose from industry-standard compliance test suites.
+          </p>
+
+          {#if store.loadError}
+            <div class="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-start gap-2 text-xs text-destructive text-left w-full my-1">
+              <AlertCircle class="w-4 h-4 mt-0.5 shrink-0" />
+              <div class="flex-1 leading-relaxed">{store.loadError}</div>
+            </div>
+          {/if}
+
+          <div class="flex flex-wrap items-center justify-center gap-2 mt-1">
+            {#if featureFlags.isEnabled('workspace.open')}
+            <Button size="sm" onclick={() => actions.triggerFileOpen()}>Open PDF File</Button>
+            {/if}
+            {#if featureFlags.isEnabled('conversion')}
+            <Button variant="outline" size="sm" onclick={() => actions.openConvertDialog()} class="gap-1.5">
+              <FileType class="w-3.5 h-3.5 text-primary" />
+              Convert to PDF...
+            </Button>
+            {/if}
+            {#if featureFlags.isEnabled('merge')}
+            <Button variant="outline" size="sm" onclick={() => actions.triggerMergeFiles()} class="gap-1.5">
+              <Files class="w-3.5 h-3.5 text-primary" />
+              Merge Files...
+            </Button>
+            {/if}
+            {#if featureFlags.isEnabled('workspace.compliance')}
+            <Button variant="outline" size="sm" onclick={() => store.openUrlDialog()} class="gap-1.5">
+              <Globe class="w-3.5 h-3.5 text-primary" />
+              Compliance Suites / URL...
+            </Button>
+            {/if}
+          </div>
         </div>
       </div>
-    {:else if store.showOrganizerView}
+    {:else if featureFlags.isEnabled('organizer') && store.showOrganizerView}
       <div class="h-full w-full p-4 min-h-0 flex flex-col overflow-hidden bg-muted/40">
         <PageOrganizerPanel
           pageCount={store.pageCount}
@@ -741,7 +1010,7 @@
     {:else}
       <div 
         bind:this={contentEl}
-        class="flex flex-col items-center py-[20vh] px-[50vw] gap-8 min-h-full min-w-max"
+        class="flex flex-col items-center py-[20vh] px-[50vw] min-h-full min-w-max"
         onclick={(e) => {
           if (e.target === e.currentTarget) {
             actions.clearSelection(true);
@@ -749,8 +1018,13 @@
         }}
         role="presentation"
       >
-        {#each Array.from({ length: store.pageCount }, (_, i) => i) as pageIdx (pageIdx)}
-          <div data-page-index={pageIdx}>
+        {#each Array.from({ length: store.pageCount }, (_, i) => i) as pageIdx (`${store.activeWorkspaceFileId ?? store.fileName}_${pageIdx}`)}
+          {@const layout = getPageLayout(pageIdx)}
+          <div
+            data-page-index={pageIdx}
+            class="flex items-center justify-center relative shrink-0 transition-none"
+            style="width: {layout.width}px; height: {layout.height}px; margin-bottom: {layout.spacing}px;"
+          >
             <PdfPageView
               pageIndex={pageIdx}
             />
