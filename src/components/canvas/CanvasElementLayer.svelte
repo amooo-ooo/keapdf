@@ -26,7 +26,20 @@
         {/if}
     {/each}
 
-    {#if canvasStore.selectedElement?.pageIndex === pageIndex && canvasStore.selectedElement.visible && canvasStore.editingElementId !== canvasStore.selectedElement.id}
+    {#if canvasStore.selectedElement?.pageIndex === pageIndex && canvasStore.selectedElement.visible}
         <SelectionOverlay element={canvasStore.selectedElement} {zoom} />
+    {/if}
+
+    {#if canvasStore.dropPreview && canvasStore.dropPreview.pageIndex === pageIndex}
+        {@const preview = canvasStore.dropPreview}
+        <div
+            class="drop-preview-indicator absolute pointer-events-none z-50 border-2 border-dashed border-primary/80 bg-primary/10 transition-none {preview.kind === 'shape' && preview.label?.toLowerCase() === 'circle' ? 'rounded-full' : 'rounded-xs'}"
+            style="
+                left: {preview.x * zoom}px;
+                top: {preview.y * zoom}px;
+                width: {preview.width * zoom}px;
+                height: {preview.height * zoom}px;
+            "
+        ></div>
     {/if}
 </div>
