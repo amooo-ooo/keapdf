@@ -1,11 +1,16 @@
 <script lang="ts">
   import { fade } from 'svelte/transition';
   import { useEditorStore } from '../../stores/editor.svelte';
+  import { onDestroy } from 'svelte';
 
   const store = useEditorStore();
 
   let visible = $state(false);
   let timeoutId: ReturnType<typeof setTimeout>;
+
+  onDestroy(() => {
+    if (timeoutId) clearTimeout(timeoutId);
+  });
 
   // Show indicator whenever the page index changes
   $effect(() => {
