@@ -580,17 +580,105 @@
           const spanEl = child;
           const wordText = sanitizePdfText(spanEl.textContent || '');
           if (wordText.length === 0) return;
-          const rawFSize = spanEl.dataset.fontSize ? parseFloat(spanEl.dataset.fontSize) : (parseFloat(spanEl.style.fontSize) / scale);
+          const rawFSize = spanEl.dataset.fontSize ? parseFloat(spanEl.dataset.fontSize) : (origLine?.fontSize ?? span.fontSize);
           const fSize = !isNaN(rawFSize) && rawFSize > 0 ? rawFSize : (origLine?.fontSize ?? span.fontSize);
-          const origWord = origLine?.words?.[wIdx];
+          const candidateWord = origLine?.words?.[words.length];
+          let origWord = candidateWord && candidateWord.text === wordText
+            ? candidateWord
+            : origLine?.words?.find((w) => w.text === wordText);
+          if (!origWord && span.lines) {
+            for (const otherLine of span.lines) {
+              const match = otherLine.words?.find((w) => w.text === wordText);
+              if (match) {
+                origWord = match;
+                break;
+              }
+            }
+          }
+
+          const isUnderline = spanEl.style.textDecoration.includes('underline');
+          const isStrike = spanEl.style.textDecoration.includes('line-through');
+          const nodeBg = spanEl.style.backgroundColor;
+          const hasValidBg = Boolean(nodeBg && nodeBg !== 'transparent');
+          const isCleared = nodeBg === 'transparent';
+          const bgCol = isCleared ? undefined : (hasValidBg ? nodeBg : origWord?.backgroundColor);
+
+          let parsedColor = origWord?.color ?? span.color;
+          if (spanEl.style.color) {
+            try {
+              const col = parseColor(spanEl.style.color);
+              if (col) parsedColor = col;
+            } catch {
+              // keep existing
+            }
+          }
+
+          let fw = origWord?.fontWeight ?? (span.fontWeight || 'normal');
+          if (spanEl.style.fontWeight === 'bold' || spanEl.style.fontWeight === '700') {
+            fw = 'bold';
+          } else if (spanEl.style.fontWeight === 'normal' || spanEl.style.fontWeight === '400') {
+            fw = 'normal';
+          }
+
+          let fs = origWord?.fontStyle ?? (span.fontStyle || 'normal');
+          if (spanEl.style.fontStyle === 'italic') {
+            fs = 'italic';
+          } else if (spanEl.style.fontStyle === 'normal') {
+            fs = 'normal';
+          }
+
+          let hasPrecedingSpace = pendingTextNodeSpace;
+          if (!hasPrecedingSpace) {
+            let prevNode = spanEl.previousSibling;
+            while (prevNode) {
+              if (prevNode instanceof HTMLElement && prevNode.getAttribute('contenteditable') === 'false') {
+                prevNode = prevNode.previousSibling;
+                continue;
+              }
+              if (prevNode.nodeType === 3) {
+                const txt = prevNode.textContent || '';
+                if (/[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/.test(txt)) {
+                  hasPrecedingSpace = true;
+                }
+                break;
+              }
+              if (prevNode instanceof HTMLElement) {
+                break;
+              }
+              prevNode = prevNode.previousSibling;
+            }
+          }
+          if (!hasPrecedingSpace && spanEl.dataset.hasPrecedingSpace === 'true') {
+            hasPrecedingSpace = true;
+          }
+          if (!hasPrecedingSpace && origWord && Boolean(origWord.hasPrecedingSpace)) {
+            hasPrecedingSpace = true;
+          }
+          if (!hasPrecedingSpace && words.length > 0 && UNICODE_LEADING_WS_REGEX.test(spanEl.textContent || '')) {
+            hasPrecedingSpace = true;
+          }
+
+          const approxCharWidth = fSize * 0.52;
+          const wordWidth = origWord?.width && origWord.width > 0 ? origWord.width : wordText.length * approxCharWidth;
+          const prevWord = words.length > 0 ? words[words.length - 1] : null;
+          const spaceOffset = hasPrecedingSpace ? fSize * 0.25 : 0;
+          let wordLeft: number;
+          if (origWord && (!prevWord || origWord.left >= prevWord.right - 0.5)) {
+            wordLeft = origWord.left;
+          } else if (prevWord) {
+            wordLeft = prevWord.right + spaceOffset;
+          } else {
+            wordLeft = isBulletSpan && lineIdx === 0 ? firstLineTextLeft : (origLine?.left ?? span.left);
+          }
+          const wordRight = wordLeft + wordWidth;
 
           words.push({
             text: wordText,
-            left: origWord?.left ?? (isBulletSpan ? firstLineTextLeft : span.left),
+            left: wordLeft,
             top: origWord?.top ?? span.top,
-            right: origWord?.right ?? (span.left + span.width),
+            right: wordRight,
             bottom: origWord?.bottom ?? (span.top + span.height),
-            width: origWord?.width ?? 0,
+            width: wordWidth,
             height: origWord?.height ?? fSize,
             fontSize: fSize,
             baselineY: origWord?.baselineY ?? span.baselineY,
@@ -598,35 +686,97 @@
             charCount: wordText.length,
             fontFamily: origWord?.fontFamily ?? span.fontFamily,
             rawFontFamily: origWord?.rawFontFamily ?? span.rawFontFamily,
-            color: origWord?.color ?? span.color,
-            fontWeight: origWord?.fontWeight ?? (spanEl.style.fontWeight === 'bold' ? 'bold' : 'normal'),
-            fontStyle: origWord?.fontStyle ?? (spanEl.style.fontStyle === 'italic' ? 'italic' : 'normal'),
+            matchedFontFamily: origWord?.matchedFontFamily ?? span.matchedFontFamily,
+            color: parsedColor,
+            fontWeight: fw,
+            fontStyle: fs,
+            underline: isUnderline || origWord?.underline,
+            strikethrough: isStrike || origWord?.strikethrough,
+            backgroundColor: bgCol,
+            hasPrecedingSpace,
           });
-        });
+          pendingTextNodeSpace = false;
+        }
+      });
+
+      if (words.length === 0 && lineText.length > 0) {
+        const rawTokens = lineText.split(/([\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+)/);
+        let currentX = isBulletSpan && lineIdx === 0 ? firstLineTextLeft : (origLine?.left ?? span.left);
+        let pendingSpace = false;
+        const lineFs = origLine?.fontSize ?? span.fontSize;
+        const approxCharW = lineFs * 0.52;
+
+        for (const token of rawTokens) {
+          if (!token) continue;
+          if (/^[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+$/.test(token)) {
+            pendingSpace = true;
+            continue;
+          }
+          const cleanToken = sanitizePdfText(token);
+          if (cleanToken.length === 0) continue;
+
+          const hasPrecedingSpace = pendingSpace || words.length > 0;
+          if (hasPrecedingSpace) {
+            currentX += lineFs * 0.25;
+          }
+
+          const wW = cleanToken.length * approxCharW;
+          words.push({
+            text: cleanToken,
+            left: currentX,
+            top: origLine?.top ?? span.top,
+            right: currentX + wW,
+            bottom: origLine?.bottom ?? (span.top + span.height),
+            width: wW,
+            height: origLine?.height ?? lineFs,
+            fontSize: lineFs,
+            baselineY: origLine?.baselineY ?? span.baselineY,
+            charStartIndex: 0,
+            charCount: cleanToken.length,
+            fontFamily: origLine?.fontFamily ?? span.fontFamily,
+            rawFontFamily: origLine?.rawFontFamily ?? span.rawFontFamily,
+            matchedFontFamily: origLine?.matchedFontFamily ?? span.matchedFontFamily,
+            color: origLine?.color ?? span.color,
+            fontWeight: origLine?.fontWeight ?? span.fontWeight,
+            fontStyle: origLine?.fontStyle ?? span.fontStyle,
+            hasPrecedingSpace,
+          });
+
+          currentX += wW;
+          pendingSpace = false;
+        }
       }
 
-      const lineFontSize = origLine?.fontSize ?? (words.length > 0 ? words[0].fontSize : span.fontSize);
-      const lineLeft = isBulletSpan ? firstLineTextLeft : (origLine?.left ?? span.left);
+      const lineFontSize = words.length > 0 ? words[0].fontSize : (origLine?.fontSize ?? span.fontSize);
+      const lH = origLine?.lineHeight ?? span.lineHeight ?? (span.fontSize * 1.25);
+      const lineTop = isSameLineCount && origLine?.top !== undefined ? origLine.top : span.top + lineIdx * lH;
+      const lineBottom = isSameLineCount && origLine?.bottom !== undefined ? origLine.bottom : lineTop + lH;
+      const lineBaselineY = isSameLineCount && origLine?.baselineY !== undefined ? origLine.baselineY : span.baselineY - lineIdx * lH;
+      const lineFontFamily = words.length > 0 ? (words[0].fontFamily || words[0].rawFontFamily) : (origLine?.fontFamily ?? span.fontFamily);
+      const lineFontWeight = words.length > 0 ? (words[0].fontWeight as string) : (origLine?.fontWeight ?? span.fontWeight);
+      const lineFontStyle = words.length > 0 ? (words[0].fontStyle as string) : (origLine?.fontStyle ?? span.fontStyle);
+      const lineColor = words.length > 0 ? words[0].color : (origLine?.color ?? span.color);
 
       lines.push({
         text: lineText,
-        left: lineLeft,
-        top: origLine?.top ?? span.top,
+        left: origLine?.left ?? (isBulletSpan && lineIdx === 0 ? firstLineTextLeft : span.left),
+        top: lineTop,
         right: origLine?.right ?? (span.left + span.width),
-        bottom: origLine?.bottom ?? (span.top + span.height),
+        bottom: lineBottom,
         width: origLine?.width ?? span.width,
-        height: origLine?.height ?? (span.lineHeight || span.fontSize * 1.25),
+        height: lH,
         fontSize: lineFontSize,
-        baselineY: origLine?.baselineY ?? (span.baselineY - lineIdx * (span.lineHeight || span.fontSize * 1.25)),
-        lineHeight: origLine?.lineHeight ?? span.lineHeight ?? (span.fontSize * 1.25),
+        baselineY: lineBaselineY,
+        lineHeight: lH,
         charStartIndex: 0,
         charCount: lineText.length,
-        words: words.length > 0 ? words : (origLine?.words ?? []),
-        fontFamily: origLine?.fontFamily ?? span.fontFamily,
+        words: words.length > 0 ? words : [],
+        fontFamily: lineFontFamily,
         rawFontFamily: origLine?.rawFontFamily ?? span.rawFontFamily,
-        color: origLine?.color ?? span.color,
-        fontWeight: origLine?.fontWeight ?? span.fontWeight,
-        fontStyle: origLine?.fontStyle ?? span.fontStyle,
+        matchedFontFamily: origLine?.matchedFontFamily ?? span.matchedFontFamily,
+        color: lineColor,
+        fontWeight: lineFontWeight,
+        fontStyle: lineFontStyle,
         hasBulletPrefix: origLine?.hasBulletPrefix ?? (lineIdx === 0 ? span.hasBulletPrefix : false),
         bulletWord: origLine?.bulletWord ?? (lineIdx === 0 ? span.bulletWord : undefined),
       });
@@ -644,7 +794,7 @@
     try {
       store.renderVersion;
       store.pageVersions[pageIndex];
-      const dims = actions.service.document.getPage(pageIndex).getDimensions();
+      const dims = actions.service.document.getPageDimensions(pageIndex);
       widthPts = dims.widthPts;
       heightPts = dims.heightPts;
     } catch (err) {
@@ -660,38 +810,123 @@
         const entry = entries[0];
         isVisible = entry.isIntersecting;
       },
-      { rootMargin: '1500px 0px' }
+      { rootMargin: '600px 0px' }
     );
     
     observer.observe(containerWrapperEl);
     return () => observer.disconnect();
   });
 
+  function releaseCanvasContainer(container: HTMLElement | null): void {
+    if (!container) return;
+    const canvases = container.querySelectorAll('canvas');
+    for (const c of canvases) {
+      c.width = 0;
+      c.height = 0;
+    }
+    container.innerHTML = '';
+  }
+
   function extractOverlaySpansIfNeeded(): void {
     if (!showOverlays) {
-      editableSpans = [];
-      editableImageSpans = [];
-      editableShapeSpans = [];
-      pageCharacters = [];
       return;
     }
     const currentVer = store.renderVersion;
     const currentPgVer = store.pageVersions[pageIndex] || 0;
     if (
+      hasExtracted &&
       cachedVersion === currentVer &&
-      cachedPageVersion === currentPgVer &&
-      (editableSpans.length > 0 || editableImageSpans.length > 0 || editableShapeSpans.length > 0 || pageCharacters.length > 0)
+      cachedPageVersion === currentPgVer
     ) {
       return;
     }
     try {
-      editableSpans = actions.service.document.getPage(pageIndex).extractTextSpans();
-      pageCharacters = actions.service.document.getPage(pageIndex).extractCharacters();
+      const cached = actions.service.document?.getCachedPageSpans(pageIndex);
+      if (cached) {
+        editableSpans = cached.textSpans;
+        editableImageSpans = cached.images;
+        editableShapeSpans = cached.shapes;
+        editableFormFieldSpans = cached.formFields;
+        if (cached.pageCharacters) {
+          pageCharacters = cached.pageCharacters;
+        } else if (store.activeTool === 'highlight' || store.activeTool === 'redact') {
+          pageCharacters = actions.service.document.getPage(pageIndex).extractCharacters();
+          cached.pageCharacters = pageCharacters;
+        }
+        if (store.pageOcrResults.has(pageIndex)) {
+          const hasOcrMerged = editableSpans.some((s) => s.isOcr || s.id.startsWith(`ocr-span-${pageIndex}`));
+          if (!hasOcrMerged) {
+            const ocrResult = store.pageOcrResults.get(pageIndex)!;
+            const ocrData = OcrService.getInstance().ocrResultToSpans(ocrResult);
+            editableSpans = sortByAreaDescending([...editableSpans, ...ocrData.textSpans]);
+            pageCharacters = [...pageCharacters, ...ocrData.characters];
+          }
+        }
+        cachedVersion = currentVer;
+        cachedPageVersion = currentPgVer;
+        hasExtracted = true;
+        return;
+      }
+
+      const rawTextSpans = actions.service.document.getPage(pageIndex).extractTextSpans();
+      let combinedTextSpans = [...rawTextSpans];
+      let combinedCharacters = (store.activeTool === 'highlight' || store.activeTool === 'redact')
+        ? actions.service.document.getPage(pageIndex).extractCharacters()
+        : [];
+
+      if (store.pageOcrResults.has(pageIndex)) {
+        const ocrResult = store.pageOcrResults.get(pageIndex)!;
+        const ocrData = OcrService.getInstance().ocrResultToSpans(ocrResult);
+        const filteredOcrSpans = ocrData.textSpans.filter((ocrSpan) => {
+          return !rawTextSpans.some(
+            (raw) => Math.hypot(raw.left - ocrSpan.left, raw.top - ocrSpan.top) < 4.0 && raw.text.trim() === ocrSpan.text.trim()
+          );
+        });
+        combinedTextSpans = [...combinedTextSpans, ...filteredOcrSpans];
+        combinedCharacters = [...combinedCharacters, ...ocrData.characters];
+      }
+
+      editableSpans = sortByAreaDescending(combinedTextSpans);
+      pageCharacters = combinedCharacters;
+      if (store.selectedSpan?.type === 'text' && store.selectedSpan.pageIndex === pageIndex) {
+        const sel = store.selectedSpan as EditableTextSpan;
+        const matching = editableSpans.find(
+          (s) => s.id === sel.id || (Math.abs(s.left - sel.left) < 5 && Math.abs(s.top - sel.top) < 5)
+        );
+        if (matching) {
+          if (sel.backgroundColor !== undefined) matching.backgroundColor = sel.backgroundColor;
+          if (sel.underline !== undefined) matching.underline = sel.underline;
+          if (sel.strikethrough !== undefined) matching.strikethrough = sel.strikethrough;
+          if (sel.lines !== undefined) matching.lines = sel.lines;
+        }
+      }
       const objSpans = actions.service.document.getPage(pageIndex).extractObjects();
-      editableImageSpans = objSpans.images;
-      editableShapeSpans = objSpans.shapes;
+      editableImageSpans = sortByAreaDescending(objSpans.images);
+      editableShapeSpans = sortByAreaDescending(objSpans.shapes);
+      const rawFormFieldSpans = actions.service.document.getPage(pageIndex).extractFormFieldSpans();
+      editableFormFieldSpans = sortByAreaDescending(rawFormFieldSpans);
       cachedVersion = currentVer;
       cachedPageVersion = currentPgVer;
+      hasExtracted = true;
+
+      actions.service.document?.setCachedPageSpans(pageIndex, {
+        textSpans: editableSpans,
+        pageCharacters: pageCharacters.length > 0 ? pageCharacters : undefined,
+        images: editableImageSpans,
+        shapes: editableShapeSpans,
+        formFields: editableFormFieldSpans,
+      });
+
+      actions.service.document.initAcroFormFieldSpans().then((map) => {
+        const enriched = map.get(pageIndex);
+        if (enriched && enriched.length > 0) {
+          editableFormFieldSpans = sortByAreaDescending(enriched);
+          const currentCached = actions.service.document?.getCachedPageSpans(pageIndex);
+          if (currentCached) {
+            currentCached.formFields = editableFormFieldSpans;
+          }
+        }
+      }).catch(() => {});
     } catch (err) {
       console.error(`Failed to extract overlay spans for page ${pageIndex}:`, err);
     }
@@ -700,9 +935,14 @@
   function renderPageContent(): void {
     if (!canvasContainerEl) return;
     try {
-      const renderResult = actions.service.document.getPage(pageIndex).render(renderScale);
-      canvasContainerEl.innerHTML = '';
-      canvasContainerEl.appendChild(renderResult.canvas);
+      const existingCanvas = canvasContainerEl.querySelector('canvas') as HTMLCanvasElement | null;
+      const renderResult = actions.service.document.getPage(pageIndex).render(renderScale, {
+        targetCanvas: existingCanvas ?? undefined,
+      });
+      if (!existingCanvas) {
+        releaseCanvasContainer(canvasContainerEl);
+        canvasContainerEl.appendChild(renderResult.canvas);
+      }
       extractOverlaySpansIfNeeded();
     } catch (err) {
       console.error(`Failed to render page ${pageIndex}:`, err);
@@ -711,24 +951,34 @@
 
   $effect(() => {
     renderScale;
-    showOverlays;
     store.renderVersion;
     store.pageVersions[pageIndex];
     
     if (canvasContainerEl && isVisible) {
       renderPageContent();
     } else if (canvasContainerEl && !isVisible) {
-      canvasContainerEl.innerHTML = '';
-      editableSpans = [];
-      editableImageSpans = [];
-      editableShapeSpans = [];
-      pageCharacters = [];
+      const currentIdx = untrack(() => store.currentPageIndex);
+      if (Math.abs(pageIndex - currentIdx) > 1) {
+        releaseCanvasContainer(canvasContainerEl);
+      }
     }
+  });
+
+  $effect(() => {
+    if (showOverlays && isVisible) {
+      extractOverlaySpansIfNeeded();
+    }
+  });
+
+  $effect(() => {
+    return () => {
+      releaseCanvasContainer(canvasContainerEl);
+    };
   });
 
   // getCssFontFamily is now imported from font-loader.ts
 
-  // -- Page transform helpers --
+  // Page transform helpers
 
   const pageTransform = $derived(store.getPageTransform(pageIndex));
 
@@ -738,41 +988,10 @@
    */
   function pointerToPageCoords(e: PointerEvent): { x: number; y: number } {
     if (!containerWrapperEl) return { x: 0, y: 0 };
-    const { rotation, scaleX, scaleY } = pageTransform;
-
-    const rect = containerWrapperEl.getBoundingClientRect();
-
-    if (rotation === 0 && scaleX === 1 && scaleY === 1) {
-      return {
-        x: (e.clientX - rect.left) / visualScale,
-        y: (e.clientY - rect.top) / visualScale,
-      };
-    }
-
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const dx = e.clientX - cx;
-    const dy = e.clientY - cy;
-
-    const rad = -rotation * (Math.PI / 180);
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
-    const ux = dx * cos - dy * sin;
-    const uy = dx * sin + dy * cos;
-
-    const lx = ux / scaleX;
-    const ly = uy / scaleY;
-
-    const halfW = containerWrapperEl.offsetWidth / 2;
-    const halfH = containerWrapperEl.offsetHeight / 2;
-
-    return {
-      x: (lx + halfW) / visualScale,
-      y: (ly + halfH) / visualScale,
-    };
+    return screenToPageCoords(e.clientX, e.clientY, containerWrapperEl, visualScale, pageTransform);
   }
 
-  // -- Page resize / rotate via SelectionOverlay handles --
+  // Page resize and rotate via SelectionOverlay handles
 
   function handlePageResizeStart(e: PointerEvent, handle: HandlePosition): void {
     e.stopPropagation();
@@ -790,6 +1009,8 @@
     const originVisualW = wPts * zoom * originSx;
     const originVisualH = hPts * zoom * originSy;
     const isCorner = handle.includes('-');
+
+    const originTransform = { ...pageTransform };
 
     const onMove = (me: PointerEvent): void => {
       const rawDx = me.clientX - startClientX;
@@ -843,7 +1064,10 @@
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
       activeDragCleanup = null;
-      actions.recordSnapshot('Scale Page', false);
+      const currentTransform = store.getPageTransform(pageIndex);
+      actions.pushCommand(
+        new SetPageTransformCommand('Scale Page', pageIndex, originTransform, currentTransform)
+      );
     };
 
     window.addEventListener('pointermove', onMove);
@@ -859,7 +1083,7 @@
     const rect = containerWrapperEl.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
-    const originRotation = pageTransform.rotation;
+    const originRotation = pageTransform.rotation || 0;
     const startAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX);
 
     const onMove = (me: PointerEvent): void => {
@@ -868,17 +1092,9 @@
       let newRotation = (originRotation + deltaAngle) % 360;
       if (newRotation < 0) newRotation += 360;
 
-      if (me.shiftKey) {
-        newRotation = Math.round(newRotation / 15) * 15;
-      } else {
-        const closest90 = Math.round(newRotation / 90) * 90;
-        if (Math.abs(newRotation - closest90) < 6) {
-          newRotation = closest90;
-        }
-      }
-      newRotation = ((newRotation % 360) + 360) % 360;
-
-      store.updatePageTransform(pageIndex, { rotation: Math.round(newRotation) });
+      // Page rotation strictly snaps to 90 degree increments (0, 90, 180, 270)
+      const snapped = (Math.round(newRotation / 90) * 90) % 360;
+      store.updatePageTransform(pageIndex, { rotation: snapped });
     };
 
     const onUp = (): void => {
@@ -886,7 +1102,22 @@
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
       activeDragCleanup = null;
-      actions.recordSnapshot('Rotate Page Transform', false);
+
+      const currentTransform = store.getPageTransform(pageIndex);
+      const snapped = (Math.round((currentTransform.rotation || 0) / 90) * 90) % 360;
+      const degreesDelta = ((snapped - originRotation) % 360 + 360) % 360;
+
+      // Reset temporary visual CSS rotation back to 0
+      store.updatePageTransform(pageIndex, { rotation: 0 });
+
+      if (degreesDelta === 90 || degreesDelta === 180 || degreesDelta === 270) {
+        actions.executeCommand(
+          new RotatePageCommand('Rotate Page', pageIndex, degreesDelta)
+        );
+        actions.refreshDocument();
+      } else if (originRotation !== 0) {
+        store.updatePageTransform(pageIndex, { rotation: originRotation });
+      }
     };
 
     window.addEventListener('pointermove', onMove);
@@ -896,20 +1127,37 @@
   }
 
   function handleContainerClick(e: MouseEvent): void {
+    if (store.isCropping) return;
+    const target = e.target as HTMLElement | null;
+    if (
+      target?.closest('.canvas-element-container') ||
+      target?.closest('.selection-overlay-container') ||
+      target?.closest('.inline-editor-input') ||
+      target?.closest('[contenteditable="true"]')
+    ) {
+      return;
+    }
     actions.setCurrentPageFromScroll(pageIndex);
     actions.clearSelection(true);
     canvasStore.selectElement(null);
     selection.select(`page_${pageIndex}`, e.ctrlKey || e.metaKey, e.shiftKey);
   }
 
+  let isSubmittingInlineEdit = $state(false);
+
   function handleKeyDownInline(e: KeyboardEvent): void {
+    const action = resolveInlineKeyAction(e);
     const target = e.currentTarget as HTMLElement;
     const span = store.inlineEdit?.span;
-    if (e.key === 'Enter' && !e.shiftKey) {
+
+    if (action === 'submit') {
       e.preventDefault();
+      if (isSubmittingInlineEdit) return;
+      isSubmittingInlineEdit = true;
       const extracted = span ? extractStyledLinesFromEditor(target, visualScale, span) : undefined;
       actions.submitInlineEdit(extracted);
-    } else if (e.key === 'Enter' && e.shiftKey) {
+      setTimeout(() => { isSubmittingInlineEdit = false; }, 100);
+    } else if (action === 'lineBreak') {
       e.stopPropagation();
       e.preventDefault();
       let inserted = false;
@@ -931,21 +1179,17 @@
           sel.addRange(range);
         }
       }
-      if (span) {
-        const extracted = extractStyledLinesFromEditor(target, visualScale, span);
-        actions.updateInlineText(extracted.text, extracted.lines);
-      } else {
-        actions.updateInlineText(sanitizePdfText(target.innerText || target.textContent || ''));
-      }
-    } else if (e.key === 'Escape') {
+      const extracted = span ? extractStyledLinesFromEditor(target, visualScale, span) : undefined;
+      actions.updateInlineText(extracted?.text || '', extracted?.lines);
+      handleInlineSelectionUpdate(target);
+    } else if (action === 'cancel') {
       e.preventDefault();
       actions.cancelInlineEdit();
     }
   }
 
-
-
   let isDrawing = $state(false);
+  let hasDragged = $state(false);
   let currentPathId = $state<string | null>(null);
   let isTextHighlightMode = $state(false);
   let isAreaRedactMode = $state(false);
@@ -955,6 +1199,74 @@
   let currentCharIndex = $state<number | null>(null);
   let previewHighlightRects = $state<HighlightRect[]>([]);
   let hoveringChar = $state<PageCharacter | null>(null);
+
+  let eraserLastErased = $state<LastErasedState | null>(null);
+  let eraserCanvasCommands: Command[] = [];
+  let eraserHadPdfMutations = false;
+  let eraserPrevBuffer: ArrayBuffer | undefined = undefined;
+  let eraserPrevElements: CanvasElement[] | undefined = undefined;
+
+  function performEraseAt(x: number, y: number, now: number): void {
+    let nativeAnnots: AnnotationItem[] = [];
+    let cropInfo: PageCropInfo | undefined = undefined;
+    try {
+      if (actions.service?.document) {
+        const page = actions.service.document.getPage(pageIndex);
+        nativeAnnots = page.getAnnotations();
+        cropInfo = page.getCropInfo();
+      }
+    } catch {
+      // Safe fallback
+    }
+
+    let candidates = collectEraserCandidates(
+      pageIndex,
+      { x, y },
+      10,
+      canvasStore.elements,
+      editableShapeSpans,
+      editableSpans,
+      nativeAnnots,
+      cropInfo
+    );
+
+    let toErase = resolveUpperZCandidate(
+      candidates,
+      eraserLastErased,
+      now,
+      { x, y },
+      { waitDelayMs: 400, movementThreshold: 16 }
+    );
+
+    while (toErase) {
+      const candidateToErase = toErase;
+      void actions.eraseCandidate(candidateToErase).then((cmd) => {
+        if (cmd) {
+          eraserCanvasCommands.push(cmd);
+        }
+      });
+      if (candidateToErase.source !== 'canvas') {
+        eraserHadPdfMutations = true;
+      }
+      eraserLastErased = {
+        elementId: candidateToErase.id,
+        zIndex: candidateToErase.zIndex,
+        zLevel: candidateToErase.zLevel,
+        category: candidateToErase.category,
+        point: { x, y },
+        timestamp: now,
+      };
+
+      candidates = candidates.filter((c) => c.id !== candidateToErase.id);
+      toErase = resolveUpperZCandidate(
+        candidates,
+        eraserLastErased,
+        now,
+        { x, y },
+        { waitDelayMs: 400, movementThreshold: 16 }
+      );
+    }
+  }
 
   function updateHover(e: PointerEvent): void {
     if ((store.activeTool !== 'highlight' && store.activeTool !== 'redact') || isDrawing || !containerWrapperEl) {
@@ -966,8 +1278,8 @@
   }
 
   function handlePointerDownDrawing(e: PointerEvent): void {
-    if (e.button !== 0 || store.isDraggingOver) return;
-    if (store.activeTool !== 'pen' && store.activeTool !== 'highlight' && store.activeTool !== 'redact' && store.activeTool !== 'note') return;
+    if (e.button !== 0 || store.isDraggingOver || store.isCropping) return;
+    if (store.activeTool !== 'pen' && store.activeTool !== 'highlight' && store.activeTool !== 'redact' && store.activeTool !== 'note' && store.activeTool !== 'text' && store.activeTool !== 'eraser') return;
 
     e.preventDefault();
     e.stopPropagation();
@@ -976,6 +1288,45 @@
     actions.clearSelection(true);
 
     const { x, y } = pointerToPageCoords(e);
+
+    if (store.activeTool === 'eraser') {
+      isDrawing = true;
+      eraserLastErased = null;
+      eraserCanvasCommands = [];
+      eraserHadPdfMutations = false;
+      try {
+        const fileId = store.activeWorkspaceFileId;
+        const activeBuffer = fileId ? getFileBuffer(fileId) : undefined;
+        let fallbackBuffer: ArrayBuffer | undefined = undefined;
+        if (!activeBuffer && actions.service?.document) {
+          const raw = actions.service.document.save();
+          fallbackBuffer = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
+        }
+        eraserPrevBuffer = activeBuffer ?? fallbackBuffer;
+      } catch {
+        eraserPrevBuffer = undefined;
+      }
+      eraserPrevElements = safeClone(canvasStore.elements);
+
+      performEraseAt(x, y, Date.now());
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      return;
+    }
+
+    if (store.activeTool === 'text') {
+      const def = elementRegistry.get('text');
+      const newEl = def.create(canvasStore.generateId(), pageIndex, x, y, {
+        text: 'Type something...',
+        fontSize: 14,
+        color: '#000000',
+      });
+      canvasStore.addElement(newEl);
+      actions.pushCommand(new AddElementCommand('Add Text', newEl));
+      canvasStore.selectElement(newEl.id);
+      canvasStore.editingElementId = newEl.id;
+      actions.setTool('select');
+      return;
+    }
 
     if (store.activeTool === 'note') {
       canvasActions.createElement('note', pageIndex, x, y, {
