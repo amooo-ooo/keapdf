@@ -2,6 +2,7 @@
   import type { Snippet } from 'svelte';
   import { ChevronDown, ChevronRight } from 'lucide-svelte';
   import { cn } from '$lib/utils';
+  import { sidebarSectionHeaderVariants } from './sidebar-section';
 
   interface Props {
     title: string;
@@ -9,6 +10,7 @@
     defaultExpanded?: boolean;
     borderBottom?: boolean;
     class?: string;
+    headerClass?: string;
     headerActions?: Snippet;
     children?: Snippet;
   }
@@ -19,15 +21,17 @@
     defaultExpanded = true,
     borderBottom = true,
     class: customClass = '',
+    headerClass = '',
     headerActions,
     children,
   }: Props = $props();
 
-  let expanded = $state(defaultExpanded);
+  let userExpanded = $state<boolean | null>(null);
+  const isExpanded = $derived(userExpanded !== null ? userExpanded : defaultExpanded);
 
   function toggleExpand(): void {
     if (collapsible) {
-      expanded = !expanded;
+      userExpanded = !isExpanded;
     }
   }
 
@@ -39,15 +43,15 @@
   }
 </script>
 
-<section class={cn("sidebar-section pt-1.5 gap-1.5", (collapsible && !expanded) ? "pb-1.5" : "pb-3.5", borderBottom && "sidebar-divider", customClass)}>
+<section class={cn("sidebar-section pt-1.5 gap-1.5", (collapsible && !isExpanded) ? "pb-1.5" : "pb-3.5", borderBottom && "sidebar-divider", customClass)}>
   {#if collapsible}
     <div
-      class="sidebar-section-header cursor-pointer hover:bg-muted/40 rounded transition-colors duration-150"
+      class={cn(sidebarSectionHeaderVariants({ collapsible: true }), headerClass)}
       onclick={toggleExpand}
       onkeydown={handleKeyDown}
       role="button"
       tabindex="0"
-      aria-expanded={expanded}
+      aria-expanded={isExpanded}
     >
       <div class="flex items-center gap-1.5 min-w-0">
         <span class="sidebar-section-title truncate">{title}</span>
@@ -55,7 +59,7 @@
 
       <div class="flex items-center gap-1">
         {@render headerActions?.()}
-        {#if expanded}
+        {#if isExpanded}
           <ChevronDown class="h-3.5 w-3.5 text-muted-foreground shrink-0" />
         {:else}
           <ChevronRight class="h-3.5 w-3.5 text-muted-foreground shrink-0" />
@@ -63,7 +67,7 @@
       </div>
     </div>
   {:else}
-    <div class="sidebar-section-header">
+    <div class={cn(sidebarSectionHeaderVariants({ collapsible: false }), headerClass)}>
       <span class="sidebar-section-title truncate">{title}</span>
       {#if headerActions}
         <div class="flex items-center gap-1">
@@ -73,7 +77,7 @@
     </div>
   {/if}
 
-  {#if !collapsible || expanded}
+  {#if !collapsible || isExpanded}
     <div class="sidebar-section-content">
       {@render children?.()}
     </div>

@@ -1,3 +1,24 @@
+<script lang="ts" module>
+  type ObserverCallback = (isIntersecting: boolean) => void;
+  const thumbnailObserverCallbacks = new Map<Element, ObserverCallback>();
+  let sharedThumbnailObserver: IntersectionObserver | null = null;
+
+  function getSharedThumbnailObserver(): IntersectionObserver {
+    if (!sharedThumbnailObserver) {
+      sharedThumbnailObserver = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            const cb = thumbnailObserverCallbacks.get(entry.target);
+            if (cb) cb(entry.isIntersecting);
+          }
+        },
+        { rootMargin: '200px 0px' }
+      );
+    }
+    return sharedThumbnailObserver;
+  }
+</script>
+
 <script lang="ts">
   import { useEditorActions } from '../../stores/editor-actions';
   import { useEditorStore } from '../../stores/editor.svelte';
@@ -20,22 +41,24 @@
   $effect(() => {
     if (!containerEl) return;
 
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting) {
-          isInView = true;
-        }
-      },
-      { rootMargin: '200px 0px' }
-    );
-
+    const observer = getSharedThumbnailObserver();
+    thumbnailObserverCallbacks.set(containerEl, (intersecting) => {
+      isInView = intersecting;
+    });
     observer.observe(containerEl);
-    return () => observer.disconnect();
+
+    return () => {
+      if (containerEl) {
+        observer.unobserve(containerEl);
+        thumbnailObserverCallbacks.delete(containerEl);
+      }
+    };
   });
   
   $effect(() => {
-    // Track dependencies: global render version and page-specific version
-    void store.renderVersion;
+    // Track page-specific version, file name and page count
+    void store.fileName;
+    void store.pageCount;
     void store.pageVersions[pageIndex];
     
     if (!isInView || !store.isDocumentLoaded || pageIndex < 0 || pageIndex >= store.pageCount) {
@@ -54,6 +77,8 @@
         const { canvas } = actions.service.document.getPage(pageIndex).render(scale, { applyDpr: false });
         canvas.toBlob(
           (blob) => {
+            canvas.width = 0;
+            canvas.height = 0;
             if (controller.signal.aborted || !blob) return;
             if (thumbnailSrc) {
               URL.revokeObjectURL(thumbnailSrc);

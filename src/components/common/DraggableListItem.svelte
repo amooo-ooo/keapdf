@@ -56,7 +56,7 @@
         
         if (indices.length > 1) {
           const ghost = document.createElement('div');
-          ghost.className = 'bg-primary text-primary-foreground text-xs font-medium px-2.5 py-1.5 rounded-full shadow-md z-50 absolute -top-[1000px] left-0 pointer-events-none whitespace-nowrap';
+          ghost.className = 'bg-primary text-primary-foreground text-xs font-medium px-2.5 py-1.5 rounded-full z-50 absolute -top-[1000px] left-0 pointer-events-none whitespace-nowrap';
           ghost.textContent = `${indices.length} items`;
           document.body.appendChild(ghost);
           e.dataTransfer.setDragImage(ghost, 15, 15);
