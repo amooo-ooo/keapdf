@@ -13,13 +13,13 @@
 
 <SidebarSection title="Actions" borderBottom={true} collapsible={true} defaultExpanded={true}>
   <div class="field-group">
-    <Button onclick={onApply} class="btn-action" variant="outline">
+    <Button onclick={onApply} variant="panel-action">
       <Check class="h-3.5 w-3.5 mr-2" /> Apply Edit
     </Button>
-    <Button variant="outline" onclick={onDelete} class="btn-action text-destructive hover:text-destructive hover:bg-destructive/10">
+    <Button variant="panel-action" onclick={onDelete} class="text-destructive hover:text-destructive hover:bg-destructive/10">
       <Trash2 class="h-3.5 w-3.5 mr-2" /> Delete Text
     </Button>
-    <Button variant="outline" onclick={onDeselect} class="btn-action">
+    <Button variant="panel-action" onclick={onDeselect}>
       <X class="h-3.5 w-3.5 mr-2" /> Deselect
     </Button>
   </div>

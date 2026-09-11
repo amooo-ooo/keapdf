@@ -5,6 +5,7 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import * as Select from '$lib/components/ui/select/index.js';
+  import { ColorPicker } from '$lib/components/ui/color-picker/index.js';
 
   interface Props {
     fontSize: number;
@@ -29,22 +30,21 @@
         />
       </div>
       <div class="field-group">
-        <Label for="edit-color" class="field-label">Color</Label>
+        <Label class="field-label">Color</Label>
         <div class="flex items-center gap-1.5">
-          <Input
-            id="edit-color"
-            type="color"
-            bind:value={colorHex}
-            class="h-8 w-10 p-0.5 cursor-pointer shrink-0"
+          <ColorPicker
+            value={colorHex}
+            onValueChange={(val) => { colorHex = val; }}
+            label="Text Color"
           />
-          <span class="text-xs text-muted-foreground font-mono uppercase">{colorHex}</span>
+          <span class="text-xs text-muted-foreground font-sans uppercase">{colorHex}</span>
         </div>
       </div>
     </div>
     <div class="field-group">
       <Label for="edit-font-family" class="field-label">Font Family</Label>
       <Select.Root type="single" value={fontFamily} onValueChange={(val) => { fontFamily = val; }}>
-        <Select.Trigger class="h-8 text-xs w-full">
+        <Select.Trigger class="h-8 text-xs w-full font-normal">
           {getDisplayFontName(fontFamily, extractBaseFontFamily)}
         </Select.Trigger>
         <Select.Content>

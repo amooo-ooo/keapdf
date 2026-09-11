@@ -1,26 +1,25 @@
 <script lang="ts">
   import { useCanvasStore } from '../../stores/canvas.svelte';
+  import { useElementRegistry } from '../../core/element-registry';
   import PositionSizeSection from './element-properties/PositionSizeSection.svelte';
-  import TextSection from './element-properties/TextSection.svelte';
-  import ShapeSection from './element-properties/ShapeSection.svelte';
-  import FormFieldSection from './element-properties/FormFieldSection.svelte';
-  import ImageSection from './element-properties/ImageSection.svelte';
-  import NoteSection from './element-properties/NoteSection.svelte';
   import TransformSection from './element-properties/TransformSection.svelte';
   import ActionsSection from './element-properties/ActionsSection.svelte';
 
   const canvasStore = useCanvasStore();
+  const elementRegistry = useElementRegistry();
+
+  const selectedElement = $derived(canvasStore.selectedElement);
+  const elementDef = $derived(selectedElement ? elementRegistry.get(selectedElement.kind) : null);
 </script>
 
-{#if canvasStore.selectedElement}
+{#if selectedElement}
   <div class="flex flex-col w-full shrink-0">
     <PositionSizeSection />
     <TransformSection />
-    <TextSection />
-    <ShapeSection />
-    <FormFieldSection />
-    <ImageSection />
-    <NoteSection />
+    {#if elementDef?.propertiesPanel}
+      {@const PanelComponent = elementDef.propertiesPanel}
+      <PanelComponent element={selectedElement} />
+    {/if}
     <ActionsSection />
   </div>
 {/if}
