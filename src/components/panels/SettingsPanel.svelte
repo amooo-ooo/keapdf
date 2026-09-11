@@ -2,6 +2,7 @@
   import type { DocumentMetadata } from '../../core/types';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
+  import { useFeatureFlagStore } from '../../core/feature-flags';
   import SidebarSection from '../common/SidebarSection.svelte';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
@@ -23,6 +24,7 @@
 
   const store = useEditorStore();
   const actions = useEditorActions();
+  const featureFlags = useFeatureFlagStore();
 
   let metadata = $state<DocumentMetadata | null>(null);
   let userPassword = $state('');
@@ -126,7 +128,7 @@
               {#each Object.entries(metadata.customMetadata) as [key, val]}
                 <div class="text-muted-foreground truncate flex items-center gap-1">
                   <span class="truncate" title={key}>{key}</span>
-                  <Badge variant="secondary" class="text-[8px] px-0.5 py-0 h-3 leading-none font-mono">
+                  <Badge variant="secondary" class="text-[8px] px-0.5 py-0 h-3 leading-none font-sans">
                     custom
                   </Badge>
                 </div>
@@ -157,6 +159,7 @@
     {/if}
 
     <div class="flex flex-col gap-2">
+      {#if featureFlags.isEnabled('document-info')}
       <Button
         variant="outline"
         size="sm"
@@ -166,7 +169,9 @@
       >
         <FileText class="h-3 w-3 mr-1.5 text-primary" /> Get ALL Info on PDF
       </Button>
+      {/if}
 
+      {#if featureFlags.isEnabled('settings.toc')}
       <Button
         variant="outline"
         size="sm"
@@ -176,7 +181,9 @@
       >
         <ListTree class="h-3 w-3 mr-1.5 text-muted-foreground" /> Edit Table of Contents
       </Button>
+      {/if}
 
+      {#if featureFlags.isEnabled('sanitization')}
       <Button
         variant="default"
         size="sm"
@@ -186,14 +193,17 @@
       >
         <ShieldCheck class="h-3 w-3 mr-1.5 text-primary-foreground" /> Sanitise Document
       </Button>
+      {/if}
     </div>
   </SidebarSection>
 
   <!-- Section 2: Password Protection & Security -->
+  {#if featureFlags.isEnabled('security')}
   <SidebarSection title="Password Security & Access" borderBottom={true}>
     <p class="text-xs text-muted-foreground mb-2">Set or remove document passwords and permissions.</p>
 
     <div class="flex flex-col gap-2.5">
+      {#if featureFlags.isEnabled('security.password')}
       <div class="flex flex-col gap-1">
         <Label for="user-password" class="text-xs text-muted-foreground">Document Open Password</Label>
         <Input
@@ -225,8 +235,10 @@
       >
         <Lock class="h-3.5 w-3.5 mr-2 text-primary" /> Apply Password Security
       </Button>
+      {/if}
 
       <div class="grid grid-cols-2 gap-2 mt-1">
+        {#if featureFlags.isEnabled('security.unlock-forms')}
         <Button
           variant="outline"
           size="sm"
@@ -234,9 +246,11 @@
           onclick={() => triggerTool('Unlock PDF Forms')}
           disabled={!store.isDocumentLoaded}
         >
-          <Unlock class="h-3 w-3 mr-1.5 text-amber-500" /> Unlock Forms
+          <Unlock class="h-3 w-3 mr-1.5 text-warning" /> Unlock Forms
         </Button>
+        {/if}
 
+        {#if featureFlags.isEnabled('security.permissions')}
         <Button
           variant="outline"
           size="sm"
@@ -246,15 +260,19 @@
         >
           <FileKey class="h-3 w-3 mr-1.5 text-muted-foreground" /> Permissions
         </Button>
+        {/if}
       </div>
     </div>
   </SidebarSection>
+  {/if}
 
   <!-- Section 3: Repair & Developer Tools -->
+  {#if featureFlags.isEnabled('tools')}
   <SidebarSection title="Repair & Developer Info" borderBottom={false}>
     <p class="text-xs text-muted-foreground mb-2">Repair damaged PDFs or inspect embedded JavaScript.</p>
 
     <div class="flex flex-col gap-2">
+      {#if featureFlags.isEnabled('tools.repair')}
       <Button
         variant="outline"
         size="sm"
@@ -262,9 +280,11 @@
         onclick={() => triggerTool('Repair Damaged PDF')}
         disabled={!store.isDocumentLoaded}
       >
-        <Wrench class="h-3.5 w-3.5 mr-2 text-amber-500" /> Repair Damaged PDF
+        <Wrench class="h-3.5 w-3.5 mr-2 text-warning" /> Repair Damaged PDF
       </Button>
+      {/if}
 
+      {#if featureFlags.isEnabled('tools.javascript')}
       <Button
         variant="outline"
         size="sm"
@@ -274,11 +294,12 @@
       >
         <Code2 class="h-3.5 w-3.5 mr-2 text-primary" /> Show Embedded JavaScript
       </Button>
+      {/if}
 
       <div class="flex items-center justify-between pt-1">
         <span class="text-xs text-muted-foreground">Encryption Standard</span>
         {#if isEncrypted}
-          <Badge variant="default" class="text-[10px] bg-emerald-600">
+          <Badge variant="success" class="text-[10px]">
             <ShieldCheck class="h-3 w-3 mr-1" /> Encrypted
           </Badge>
         {:else}
@@ -289,4 +310,5 @@
       </div>
     </div>
   </SidebarSection>
+  {/if}
 </div>
