@@ -488,3 +488,482 @@
         }
       }
 
+      const start = (sel && sel.mode === 'pdf' && sel.targetId === activePdfSpan.id && sel.start < sel.end)
+        ? sel.start
+        : 0;
+      const end = (sel && sel.mode === 'pdf' && sel.targetId === activePdfSpan.id && sel.start < sel.end)
+        ? sel.end
+        : Infinity;
+
+      const { updatedLines, updatedText } = applyStyleToPdfLines(
+        currentLines,
+        start,
+        end,
+        styleToApply
+      );
+
+      actions.updateInlineText(updatedText, updatedLines);
+
+      if (sel?.container) {
+        const c = sel.container;
+        const s = sel.start;
+        const e = sel.end;
+        queueMicrotask(() => {
+          c.focus();
+          setSelectionCharOffsets(c, s, e);
+        });
+      }
+      return;
+    }
+
+    const targetBg = partialStyle && 'backgroundColor' in partialStyle
+      ? (partialStyle as Partial<TextSegment>).backgroundColor
+      : (editBackgroundColor || undefined);
+
+    const parsedLineHeight = parseFloat(editLineHeight);
+    const validFontSize = !isNaN(editFontSize) && editFontSize > 0 ? editFontSize : undefined;
+    const isMultiLine = Boolean(
+      activePdfSpan.isParagraph ||
+      (activePdfSpan.lines && activePdfSpan.lines.length > 1) ||
+      editText.includes('\n')
+    );
+
+    let updatedLines: TextLine[] | undefined = undefined;
+    if (activePdfSpan.lines && activePdfSpan.lines.length > 0) {
+      const splitTexts = editText.split(/\r?\n/);
+      const isSameCount = splitTexts.length === activePdfSpan.lines.length;
+      updatedLines = splitTexts.map((newText, idx) => {
+        const origLine = isSameCount
+          ? activePdfSpan.lines![idx]
+          : (findBestMatchingOrigLine(newText, activePdfSpan.lines, idx) || activePdfSpan.lines![Math.min(idx, activePdfSpan.lines!.length - 1)]);
+        const lH = origLine?.lineHeight ?? activePdfSpan.lineHeight ?? (activePdfSpan.fontSize * 1.25);
+        const lTop = isSameCount && origLine?.top !== undefined ? origLine.top : activePdfSpan.top + idx * lH;
+        const lBaseline = isSameCount && origLine?.baselineY !== undefined ? origLine.baselineY : activePdfSpan.baselineY - idx * lH;
+
+        let words: TextWord[] = [];
+        if (origLine?.words && origLine.text === newText) {
+          words = origLine.words.map((w) => ({
+            ...w,
+            fontFamily: editFontFamily,
+            fontWeight: editFontWeight,
+            fontStyle: editFontStyle,
+            color: hexToRgba(editColorHex),
+            fontSize: validFontSize ?? w.fontSize,
+          }));
+        } else if (newText.trim().length > 0) {
+          const rawTokens = newText.split(/([\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+)/);
+          let currentX = origLine?.left ?? activePdfSpan.left;
+          let pendingSpace = false;
+          const lineFs = validFontSize ?? origLine?.fontSize ?? activePdfSpan.fontSize;
+          const approxCharW = lineFs * 0.52;
+          for (const token of rawTokens) {
+            if (!token) continue;
+            if (/^[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+$/.test(token)) {
+              pendingSpace = true;
+              continue;
+            }
+            const cleanToken = sanitizePdfText(token);
+            if (cleanToken.length === 0) continue;
+            const hasPrecedingSpace = pendingSpace || words.length > 0;
+            if (hasPrecedingSpace) {
+              currentX += lineFs * 0.25;
+            }
+            const candidateWord = origLine?.words?.find((w) => w.text === cleanToken);
+            const wW = candidateWord?.width && candidateWord.width > 0 ? candidateWord.width : cleanToken.length * approxCharW;
+            words.push({
+              text: cleanToken,
+              left: currentX,
+              top: lTop,
+              right: currentX + wW,
+              bottom: lTop + lineFs,
+              width: wW,
+              height: lineFs,
+              fontSize: lineFs,
+              baselineY: lBaseline,
+              charStartIndex: 0,
+              charCount: cleanToken.length,
+              fontFamily: editFontFamily,
+              rawFontFamily: editFontFamily,
+              color: hexToRgba(editColorHex),
+              fontWeight: candidateWord?.fontWeight || editFontWeight,
+              fontStyle: candidateWord?.fontStyle || editFontStyle,
+              hasPrecedingSpace,
+            });
+            currentX += wW;
+            pendingSpace = false;
+          }
+        }
+
+        return {
+          ...origLine,
+          text: newText,
+          left: origLine?.left ?? activePdfSpan.left,
+          top: lTop,
+          right: (origLine?.left ?? activePdfSpan.left) + activePdfSpan.width,
+          bottom: lTop + lH,
+          width: origLine?.width ?? activePdfSpan.width,
+          height: lH,
+          fontSize: validFontSize ?? origLine?.fontSize ?? activePdfSpan.fontSize,
+          baselineY: lBaseline,
+          lineHeight: lH,
+          charStartIndex: 0,
+          charCount: newText.length,
+          fontFamily: editFontFamily,
+          fontWeight: editFontWeight,
+          fontStyle: editFontStyle,
+          color: hexToRgba(editColorHex),
+          words,
+        };
+      });
+    }
+
+    actions.applyTextMutation(
+      {
+        text: editText,
+        fontSize: validFontSize,
+        fontFamily: editFontFamily,
+        fontWeight: editFontWeight,
+        fontStyle: editFontStyle,
+        underline: editUnderline,
+        strikethrough: editStrikethrough,
+        backgroundColor: targetBg,
+        textAlign: editTextAlign,
+        letterSpacing: editLetterSpacing || undefined,
+        color: hexToRgba(editColorHex),
+        lineHeight: !isNaN(parsedLineHeight) && parsedLineHeight > 0 ? parsedLineHeight : undefined,
+        lines: updatedLines,
+        reflowParagraph: isMultiLine,
+      },
+      activePdfSpan
+    );
+  }
+
+  function toggleFormatting(type: 'bold' | 'italic' | 'underline' | 'strikethrough'): void {
+    let partialStyle: Partial<TextSegment> = {};
+    if (type === 'bold') {
+      editFontWeight = editFontWeight === 'bold' ? 'normal' : 'bold';
+      partialStyle = { fontWeight: editFontWeight };
+    } else if (type === 'italic') {
+      editFontStyle = editFontStyle === 'italic' ? 'normal' : 'italic';
+      partialStyle = { fontStyle: editFontStyle };
+    } else if (type === 'underline') {
+      editUnderline = !editUnderline;
+      partialStyle = { underline: editUnderline };
+    } else if (type === 'strikethrough') {
+      editStrikethrough = !editStrikethrough;
+      partialStyle = { strikethrough: editStrikethrough };
+    }
+    applyChanges(partialStyle);
+  }
+
+  function handleWeightChange(val: string): void {
+    editFontWeight = val === 'bold' ? 'bold' : 'normal';
+    applyChanges({ fontWeight: editFontWeight });
+  }
+
+  function handleHorizontalAlignChange(val: string): void {
+    if (val === 'left' || val === 'center' || val === 'right') {
+      editTextAlign = val;
+      applyChanges();
+    }
+  }
+
+  function handleVerticalAlignChange(val: string): void {
+    if (val === 'top' || val === 'middle' || val === 'bottom') {
+      editVerticalAlign = val;
+      applyChanges();
+    }
+  }
+</script>
+
+{#if activeCanvasElement || activePdfSpan}
+  <div class="flex flex-col w-full shrink-0">
+    <SidebarSection title="Typography" borderBottom={true} collapsible={true} defaultExpanded={true}>
+      <div class="flex flex-col gap-2">
+        <!-- Text Content -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Text Content</Label>
+          <Textarea
+            bind:value={editText}
+            class="text-xs resize-y"
+            onkeydown={(e) => {
+              if (resolveInlineKeyAction(e) === 'submit') {
+                e.preventDefault();
+                applyChanges();
+              }
+            }}
+            onblur={() => applyChanges()}
+            placeholder="Paragraph text..."
+            rows={3}
+          />
+        </div>
+
+        <!-- Font Family -->
+        <div class="flex flex-col gap-1 mt-0.5">
+          <Label class="field-label">Font Family</Label>
+          <Select.Root 
+            type="single" 
+            value={editFontFamily} 
+            onValueChange={(val) => { 
+              if (val) {
+                editFontFamily = val; 
+                applyChanges(); 
+              }
+            }}
+          >
+            <Select.Trigger class="h-8 text-xs w-full font-normal">
+              {getDisplayFontName(editFontFamily, extractBaseFontFamily)}
+            </Select.Trigger>
+            <Select.Content>
+              {#each fontSelectItems as item (item.value)}
+                <Select.Item value={item.value} label={item.label}>
+                  {item.label}
+                </Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+
+        <!-- Weight & Size -->
+        <div class="flex items-end gap-2 mt-0.5 w-full">
+          <div class="flex flex-col gap-1 flex-1 min-w-0">
+            <Label class="field-label">Weight</Label>
+            <Select.Root 
+              type="single" 
+              value={editFontWeight} 
+              onValueChange={handleWeightChange}
+            >
+              <Select.Trigger class="h-8 text-xs w-full font-normal">
+                {editFontWeight === 'bold' ? 'Bold' : 'Regular'}
+              </Select.Trigger>
+              <Select.Content>
+                <Select.Item value="normal" label="Regular">Regular</Select.Item>
+                <Select.Item value="bold" label="Bold">Bold</Select.Item>
+              </Select.Content>
+            </Select.Root>
+          </div>
+
+          <div class="flex flex-col gap-1 w-[110px] shrink-0">
+            <div class="flex items-center justify-between">
+              <Label class="field-label">Size (pt)</Label>
+              {#if hasMixedFontSize}
+                <span class="text-[10px] text-muted-foreground font-medium">Mixed</span>
+              {/if}
+            </div>
+            <Input 
+              type="number" 
+              bind:value={editFontSize} 
+              onchange={() => applyChanges()}
+              onkeydown={(e) => e.key === 'Enter' && applyChanges()}
+              placeholder={hasMixedFontSize ? 'Mixed' : ''}
+              class="h-8 text-xs w-full" 
+              min="1"
+              step="0.5"
+            />
+          </div>
+        </div>
+
+        <!-- Row 1: Formatting Controls & Line Height -->
+        <div class="flex items-end gap-2 mt-0.5 w-full">
+          <div class="flex flex-col gap-1 shrink-0">
+            <Label class="field-label">Formatting</Label>
+            <ButtonGroup variant="outline" size="sm" class="h-8">
+              <Button
+                variant={editFontWeight === 'bold' ? 'default' : 'outline'}
+                size="sm"
+                class="h-8 w-8 p-0"
+                onclick={() => toggleFormatting('bold')}
+                aria-label="Bold"
+                aria-pressed={editFontWeight === 'bold'}
+                title="Bold (Ctrl+B)"
+              >
+                <Bold class="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant={editFontStyle === 'italic' ? 'default' : 'outline'}
+                size="sm"
+                class="h-8 w-8 p-0"
+                onclick={() => toggleFormatting('italic')}
+                aria-label="Italic"
+                aria-pressed={editFontStyle === 'italic'}
+                title="Italic (Ctrl+I)"
+              >
+                <Italic class="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant={editUnderline ? 'default' : 'outline'}
+                size="sm"
+                class="h-8 w-8 p-0"
+                onclick={() => toggleFormatting('underline')}
+                aria-label="Underline"
+                aria-pressed={editUnderline}
+                title="Underline (Ctrl+U)"
+              >
+                <Underline class="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant={editStrikethrough ? 'default' : 'outline'}
+                size="sm"
+                class="h-8 w-8 p-0"
+                onclick={() => toggleFormatting('strikethrough')}
+                aria-label="Strikethrough"
+                aria-pressed={editStrikethrough}
+                title="Strikethrough"
+              >
+                <Strikethrough class="h-3.5 w-3.5" />
+              </Button>
+            </ButtonGroup>
+          </div>
+
+          <div class="flex flex-col gap-1 flex-1 min-w-0">
+            <Label class="field-label">Line Height (pt)</Label>
+            <Input 
+              type="text" 
+              bind:value={editLineHeight}
+              placeholder="Auto"
+              onchange={() => applyChanges()}
+              onkeydown={(e) => e.key === 'Enter' && applyChanges()}
+              class="h-8 text-xs w-full" 
+            />
+          </div>
+        </div>
+
+        <!-- Row 2: Color & Highlight / Background -->
+        <div class="grid grid-cols-2 gap-2 mt-0.5 w-full">
+          <div class="flex flex-col gap-1">
+            <Label class="field-label">Color</Label>
+            <ColorPicker 
+              value={editColorHex} 
+              label="Text Color"
+              onInteractingChange={(interacting) => setInspectorInteracting(interacting)}
+              onValueChange={(val) => {
+                editColorHex = val;
+                applyChanges({ color: val });
+              }}
+            />
+          </div>
+
+          <div class="flex flex-col gap-1">
+            <Label class="field-label">Highlight</Label>
+            <ColorPicker 
+              value={editBackgroundColor || 'none'} 
+              label="Highlight Color"
+              presets={HIGHLIGHT_SWATCHES}
+              allowNone={true}
+              noneValue=""
+              onInteractingChange={(interacting) => setInspectorInteracting(interacting)}
+              onValueChange={(val) => {
+                editBackgroundColor = val || '';
+                applyChanges({ backgroundColor: val ? val : undefined });
+              }}
+            />
+          </div>
+        </div>
+
+        <!-- Letter Spacing -->
+        <div class="flex flex-col gap-1 mt-0.5 w-full">
+          <Label class="field-label">Letter Spacing</Label>
+          <Input 
+            type="text" 
+            bind:value={editLetterSpacing}
+            onchange={() => applyChanges()}
+            onkeydown={(e) => e.key === 'Enter' && applyChanges()}
+            placeholder="0%"
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+        <!-- Alignment -->
+        <div class="flex flex-col gap-1 mt-0.5 mb-1 w-full">
+          <Label class="field-label">Alignment</Label>
+          <div class="grid grid-cols-2 gap-2 w-full">
+            <!-- Horizontal Alignment -->
+            <ButtonGroup variant="outline" size="sm" class="h-8 w-full flex">
+              <Button
+                variant={editTextAlign === 'left' ? 'default' : 'outline'}
+                size="sm"
+                class="flex-1 h-8 p-0"
+                onclick={() => handleHorizontalAlignChange('left')}
+                aria-label="Align Left"
+                aria-pressed={editTextAlign === 'left'}
+                title="Align Left"
+              >
+                <AlignLeft class="h-3.5 w-3.5"/>
+              </Button>
+              <Button
+                variant={editTextAlign === 'center' ? 'default' : 'outline'}
+                size="sm"
+                class="flex-1 h-8 p-0"
+                onclick={() => handleHorizontalAlignChange('center')}
+                aria-label="Align Center"
+                aria-pressed={editTextAlign === 'center'}
+                title="Align Center"
+              >
+                <AlignCenter class="h-3.5 w-3.5"/>
+              </Button>
+              <Button
+                variant={editTextAlign === 'right' ? 'default' : 'outline'}
+                size="sm"
+                class="flex-1 h-8 p-0"
+                onclick={() => handleHorizontalAlignChange('right')}
+                aria-label="Align Right"
+                aria-pressed={editTextAlign === 'right'}
+                title="Align Right"
+              >
+                <AlignRight class="h-3.5 w-3.5"/>
+              </Button>
+            </ButtonGroup>
+
+            {#if featureFlags.isEnabled('text.vertical-align')}
+            <!-- Vertical Alignment -->
+            <ButtonGroup variant="outline" size="sm" class="h-8 w-full flex">
+              <Button
+                variant={editVerticalAlign === 'top' ? 'default' : 'outline'}
+                size="sm"
+                class="flex-1 h-8 p-0"
+                onclick={() => handleVerticalAlignChange('top')}
+                aria-label="Align Top"
+                aria-pressed={editVerticalAlign === 'top'}
+                title="Align Top"
+              >
+                <AlignVerticalSpaceAround class="h-3.5 w-3.5"/>
+              </Button>
+              <Button
+                variant={editVerticalAlign === 'middle' ? 'default' : 'outline'}
+                size="sm"
+                class="flex-1 h-8 p-0"
+                onclick={() => handleVerticalAlignChange('middle')}
+                aria-label="Align Middle"
+                aria-pressed={editVerticalAlign === 'middle'}
+                title="Align Middle"
+              >
+                <AlignVerticalJustifyCenter class="h-3.5 w-3.5"/>
+              </Button>
+              <Button
+                variant={editVerticalAlign === 'bottom' ? 'default' : 'outline'}
+                size="sm"
+                class="flex-1 h-8 p-0"
+                onclick={() => handleVerticalAlignChange('bottom')}
+                aria-label="Align Bottom"
+                aria-pressed={editVerticalAlign === 'bottom'}
+                title="Align Bottom"
+              >
+                <AlignVerticalSpaceBetween class="h-3.5 w-3.5"/>
+              </Button>
+            </ButtonGroup>
+            {/if}
+          </div>
+        </div>
+      </div>
+    </SidebarSection>
+
+    {#if featureFlags.isEnabled('outline')}
+    <OutlineSection
+      activeText={editText}
+      fontSize={editFontSize}
+      isBold={editFontWeight === 'bold'}
+      pageIndex={activePdfSpan?.pageIndex ?? activeCanvasElement?.pageIndex ?? store.currentPageIndex}
+    />
+    {/if}
+  </div>
+{/if}
