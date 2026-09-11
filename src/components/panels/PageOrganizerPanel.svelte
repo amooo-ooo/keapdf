@@ -3,32 +3,34 @@
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useSelection } from '../../stores/selection.svelte';
+  import { useFeatureFlagStore } from '../../core/feature-flags';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Separator } from '$lib/components/ui/separator/index.js';
   import { ArrowUp, ArrowDown, Copy, Trash2, Plus, FilePlus2, ImagePlus } from 'lucide-svelte';
   import PageThumbnailImage from '../common/PageThumbnailImage.svelte';
 
+  import { CompoundCommand, RotatePageCommand } from '../../commands';
+
   const editorStore = useEditorStore();
   const actions = useEditorActions();
+  const featureFlags = useFeatureFlagStore();
 
   interface Props {
     pageCount: number;
     currentPageIndex: number;
-    service: PdfEditorService;
+    service?: PdfEditorService;
     onRefresh: () => void;
     onSelectPage: (index: number) => void;
   }
 
-  let { pageCount, currentPageIndex, service, onRefresh, onSelectPage }: Props = $props();
+  let { pageCount, currentPageIndex, onRefresh, onSelectPage }: Props = $props();
 
   let selectedIndices = $state<number[]>([]);
   let dragSourceIndex = $state<number | null>(null);
   let mergeFileInputEl: HTMLInputElement | null = $state(null);
   let imageFileInputEl: HTMLInputElement | null = $state(null);
 
-  $effect(() => {
-    void editorStore.renderVersion;
-  });
 
   function toggleSelectPage(index: number, e: MouseEvent): void {
     if (e.ctrlKey || e.metaKey) {
@@ -43,19 +45,18 @@
     onSelectPage(index);
   }
 
-  function handleRotateSelected(): void {
+  async function handleRotateSelected(): Promise<void> {
     const targets = selectedIndices.length > 0 ? selectedIndices : [currentPageIndex];
-    for (const idx of targets) {
-      service.document.getPage(idx).rotate(90);
-      if (editorStore.pageTransforms[idx]) {
-        editorStore.pageTransforms[idx].rotation = 0;
-      }
-      editorStore.incrementPageVersion(idx);
+    if (targets.length === 1) {
+      actions.rotatePage(targets[0]);
+    } else {
+      const commands = targets.map((idx) => new RotatePageCommand('Rotate Page', idx, 90));
+      await actions.executeCommand(new CompoundCommand('Rotate Pages', commands));
     }
     onRefresh();
   }
 
-  function handleDeleteSelected(): void {
+  async function handleDeleteSelected(): Promise<void> {
     const targets = (
       selectedIndices.length > 0 ? [...selectedIndices] : [currentPageIndex]
     ).sort((a, b) => b - a);
@@ -64,37 +65,43 @@
       return;
     }
 
-    for (const idx of targets) {
-      service.document.deletePage(idx);
+    if (targets.length === 1) {
+      await actions.deletePage(targets[0]);
+    } else {
+      await actions.executeDocumentMutation('Delete Pages', targets[targets.length - 1], () => {
+        for (const idx of targets) {
+          actions.service.document.deletePage(idx);
+        }
+        editorStore.pageCount = actions.service.document.getPageCount();
+        editorStore.currentPageIndex = Math.max(0, Math.min(editorStore.currentPageIndex, editorStore.pageCount - 1));
+      });
     }
     selectedIndices = [];
     onRefresh();
   }
 
-  function handleDuplicateSelected(): void {
+  async function handleDuplicateSelected(): Promise<void> {
     const targets = (
       selectedIndices.length > 0 ? [...selectedIndices] : [currentPageIndex]
     ).sort((a, b) => b - a);
 
-    for (const idx of targets) {
-      service.document.duplicatePage(idx);
-    }
+    await actions.duplicatePage(targets);
     onRefresh();
   }
 
-  function handleAddBlankPage(): void {
+  async function handleAddBlankPage(): Promise<void> {
     const targetIdx =
       selectedIndices.length > 0
-        ? Math.max(...selectedIndices) + 1
-        : currentPageIndex + 1;
-    service.document.addBlankPage(targetIdx);
+        ? Math.max(...selectedIndices)
+        : currentPageIndex;
+    await actions.addBlankPage(targetIdx);
     onRefresh();
   }
 
-  function handleMovePage(fromIndex: number, direction: 'up' | 'down'): void {
+  async function handleMovePage(fromIndex: number, direction: 'up' | 'down'): Promise<void> {
     const toIndex = direction === 'up' ? fromIndex - 1 : fromIndex + 1;
     if (toIndex < 0 || toIndex >= pageCount) return;
-    service.document.reorderPages([fromIndex], toIndex);
+    await actions.reorderPages([fromIndex], toIndex);
     onRefresh();
   }
 
@@ -113,10 +120,10 @@
     }
   }
 
-  function handleDrop(targetIndex: number, e: DragEvent): void {
+  async function handleDrop(targetIndex: number, e: DragEvent): Promise<void> {
     e.preventDefault();
     if (dragSourceIndex !== null && dragSourceIndex !== targetIndex) {
-      service.document.reorderPages([dragSourceIndex], targetIndex);
+      await actions.reorderPages([dragSourceIndex], targetIndex);
       dragSourceIndex = null;
       onRefresh();
     }
@@ -184,7 +191,7 @@
   bind:this={mergeFileInputEl}
   type="file"
   multiple
-  accept=".pdf,application/pdf"
+  accept=".pdf,application/pdf,image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.svg"
   onchange={handleMergeFileSelected}
   class="hidden"
 />
@@ -193,7 +200,7 @@
   bind:this={imageFileInputEl}
   type="file"
   multiple
-  accept="image/png,image/jpeg"
+  accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.svg"
   onchange={handleImageFileSelected}
   class="hidden"
 />
@@ -213,26 +220,37 @@
     </div>
 
     <div class="flex items-center gap-1.5 flex-wrap">
+      {#if featureFlags.isEnabled('page-actions.add-blank')}
       <Button variant="outline" size="sm" onclick={handleAddBlankPage} title="Insert Blank Page">
         <Plus class="h-4 w-4 mr-1" /> Blank
       </Button>
+      {/if}
 
-      <Button variant="outline" size="sm" onclick={triggerMerge} title="Merge PDF file as new pages">
-        <FilePlus2 class="h-4 w-4 mr-1" /> Merge PDF
+      {#if featureFlags.isEnabled('merge') && featureFlags.isEnabled('page-actions.merge')}
+      <Button variant="outline" size="sm" onclick={triggerMerge} title="Merge PDF files or images as new pages">
+        <FilePlus2 class="h-4 w-4 mr-1" /> Merge Files
       </Button>
+      {/if}
 
-      <Button variant="outline" size="sm" onclick={triggerImageImport} title="Import PNG/JPG as new page">
+      {#if featureFlags.isEnabled('page-actions.import-image')}
+      <Button variant="outline" size="sm" onclick={triggerImageImport} title="Import image as new page">
         <ImagePlus class="h-4 w-4 mr-1" /> Import Image
       </Button>
+      {/if}
 
+      {#if featureFlags.isEnabled('page-actions.duplicate')}
       <Button variant="outline" size="sm" onclick={handleDuplicateSelected} title="Duplicate Selected">
         <Copy class="h-4 w-4 mr-1" /> Duplicate
       </Button>
+      {/if}
 
+      {#if featureFlags.isEnabled('page-actions.rotate')}
       <Button variant="outline" size="sm" onclick={handleRotateSelected} title="Rotate Selected 90 degrees">
         Rotate
       </Button>
+      {/if}
 
+      {#if featureFlags.isEnabled('page-actions.delete')}
       <Button
         variant="destructive"
         size="sm"
@@ -242,25 +260,38 @@
       >
         <Trash2 class="h-4 w-4 mr-1" /> Delete
       </Button>
+      {/if}
 
-      <div class="h-4 w-px bg-border mx-1"></div>
+      {#if featureFlags.isEnabled('tools')}
+      <Separator orientation="vertical" class="h-4 mx-1" />
 
       <!-- Automation & Developer Tools -->
+      {#if featureFlags.isEnabled('tools.automate')}
       <Button variant="secondary" size="sm" onclick={() => (editorStore.activeMockupTool = 'Automate Workflow')} title="Automate Workflow">
         Automate
       </Button>
+      {/if}
+      {#if featureFlags.isEnabled('tools.auto-rename')}
       <Button variant="secondary" size="sm" onclick={() => (editorStore.activeMockupTool = 'Auto Rename PDF File')} title="Auto Rename PDF">
         Auto Rename
       </Button>
+      {/if}
+      {#if featureFlags.isEnabled('tools.api')}
       <Button variant="ghost" size="sm" onclick={() => (editorStore.activeMockupTool = 'API Reference')} title="API Reference">
         API
       </Button>
+      {/if}
+      {#if featureFlags.isEnabled('tools.folder-scan')}
       <Button variant="ghost" size="sm" onclick={() => (editorStore.activeMockupTool = 'Automated Folder Scanning')} title="Folder Scanning">
         Folder Scan
       </Button>
+      {/if}
+      {#if featureFlags.isEnabled('tools.sso-guide')}
       <Button variant="ghost" size="sm" onclick={() => (editorStore.activeMockupTool = 'SSO Configuration Guide')} title="SSO Guide">
         SSO Guide
       </Button>
+      {/if}
+      {/if}
     </div>
   </div>
 
@@ -276,7 +307,7 @@
           onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleSelectPage(index, e as unknown as MouseEvent); }}
           role="button"
           tabindex="0"
-          draggable="true"
+          draggable={featureFlags.isEnabled('page-actions.reorder')}
           ondragstart={(e) => handleDragStart(index, e)}
           ondragover={handleDragOver}
           ondrop={(e) => handleDrop(index, e)}
@@ -290,6 +321,7 @@
               Page {index + 1}
             </span>
 
+            {#if featureFlags.isEnabled('page-actions.reorder')}
             <div class="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
               <Button
                 variant="ghost"
@@ -312,6 +344,7 @@
                 <ArrowDown class="h-3 w-3" />
               </Button>
             </div>
+            {/if}
           </div>
         </div>
       {/each}
