@@ -1,35 +1,35 @@
 <script lang="ts">
   import { useCanvasStore } from '../../../stores/canvas.svelte';
+  import { useCanvasActions } from '../../../stores/canvas-actions';
   import SidebarSection from '../../common/SidebarSection.svelte';
-  import { Button } from '$lib/components/ui/button/index.js';
+  import { Button, ButtonGroup } from '$lib/components/ui/button/index.js';
   import { FlipHorizontal, FlipVertical, RotateCcw } from 'lucide-svelte';
 
   const canvasStore = useCanvasStore();
+  const canvasActions = useCanvasActions();
 
   function toggleFlip(axis: 'flipX' | 'flipY'): void {
     const selected = canvasStore.selectedElementId;
     const element = canvasStore.selectedElement;
-    if (selected && element) {
-      // @ts-ignore
-      canvasStore.updateElementProperties(selected, { [axis]: !element[axis] });
+    if (selected && element && 'flipX' in element && 'flipY' in element) {
+      canvasActions.updateElementProperties(selected, { [axis]: !element[axis] });
     }
   }
 
   function resetRotation(): void {
     const selected = canvasStore.selectedElementId;
     if (selected) {
-      canvasStore.updateElementProperties(selected, { rotation: 0 });
+      canvasActions.updateElementProperties(selected, { rotation: 0 });
     }
   }
 </script>
 
-{#if canvasStore.selectedElement && (canvasStore.selectedElement.kind === 'shape' || canvasStore.selectedElement.kind === 'image')}
+{#if canvasStore.selectedElement && (canvasStore.selectedElement.kind === 'shape' || canvasStore.selectedElement.kind === 'image' || canvasStore.selectedElement.kind === 'text')}
   <SidebarSection title="Transform" borderBottom={true} collapsible={true} defaultExpanded={true}>
-    <div class="grid grid-cols-3 gap-2">
+    <ButtonGroup variant="outline" size="sm" class="w-full">
       <Button 
-        variant="outline" 
-        size="sm" 
-        class="h-8 px-2 flex flex-col gap-1 {canvasStore.selectedElement.flipX ? 'bg-primary/10 border-primary' : ''}" 
+        variant={canvasStore.selectedElement.flipX ? 'default' : 'outline'}
+        class="flex-1 h-8 px-2" 
         onclick={() => toggleFlip('flipX')}
         title="Flip Horizontal"
       >
@@ -37,9 +37,8 @@
       </Button>
       
       <Button 
-        variant="outline" 
-        size="sm" 
-        class="h-8 px-2 flex flex-col gap-1 {canvasStore.selectedElement.flipY ? 'bg-primary/10 border-primary' : ''}" 
+        variant={canvasStore.selectedElement.flipY ? 'default' : 'outline'}
+        class="flex-1 h-8 px-2" 
         onclick={() => toggleFlip('flipY')}
         title="Flip Vertical"
       >
@@ -47,15 +46,13 @@
       </Button>
 
       <Button 
-        variant="outline" 
-        size="sm" 
-        class="h-8 px-2 flex flex-col gap-1" 
+        class="flex-1 h-8 px-2" 
         onclick={resetRotation}
         title="Reset Rotation"
         disabled={canvasStore.selectedElement.rotation === 0}
       >
         <RotateCcw class="h-4 w-4" />
       </Button>
-    </div>
+    </ButtonGroup>
   </SidebarSection>
 {/if}
