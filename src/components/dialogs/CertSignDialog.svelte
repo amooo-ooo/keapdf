@@ -5,16 +5,17 @@
   import { useCanvasStore } from '../../stores/canvas.svelte';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import * as Tabs from '$lib/components/ui/tabs/index.js';
+  import * as Select from '$lib/components/ui/select/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Checkbox } from '$lib/components/ui/checkbox/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
   import { downloadBytes } from '../../utils/download-utils';
-  import {
-    createSelfSignedCertificate,
-    parsePkcs12,
-    type DigitalIdentity,
-    type SignPdfOptions,
+  import type {
+    DigitalIdentity,
+    SignPdfOptions,
   } from '../../services/pdf/operations/signature-ops';
   import { getSavedSignatures, type SavedSignature } from '../../services/signature-storage';
   import {
@@ -38,7 +39,7 @@
   let activeTab = $state<'cert' | 'details' | 'appearance' | 'sign'>('cert');
   let certMode = $state<'generate' | 'import'>('generate');
 
-  // -- Certificate Generation Inputs --
+  // Certificate generation inputs
   let commonName = $state('Jane Smith');
   let organization = $state('Acme Corporation');
   let organizationalUnit = $state('Legal & Compliance');
@@ -48,16 +49,16 @@
   let keySize = $state<2048 | 4096>(2048);
   let validityYears = $state(2);
 
-  // -- Certificate Import Inputs --
+  // Certificate import inputs
   let importedP12File: File | null = $state(null);
   let importPassword = $state('');
   let importError = $state<string | null>(null);
 
-  // -- Active Identity --
+  // Active identity
   let activeIdentity = $state<DigitalIdentity | null>(null);
   let isGenerating = $state(false);
 
-  // -- Signature Metadata --
+  // Signature metadata
   let reason = $state('I am approving this document');
   let location = $state('Auckland, New Zealand');
   let contactInfo = $state('jane.smith@example.com');
@@ -68,7 +69,7 @@
     'I certify the integrity and authenticity of this document',
   ];
 
-  // -- Visual Appearance --
+  // Visual appearance
   let isVisibleSignature = $state(true);
   let targetPageIndex = $state(0);
   let placementPosition = $state<'bottom-right' | 'bottom-left' | 'center'>('bottom-right');
@@ -76,7 +77,13 @@
   let selectedGraphicSigId = $state<string | null>(null);
   let showTextDetails = $state(true);
 
-  // -- Status --
+  // Standards and PAdES Configuration
+  let subFilter = $state<'ETSI.CAdES.detached' | 'adbe.pkcs7.detached'>('ETSI.CAdES.detached');
+  let enableTimestamp = $state(false);
+  let tsaUrl = $state('https://freetsa.org/tsr');
+  let embedDss = $state(true);
+
+  // Status
   let isSigning = $state(false);
   let signSuccess = $state(false);
   let signedPdfBytes = $state<Uint8Array | null>(null);
@@ -104,6 +111,7 @@
     if (!commonName.trim()) return;
     isGenerating = true;
     try {
+      const { createSelfSignedCertificate } = await import('../../services/pdf/operations/signature-ops');
       const id = await createSelfSignedCertificate({
         commonName: commonName.trim(),
         organization: organization.trim() || undefined,
@@ -128,6 +136,7 @@
     if (!importedP12File) return;
     importError = null;
     try {
+      const { parsePkcs12 } = await import('../../services/pdf/operations/signature-ops');
       const buffer = await importedP12File.arrayBuffer();
       const id = parsePkcs12(buffer, importPassword);
       activeIdentity = id;
@@ -196,6 +205,9 @@
         contactInfo: contactInfo.trim() || undefined,
         signingTime: new Date(),
         visual: visualOptions,
+        subFilter,
+        tsaUrl: enableTimestamp && tsaUrl.trim() ? tsaUrl.trim() : undefined,
+        embedDss,
       };
 
       const resultBytes = await actions.signActiveDocument(signOptions, canvasStore);
@@ -240,7 +252,7 @@
     <div class="flex-1 overflow-y-auto px-6 py-4">
       {#if signSuccess}
         <div class="py-6 flex flex-col items-center justify-center text-center space-y-4">
-          <div class="w-12 h-12 rounded-full bg-emerald-500/10 text-emerald-600 flex items-center justify-center border border-emerald-500/30">
+          <div class="w-12 h-12 rounded-full bg-success/10 text-success flex items-center justify-center border border-success/30">
             <CheckCircle2 class="h-6 w-6" />
           </div>
           <div class="space-y-1">
@@ -261,11 +273,17 @@
             </div>
             <div class="flex justify-between">
               <span class="text-muted-foreground">SubFilter:</span>
-              <span class="font-mono text-[11px]">adbe.pkcs7.detached</span>
+              <span class="font-sans text-[11px]">{subFilter}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-muted-foreground">PAdES Profile:</span>
+              <span class="font-sans text-[11px] font-medium text-primary">
+                {embedDss ? 'PAdES-B-LT (LTV)' : enableTimestamp ? 'PAdES-B-T (Timestamped)' : subFilter === 'ETSI.CAdES.detached' ? 'PAdES-B-B (Baseline)' : 'Legacy Adobe PKCS#7'}
+              </span>
             </div>
             <div class="flex justify-between">
               <span class="text-muted-foreground">Digest:</span>
-              <span class="font-mono text-[11px]">SHA-256</span>
+              <span class="font-sans text-[11px]">SHA-256</span>
             </div>
           </div>
 
@@ -357,16 +375,25 @@
 
                 <div class="space-y-1">
                   <Label class="text-xs font-medium">RSA Key Modulus</Label>
-                  <select bind:value={keySize} class="w-full h-8 text-xs rounded-md border border-input bg-card px-2">
-                    <option value={2048}>RSA 2048-bit (Standard)</option>
-                    <option value={4096}>RSA 4096-bit (High Security)</option>
-                  </select>
+                  <Select.Root
+                    type="single"
+                    value={keySize.toString()}
+                    onValueChange={(val) => { if (val === '2048' || val === '4096') keySize = parseInt(val, 10) as 2048 | 4096; }}
+                  >
+                    <Select.Trigger class="w-full h-8 text-xs">
+                      {keySize === 2048 ? 'RSA 2048-bit (Standard)' : 'RSA 4096-bit (High Security)'}
+                    </Select.Trigger>
+                    <Select.Content>
+                      <Select.Item value="2048" label="RSA 2048-bit (Standard)">RSA 2048-bit (Standard)</Select.Item>
+                      <Select.Item value="4096" label="RSA 4096-bit (High Security)">RSA 4096-bit (High Security)</Select.Item>
+                    </Select.Content>
+                  </Select.Root>
                 </div>
               </div>
 
               <div class="pt-3 border-t border-border flex items-center justify-between">
                 <div class="text-[11px] text-muted-foreground flex items-center gap-1">
-                  <Lock class="h-3 w-3 text-emerald-500" /> Keys are generated client-side inside your browser
+                  <Lock class="h-3 w-3 text-success" /> Keys are generated client-side inside your browser
                 </div>
                 <Button size="sm" class="text-xs" onclick={handleGenerateCertificate} disabled={!commonName.trim() || !certPassword || isGenerating}>
                   {#if isGenerating}
@@ -433,11 +460,20 @@
             <div class="space-y-3">
               <div class="space-y-1">
                 <Label class="text-xs font-medium">Signing Reason</Label>
-                <select bind:value={reason} class="w-full h-8 text-xs rounded-md border border-input bg-card px-2 mb-1.5">
-                  {#each reasonPresets as preset}
-                    <option value={preset}>{preset}</option>
-                  {/each}
-                </select>
+                <Select.Root
+                  type="single"
+                  value={reason}
+                  onValueChange={(val) => { if (val) reason = val; }}
+                >
+                  <Select.Trigger class="w-full h-8 text-xs mb-1.5">
+                    {reason || "Select a signing reason..."}
+                  </Select.Trigger>
+                  <Select.Content>
+                    {#each reasonPresets as preset}
+                      <Select.Item value={preset} label={preset}>{preset}</Select.Item>
+                    {/each}
+                  </Select.Content>
+                </Select.Root>
                 <Input bind:value={reason} placeholder="Or enter custom signing reason..." class="h-8 text-xs" />
               </div>
 
@@ -450,6 +486,63 @@
                 <div class="space-y-1">
                   <Label for="contact-input" class="text-xs font-medium">Signer Contact Info</Label>
                   <Input id="contact-input" bind:value={contactInfo} placeholder="Email or Phone" class="h-8 text-xs" />
+                </div>
+              </div>
+
+              <!-- Standards and Security Configuration -->
+              <div class="space-y-3 pt-2 border-t border-border">
+                <div class="space-y-1">
+                  <div class="flex items-center justify-between">
+                    <Label class="text-xs font-medium">Signature Standard and SubFilter</Label>
+                    <Badge variant="outline" class="text-[10px] bg-primary/5 text-primary border-primary/20">
+                      ETSI EN 319 142
+                    </Badge>
+                  </div>
+                  <Select.Root
+                    type="single"
+                    value={subFilter}
+                    onValueChange={(val) => { if (val === 'ETSI.CAdES.detached' || val === 'adbe.pkcs7.detached') subFilter = val; }}
+                  >
+                    <Select.Trigger class="w-full h-8 text-xs">
+                      {subFilter === 'ETSI.CAdES.detached' ? 'PAdES Baseline (ETSI.CAdES.detached) - Recommended' : 'Adobe Legacy (adbe.pkcs7.detached)'}
+                    </Select.Trigger>
+                    <Select.Content>
+                      <Select.Item value="ETSI.CAdES.detached" label="PAdES Baseline (ETSI.CAdES.detached) - Recommended">
+                        PAdES Baseline (ETSI.CAdES.detached) - Recommended
+                      </Select.Item>
+                      <Select.Item value="adbe.pkcs7.detached" label="Adobe Legacy (adbe.pkcs7.detached)">
+                        Adobe Legacy (adbe.pkcs7.detached)
+                      </Select.Item>
+                    </Select.Content>
+                  </Select.Root>
+                  <p class="text-[10px] text-muted-foreground">
+                    PAdES embeds CAdES signingCertificateV2 (RFC 5035) cryptographically binding certificate hashes.
+                  </p>
+                </div>
+
+                <div class="space-y-2 p-2.5 bg-muted/20 border border-border rounded-lg text-xs">
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <span class="font-medium block text-xs">RFC 3161 Qualified Timestamp (PAdES B-T)</span>
+                      <span class="text-[10px] text-muted-foreground">Applies authentic cryptographic time from a Time Stamping Authority.</span>
+                    </div>
+                    <Checkbox bind:checked={enableTimestamp} />
+                  </div>
+
+                  {#if enableTimestamp}
+                    <div class="space-y-1 pt-1">
+                      <Label for="tsa-url" class="text-[11px] font-medium">TSA Server URL</Label>
+                      <Input id="tsa-url" bind:value={tsaUrl} placeholder="https://freetsa.org/tsr" class="h-7 text-xs font-sans" />
+                    </div>
+                  {/if}
+                </div>
+
+                <div class="flex items-center justify-between p-2.5 bg-muted/20 border border-border rounded-lg text-xs">
+                  <div>
+                    <span class="font-medium block text-xs">Long-Term Validation Store (/DSS)</span>
+                    <span class="text-[10px] text-muted-foreground">Embeds Document Security Store dictionaries for PAdES B-LT compliance.</span>
+                  </div>
+                  <Checkbox bind:checked={embedDss} />
                 </div>
               </div>
             </div>
@@ -471,10 +564,7 @@
                 <div class="text-xs font-semibold">Render Visual Signature on Document</div>
                 <div class="text-[11px] text-muted-foreground">Places an Adobe-style signature seal badge on the target page.</div>
               </div>
-              <label class="relative inline-flex items-center cursor-pointer">
-                <input type="checkbox" bind:checked={isVisibleSignature} class="sr-only peer" />
-                <div class="w-9 h-5 bg-muted peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
-              </label>
+              <Switch bind:checked={isVisibleSignature} aria-label="Render Visual Signature on Document" />
             </div>
 
             {#if isVisibleSignature}
@@ -482,20 +572,40 @@
                 <div class="grid grid-cols-2 gap-3">
                   <div class="space-y-1">
                     <Label class="text-xs font-medium">Target Page</Label>
-                    <select bind:value={targetPageIndex} class="w-full h-8 text-xs rounded-md border border-input bg-card px-2">
-                      {#each Array.from({ length: store.pageCount }, (_, i) => i) as pIdx}
-                        <option value={pIdx}>Page {pIdx + 1}</option>
-                      {/each}
-                    </select>
+                    <Select.Root
+                      type="single"
+                      value={targetPageIndex.toString()}
+                      onValueChange={(val) => { if (val) targetPageIndex = parseInt(val, 10); }}
+                    >
+                      <Select.Trigger class="w-full h-8 text-xs">
+                        Page {targetPageIndex + 1}
+                      </Select.Trigger>
+                      <Select.Content>
+                        {#each Array.from({ length: store.pageCount }, (_, i) => i) as pIdx}
+                          <Select.Item value={pIdx.toString()} label="Page {pIdx + 1}">
+                            Page {pIdx + 1}
+                          </Select.Item>
+                        {/each}
+                      </Select.Content>
+                    </Select.Root>
                   </div>
 
                   <div class="space-y-1">
                     <Label class="text-xs font-medium">Placement Position</Label>
-                    <select bind:value={placementPosition} class="w-full h-8 text-xs rounded-md border border-input bg-card px-2">
-                      <option value="bottom-right">Bottom Right of Page</option>
-                      <option value="bottom-left">Bottom Left of Page</option>
-                      <option value="center">Center of Page</option>
-                    </select>
+                    <Select.Root
+                      type="single"
+                      value={placementPosition}
+                      onValueChange={(val) => { if (val === 'bottom-right' || val === 'bottom-left' || val === 'center') placementPosition = val; }}
+                    >
+                      <Select.Trigger class="w-full h-8 text-xs">
+                        {placementPosition === 'bottom-right' ? 'Bottom Right of Page' : placementPosition === 'bottom-left' ? 'Bottom Left of Page' : 'Center of Page'}
+                      </Select.Trigger>
+                      <Select.Content>
+                        <Select.Item value="bottom-right" label="Bottom Right of Page">Bottom Right of Page</Select.Item>
+                        <Select.Item value="bottom-left" label="Bottom Left of Page">Bottom Left of Page</Select.Item>
+                        <Select.Item value="center" label="Center of Page">Center of Page</Select.Item>
+                      </Select.Content>
+                    </Select.Root>
                   </div>
                 </div>
 
@@ -567,7 +677,7 @@
           <Tabs.Content value="sign" class="space-y-4">
             <div class="bg-card border border-border rounded-lg p-4 space-y-3 text-xs">
               <div class="font-semibold text-foreground flex items-center gap-1.5 pb-2 border-b border-border">
-                <ShieldCheck class="h-4 w-4 text-emerald-500" />
+                <ShieldCheck class="h-4 w-4 text-success" />
                 ISO 32000 Signature Summary
               </div>
 
@@ -582,11 +692,25 @@
                 </div>
                 <div>
                   <span class="text-muted-foreground">Digest Algorithm:</span>
-                  <div class="font-mono">SHA-256</div>
+                  <div class="font-sans">SHA-256</div>
                 </div>
                 <div>
-                  <span class="text-muted-foreground">Signature Type:</span>
-                  <div class="font-mono">adbe.pkcs7.detached</div>
+                  <span class="text-muted-foreground">Signature Standard:</span>
+                  <div class="font-sans font-medium">{subFilter}</div>
+                </div>
+                <div>
+                  <span class="text-muted-foreground">PAdES Profile:</span>
+                  <div class="font-sans font-medium text-primary">
+                    {embedDss ? 'PAdES-B-LT (LTV)' : enableTimestamp ? 'PAdES-B-T' : subFilter === 'ETSI.CAdES.detached' ? 'PAdES-B-B' : 'Legacy Adobe'}
+                  </div>
+                </div>
+                <div>
+                  <span class="text-muted-foreground">Timestamping:</span>
+                  <div>{enableTimestamp ? 'RFC 3161 TSA Token' : 'Local Declared Time'}</div>
+                </div>
+                <div>
+                  <span class="text-muted-foreground">Certificate Chain:</span>
+                  <div>{activeIdentity?.certificateChain?.length || 1} Certificate(s)</div>
                 </div>
                 <div>
                   <span class="text-muted-foreground">Visual Badge:</span>
@@ -613,7 +737,7 @@
                 <Button size="sm" variant="outline" class="text-xs" onclick={() => handleExecuteSign(true)} disabled={isSigning}>
                   <Download class="h-3.5 w-3.5 mr-1" /> Sign & Download
                 </Button>
-                <Button size="sm" class="text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onclick={() => handleExecuteSign(false)} disabled={isSigning}>
+                <Button size="sm" class="text-xs bg-success hover:bg-success/90 text-success-foreground" onclick={() => handleExecuteSign(false)} disabled={isSigning}>
                   {#if isSigning}
                     <Sparkles class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Signing PDF...
                   {:else}
