@@ -7,6 +7,9 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Checkbox } from '$lib/components/ui/checkbox/index.js';
+  import { Slider } from '$lib/components/ui/slider/index.js';
+  import { ColorPicker } from '$lib/components/ui/color-picker/index.js';
   import {
     LayoutGrid,
     BookOpenCheck,
@@ -29,7 +32,7 @@
     BookletOutputMode,
     SinglePageLayout
   } from '../../services/pdf/operations/types';
-  import { parsePageRange } from '../../services/pdf/operations/imposition-ops';
+  import { parsePageRange } from '../../utils/page-range';
 
   interface Props {
     open?: boolean;
@@ -49,10 +52,10 @@
   let isProcessing = $state(false);
   let errorMessage = $state('');
 
-  // -- Preview sheet navigation --
+  // Preview sheet navigation
   let previewSheetIndex = $state(0);
 
-  // -- N-Up state --
+  // N-Up state
   let nupPreset = $state<'2x1' | '1x2' | '2x2' | '2x3' | '3x2' | '2x4' | '4x2' | '3x3' | '4x4' | 'custom'>('2x2');
   let nupCustomCols = $state(2);
   let nupCustomRows = $state(2);
@@ -66,7 +69,7 @@
   let nupAutoRotate = $state(true);
   let nupPageRange = $state('');
 
-  // -- Booklet state --
+  // Booklet state
   let bookletBinding = $state<BookletBindingSide>('left');
   let bookletSheetSize = $state<StandardSheetSize>('source-2x');
   let bookletOrientation = $state<SheetOrientation>('landscape');
@@ -78,7 +81,7 @@
   let bookletGutterPts = $state(12);
   let bookletPageRange = $state('');
 
-  // -- Single Page state --
+  // Single Page state
   let singleLayout = $state<SinglePageLayout>('vertical-strip');
   let singleGridCols = $state(3);
   let singleSpacingPts = $state(14);
@@ -87,7 +90,7 @@
   let singleBgColor = $state('#ffffff');
   let singlePageRange = $state('');
 
-  // -- Posterize state --
+  // Posterize state
   let posterSheetSize = $state<StandardSheetSize>('A4');
   let posterOrientation = $state<SheetOrientation>('portrait');
   let posterModeType = $state<'scale' | 'grid'>('scale');
@@ -100,7 +103,7 @@
   let posterDrawLabels = $state(true);
   let posterPageIndex = $state(0);
 
-  // -- Cut & Stack state --
+  // Cut & Stack state
   let cutStackPreset = $state<'2x1' | '2x2'>('2x1');
   let cutStackSheetSize = $state<StandardSheetSize>('A4');
   let cutStackOrientation = $state<SheetOrientation>('auto');
@@ -426,7 +429,7 @@
             Rearrange, group, scale, and impose pages for booklet printing, n-up sheets, continuous rolls, or posters.
           </Dialog.Description>
         </div>
-        <Badge variant="outline" class="text-[11px] font-mono font-medium px-2 py-0.5 border-primary/30 text-primary">
+        <Badge variant="outline" class="text-[11px] font-sans font-medium px-2 py-0.5 border-primary/30 text-primary">
           {store.pageCount} Pages Loaded
         </Badge>
       </div>
@@ -499,11 +502,11 @@
                   { id: '2x4', label: '8-Up (2x4)' },
                   { id: '3x3', label: '9-Up (3x3)' },
                   { id: 'custom', label: 'Custom Grid' }
-                ] as preset}
+                ] as const as preset}
                   <button
                     type="button"
                     class="px-2 py-1.5 text-xs rounded border text-center transition-colors {nupPreset === preset.id ? 'bg-primary text-primary-foreground border-primary font-medium' : 'bg-muted/30 border-border hover:bg-muted text-muted-foreground hover:text-foreground'}"
-                    onclick={() => { nupPreset = preset.id as any; previewSheetIndex = 0; }}
+                    onclick={() => { nupPreset = preset.id; previewSheetIndex = 0; }}
                   >
                     {preset.label}
                   </button>
@@ -584,7 +587,15 @@
                   <Label class="text-xs">Outer Margin</Label>
                   <span class="text-muted-foreground">{nupMarginPts} pt</span>
                 </div>
-                <input type="range" min="0" max="60" bind:value={nupMarginPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+                <Slider
+                  type="single"
+                  min={0}
+                  max={60}
+                  step={1}
+                  value={nupMarginPts}
+                  onValueChange={(val: number) => { nupMarginPts = val; }}
+                  class="w-full mt-1.5"
+                />
               </div>
 
               <div class="grid gap-1.5">
@@ -592,23 +603,31 @@
                   <Label class="text-xs">Cell Gutter</Label>
                   <span class="text-muted-foreground">{nupGutterPts} pt</span>
                 </div>
-                <input type="range" min="0" max="40" bind:value={nupGutterPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+                <Slider
+                  type="single"
+                  min={0}
+                  max={40}
+                  step={1}
+                  value={nupGutterPts}
+                  onValueChange={(val: number) => { nupGutterPts = val; }}
+                  class="w-full mt-1.5"
+                />
               </div>
             </div>
 
             <div class="flex flex-wrap gap-4 pt-1">
               <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" bind:checked={nupDrawBorders} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <Checkbox bind:checked={nupDrawBorders} />
                 <span>Draw Page Borders</span>
               </label>
 
               <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" bind:checked={nupDrawCutMarks} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <Checkbox bind:checked={nupDrawCutMarks} />
                 <span>Draw Cut Guides</span>
               </label>
 
               <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" bind:checked={nupAutoRotate} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <Checkbox bind:checked={nupAutoRotate} />
                 <span>Auto-rotate Subpages</span>
               </label>
             </div>
@@ -677,7 +696,15 @@
                   <Label class="text-xs">Outer Margin</Label>
                   <span class="text-muted-foreground">{bookletMarginPts} pt</span>
                 </div>
-                <input type="range" min="0" max="50" bind:value={bookletMarginPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+                <Slider
+                  type="single"
+                  min={0}
+                  max={50}
+                  step={1}
+                  value={bookletMarginPts}
+                  onValueChange={(val: number) => { bookletMarginPts = val; }}
+                  class="w-full mt-1.5"
+                />
               </div>
 
               <div class="grid gap-1.5">
@@ -685,23 +712,31 @@
                   <Label class="text-xs">Spine Gutter</Label>
                   <span class="text-muted-foreground">{bookletGutterPts} pt</span>
                 </div>
-                <input type="range" min="0" max="40" bind:value={bookletGutterPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+                <Slider
+                  type="single"
+                  min={0}
+                  max={40}
+                  step={1}
+                  value={bookletGutterPts}
+                  onValueChange={(val: number) => { bookletGutterPts = val; }}
+                  class="w-full mt-1.5"
+                />
               </div>
             </div>
 
             <div class="flex flex-wrap gap-4 pt-1">
               <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" bind:checked={bookletAutoPad} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <Checkbox bind:checked={bookletAutoPad} />
                 <span>Auto-pad with blanks to multiple of 4</span>
               </label>
 
               <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" bind:checked={bookletDrawFoldLine} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <Checkbox bind:checked={bookletDrawFoldLine} />
                 <span>Draw Center Spine Fold Guide</span>
               </label>
 
               <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" bind:checked={bookletDrawBorders} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <Checkbox bind:checked={bookletDrawBorders} />
                 <span>Draw Page Borders</span>
               </label>
             </div>
@@ -750,7 +785,15 @@
                   <Label class="text-xs">Inter-Page Spacing</Label>
                   <span class="text-muted-foreground">{singleSpacingPts} pt</span>
                 </div>
-                <input type="range" min="0" max="60" bind:value={singleSpacingPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+                <Slider
+                  type="single"
+                  min={0}
+                  max={60}
+                  step={1}
+                  value={singleSpacingPts}
+                  onValueChange={(val: number) => { singleSpacingPts = val; }}
+                  class="w-full mt-1.5"
+                />
               </div>
 
               <div class="grid gap-1.5">
@@ -758,7 +801,15 @@
                   <Label class="text-xs">Outer Margin</Label>
                   <span class="text-muted-foreground">{singleMarginPts} pt</span>
                 </div>
-                <input type="range" min="0" max="60" bind:value={singleMarginPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+                <Slider
+                  type="single"
+                  min={0}
+                  max={60}
+                  step={1}
+                  value={singleMarginPts}
+                  onValueChange={(val: number) => { singleMarginPts = val; }}
+                  class="w-full mt-1.5"
+                />
               </div>
             </div>
 
@@ -766,8 +817,12 @@
               <div class="grid gap-1.5">
                 <Label class="text-xs">Background Color</Label>
                 <div class="flex items-center gap-2">
-                  <input type="color" bind:value={singleBgColor} class="h-8 w-10 p-0.5 rounded border border-input cursor-pointer bg-background" />
-                  <Input type="text" bind:value={singleBgColor} class="h-8 text-xs font-mono" />
+                  <ColorPicker
+                    value={singleBgColor}
+                    onValueChange={(val) => { singleBgColor = val; }}
+                    label="Background Color"
+                  />
+                  <Input type="text" bind:value={singleBgColor} class="h-8 text-xs font-sans" />
                 </div>
               </div>
 
@@ -784,7 +839,7 @@
 
             <div class="pt-1">
               <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" bind:checked={singleDrawBorders} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <Checkbox bind:checked={singleDrawBorders} />
                 <span>Draw Page Borders</span>
               </label>
             </div>
@@ -844,7 +899,15 @@
                   <Label class="text-xs">Poster Scaling Factor</Label>
                   <span class="font-medium text-foreground">{posterScalePercent}%</span>
                 </div>
-                <input type="range" min="120" max="600" step="20" bind:value={posterScalePercent} class="w-full h-1.5 bg-muted rounded accent-primary" />
+                <Slider
+                  type="single"
+                  min={120}
+                  max={600}
+                  step={20}
+                  value={posterScalePercent}
+                  onValueChange={(val: number) => { posterScalePercent = val; }}
+                  class="w-full mt-1.5"
+                />
               </div>
             {:else}
               <div class="grid grid-cols-2 gap-3 p-2.5 rounded-md bg-muted/30 border border-border">
@@ -865,7 +928,15 @@
                   <Label class="text-xs">Overlap Margin (for taping)</Label>
                   <span class="text-muted-foreground">{posterOverlapPts} pt</span>
                 </div>
-                <input type="range" min="0" max="50" bind:value={posterOverlapPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+                <Slider
+                  type="single"
+                  min={0}
+                  max={50}
+                  step={1}
+                  value={posterOverlapPts}
+                  onValueChange={(val: number) => { posterOverlapPts = val; }}
+                  class="w-full mt-1.5"
+                />
               </div>
 
               <div class="grid gap-1.5">
@@ -873,18 +944,26 @@
                   <Label class="text-xs">Sheet Margin</Label>
                   <span class="text-muted-foreground">{posterMarginPts} pt</span>
                 </div>
-                <input type="range" min="0" max="50" bind:value={posterMarginPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+                <Slider
+                  type="single"
+                  min={0}
+                  max={50}
+                  step={1}
+                  value={posterMarginPts}
+                  onValueChange={(val: number) => { posterMarginPts = val; }}
+                  class="w-full mt-1.5"
+                />
               </div>
             </div>
 
             <div class="flex flex-wrap gap-4 pt-1">
               <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" bind:checked={posterDrawCutGuides} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <Checkbox bind:checked={posterDrawCutGuides} />
                 <span>Draw Alignment & Cut Marks</span>
               </label>
 
               <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" bind:checked={posterDrawLabels} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <Checkbox bind:checked={posterDrawLabels} />
                 <span>Print Tile Sheet Coordinates</span>
               </label>
             </div>
@@ -954,7 +1033,15 @@
                   <Label class="text-xs">Outer Margin</Label>
                   <span class="text-muted-foreground">{cutStackMarginPts} pt</span>
                 </div>
-                <input type="range" min="0" max="50" bind:value={cutStackMarginPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+                <Slider
+                  type="single"
+                  min={0}
+                  max={50}
+                  step={1}
+                  value={cutStackMarginPts}
+                  onValueChange={(val: number) => { cutStackMarginPts = val; }}
+                  class="w-full mt-1.5"
+                />
               </div>
 
               <div class="grid gap-1.5">
@@ -962,18 +1049,26 @@
                   <Label class="text-xs">Stack Gutter</Label>
                   <span class="text-muted-foreground">{cutStackGutterPts} pt</span>
                 </div>
-                <input type="range" min="0" max="40" bind:value={cutStackGutterPts} class="w-full h-1.5 bg-muted rounded accent-primary" />
+                <Slider
+                  type="single"
+                  min={0}
+                  max={40}
+                  step={1}
+                  value={cutStackGutterPts}
+                  onValueChange={(val: number) => { cutStackGutterPts = val; }}
+                  class="w-full mt-1.5"
+                />
               </div>
             </div>
 
             <div class="flex flex-wrap gap-4 pt-1">
               <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" bind:checked={cutStackDrawCutMarks} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <Checkbox bind:checked={cutStackDrawCutMarks} />
                 <span>Draw Chop Cut Lines</span>
               </label>
 
               <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" bind:checked={cutStackDrawBorders} class="rounded border-input text-primary accent-primary h-3.5 w-3.5" />
+                <Checkbox bind:checked={cutStackDrawBorders} />
                 <span>Draw Page Borders</span>
               </label>
             </div>
@@ -985,7 +1080,7 @@
       <div class="md:col-span-5 p-6 bg-muted/10 flex flex-col justify-between items-center gap-4 overflow-y-auto">
         <div class="w-full flex items-center justify-between">
           <span class="text-xs font-semibold text-foreground uppercase tracking-wider">Sheet Layout Preview</span>
-          <span class="text-[11px] text-muted-foreground font-mono">
+          <span class="text-[11px] text-muted-foreground font-sans">
             Sheet {previewSheetIndex + 1} of {totalOutputSheets}
           </span>
         </div>
