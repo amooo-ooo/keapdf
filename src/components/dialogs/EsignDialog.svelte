@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useCanvasStore } from '../../stores/canvas.svelte';
@@ -9,6 +9,8 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Checkbox } from '$lib/components/ui/checkbox/index.js';
+  import { Slider } from '$lib/components/ui/slider/index.js';
   import {
     getSavedSignatures,
     saveSignature,
@@ -17,6 +19,7 @@
     renderDrawnStrokesToDataUrl,
     renderTypedSignatureToDataUrl,
     processUploadedSignatureImage,
+    preloadSignatureFonts,
     type SavedSignature,
     type DrawPoint,
   } from '../../services/signature-storage';
@@ -32,6 +35,7 @@
     Plus,
     Sparkles,
     Sliders,
+    Loader2,
   } from 'lucide-svelte';
 
   const store = useEditorStore();
@@ -42,14 +46,20 @@
   let savedSignatures = $state<SavedSignature[]>([]);
   let saveToCollection = $state(true);
   let signatureTitle = $state('My Signature');
+  let isPlacing = $state(false);
 
-  // -- Drawing State --
+  // Drawing State
   let drawCanvasEl: HTMLCanvasElement | null = $state(null);
   let isDrawing = $state(false);
   let strokes = $state<DrawPoint[][]>([]);
-  let currentStroke = $state<DrawPoint[]>([]);
   let penColor = $state('#000000');
   let strokeWidth = $state(2.5);
+
+  // High-frequency non-reactive drawing state
+  let activeStrokePoints: DrawPoint[] = [];
+  let cachedCanvasRect: DOMRect | null = null;
+  let rafPending = false;
+  let activePointerId: number | null = null;
 
   const penColors = [
     { label: 'Black', value: '#000000' },
@@ -58,7 +68,7 @@
     { label: 'Dark Gray', value: '#374151' },
   ];
 
-  // -- Type State --
+  // Type State
   let typedName = $state('John Doe');
   let typedColor = $state('#000000');
   let selectedFont = $state('Caveat');
@@ -71,7 +81,7 @@
     { name: 'Allura', label: 'Slender Flourish' },
   ];
 
-  // -- Upload State --
+  // Upload State
   let uploadedDataUrl = $state<string | null>(null);
   let cleanedUploadDataUrl = $state<string | null>(null);
   let uploadAspectRatio = $state(3);
@@ -87,44 +97,111 @@
     }
   }
 
+  function setupCanvasDimensions(explicitWidth?: number, explicitHeight?: number): void {
+    if (!drawCanvasEl) return;
+
+    let clientW = explicitWidth;
+    let clientH = explicitHeight;
+
+    if (clientW === undefined || clientH === undefined) {
+      const rect = drawCanvasEl.getBoundingClientRect();
+      clientW = rect.width;
+      clientH = rect.height;
+      cachedCanvasRect = rect;
+    }
+
+    if (clientW === 0 || clientH === 0) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const targetWidth = Math.round(clientW * dpr);
+    const targetHeight = Math.round(clientH * dpr);
+
+    if (Math.abs(drawCanvasEl.width - targetWidth) > 1 || Math.abs(drawCanvasEl.height - targetHeight) > 1) {
+      drawCanvasEl.width = targetWidth;
+      drawCanvasEl.height = targetHeight;
+    }
+
+    cachedCanvasRect = drawCanvasEl.getBoundingClientRect();
+    redrawCanvas();
+  }
+
   onMount(() => {
+    preloadSignatureFonts();
     refreshSavedList();
     if (store.esignInitialTab) {
       activeTab = store.esignInitialTab;
     }
   });
 
+  onDestroy(() => {
+    cleanupPointerListeners();
+    rafPending = false;
+  });
+
+  $effect(() => {
+    const canvas = drawCanvasEl;
+    if (!canvas) {
+      return undefined;
+    }
+
+    untrack(() => {
+      setupCanvasDimensions();
+    });
+
+    if (typeof ResizeObserver === 'undefined') {
+      return undefined;
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      if (!entries || entries.length === 0) return;
+      const entry = entries[0];
+      const width = entry.contentRect.width;
+      const height = entry.contentRect.height;
+      if (width === 0 || height === 0) return;
+      setupCanvasDimensions(width, height);
+    });
+
+    observer.observe(canvas);
+    return () => {
+      observer.disconnect();
+    };
+  });
+
   $effect(() => {
     if (store.showEsignDialog) {
-      refreshSavedList();
-      if (store.esignInitialTab) {
-        activeTab = store.esignInitialTab;
-      }
+      untrack(() => {
+        preloadSignatureFonts();
+        refreshSavedList();
+        if (store.esignInitialTab) {
+          activeTab = store.esignInitialTab;
+        }
+        if (activeTab === 'draw') {
+          requestAnimationFrame(() => setupCanvasDimensions());
+        }
+      });
     }
   });
 
-  // -- Canvas Draw Logic --
+  // Canvas Draw Logic
   function redrawCanvas(): void {
     if (!drawCanvasEl) return;
     const ctx = drawCanvasEl.getContext('2d');
     if (!ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
-    const rect = drawCanvasEl.getBoundingClientRect();
+    const rect = cachedCanvasRect || drawCanvasEl.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
 
-    drawCanvasEl.width = rect.width * dpr;
-    drawCanvasEl.height = rect.height * dpr;
-
-    ctx.scale(dpr, dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, rect.width, rect.height);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.strokeStyle = penColor;
     ctx.lineWidth = strokeWidth;
 
-    const all = [...strokes, ...(currentStroke.length > 0 ? [currentStroke] : [])];
-    for (const stroke of all) {
+    const all = activeStrokePoints.length > 0 ? [...strokes, activeStrokePoints] : strokes;
+    for (let s = 0; s < all.length; s++) {
+      const stroke = all[s];
       if (stroke.length === 0) continue;
       if (stroke.length === 1) {
         ctx.beginPath();
@@ -147,42 +224,82 @@
     }
   }
 
+  function handleWindowPointerUp(e: PointerEvent): void {
+    if (isDrawing) {
+      handlePointerUp(e);
+    }
+  }
+
+  function cleanupPointerListeners(): void {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('pointerup', handleWindowPointerUp);
+      window.removeEventListener('pointercancel', handleWindowPointerUp);
+    }
+    if (drawCanvasEl && activePointerId !== null) {
+      try {
+        if (drawCanvasEl.hasPointerCapture(activePointerId)) {
+          drawCanvasEl.releasePointerCapture(activePointerId);
+        }
+      } catch {}
+      activePointerId = null;
+    }
+  }
+
   function handlePointerDown(e: PointerEvent): void {
     if (!drawCanvasEl) return;
-    drawCanvasEl.setPointerCapture(e.pointerId);
+    try {
+      drawCanvasEl.setPointerCapture(e.pointerId);
+      activePointerId = e.pointerId;
+    } catch {}
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pointerup', handleWindowPointerUp, { once: true });
+      window.addEventListener('pointercancel', handleWindowPointerUp, { once: true });
+    }
+
+    cachedCanvasRect = drawCanvasEl.getBoundingClientRect();
     isDrawing = true;
-    const rect = drawCanvasEl.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    currentStroke = [{ x, y, pressure: e.pressure }];
+
+    const x = e.clientX - cachedCanvasRect.left;
+    const y = e.clientY - cachedCanvasRect.top;
+    activeStrokePoints = [{ x, y, pressure: e.pressure }];
     redrawCanvas();
   }
 
   function handlePointerMove(e: PointerEvent): void {
-    if (!isDrawing || !drawCanvasEl) return;
-    const rect = drawCanvasEl.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    currentStroke = [...currentStroke, { x, y, pressure: e.pressure }];
-    redrawCanvas();
+    if (!isDrawing || !drawCanvasEl || !cachedCanvasRect) return;
+    const x = e.clientX - cachedCanvasRect.left;
+    const y = e.clientY - cachedCanvasRect.top;
+    activeStrokePoints.push({ x, y, pressure: e.pressure });
+
+    if (!rafPending) {
+      rafPending = true;
+      requestAnimationFrame(() => {
+        rafPending = false;
+        if (isDrawing) {
+          redrawCanvas();
+        }
+      });
+    }
   }
 
-  function handlePointerUp(e: PointerEvent): void {
+  function handlePointerUp(_e: PointerEvent): void {
     if (!isDrawing) return;
     isDrawing = false;
-    if (currentStroke.length > 0) {
-      strokes = [...strokes, currentStroke];
-      currentStroke = [];
+    rafPending = false;
+
+    cleanupPointerListeners();
+
+    if (activeStrokePoints.length > 0) {
+      strokes = [...strokes, [...activeStrokePoints]];
+      activeStrokePoints = [];
     }
-    try {
-      if (drawCanvasEl) drawCanvasEl.releasePointerCapture(e.pointerId);
-    } catch {}
     redrawCanvas();
   }
 
   function clearDraw(): void {
     strokes = [];
-    currentStroke = [];
+    activeStrokePoints = [];
     redrawCanvas();
   }
 
@@ -193,9 +310,15 @@
     }
   }
 
-  // -- Place Actions --
+  // Place Actions
   function handleUseSaved(sig: SavedSignature): void {
-    actions.placeSignatureOnCanvas(sig, store.currentPageIndex, canvasStore);
+    try {
+      actions.placeSignatureOnCanvas(sig, store.currentPageIndex, canvasStore);
+    } catch (err) {
+      console.error('Failed to place saved signature:', err);
+    } finally {
+      handleClose();
+    }
   }
 
   function handleDeleteSaved(id: string, e: MouseEvent): void {
@@ -210,112 +333,138 @@
     refreshSavedList();
   }
 
-  function handleApplyDrawn(): void {
-    if (strokes.length === 0) return;
-    const rect = drawCanvasEl ? drawCanvasEl.getBoundingClientRect() : { width: 600, height: 250 };
-    const { dataUrl, aspectRatio } = renderDrawnStrokesToDataUrl(
-      strokes,
-      strokeWidth,
-      penColor,
-      rect.width,
-      rect.height
-    );
+  async function handleApplyDrawn(): Promise<void> {
+    if (strokes.length === 0 || isPlacing) return;
+    isPlacing = true;
 
-    let sigRecord: SavedSignature;
-    if (saveToCollection) {
-      sigRecord = saveSignature({
-        title: signatureTitle.trim() || 'Drawn Signature',
-        type: 'draw',
-        dataUrl,
-        color: penColor,
-        isDefault: savedSignatures.length === 0,
-        aspectRatio,
-      });
-      refreshSavedList();
-    } else {
-      sigRecord = {
-        id: `temp_${Date.now()}`,
-        title: signatureTitle.trim() || 'Drawn Signature',
-        type: 'draw',
-        dataUrl,
-        color: penColor,
-        createdAt: Date.now(),
-        isDefault: false,
-        aspectRatio,
-      };
+    try {
+      const rect = cachedCanvasRect || (drawCanvasEl ? drawCanvasEl.getBoundingClientRect() : { width: 600, height: 250 });
+      const { dataUrl, aspectRatio } = renderDrawnStrokesToDataUrl(
+        strokes,
+        strokeWidth,
+        penColor,
+        rect.width,
+        rect.height
+      );
+
+      let sigRecord: SavedSignature;
+      if (saveToCollection) {
+        sigRecord = saveSignature({
+          title: signatureTitle.trim() || 'Drawn Signature',
+          type: 'draw',
+          dataUrl,
+          color: penColor,
+          isDefault: savedSignatures.length === 0,
+          aspectRatio,
+        });
+        refreshSavedList();
+      } else {
+        sigRecord = {
+          id: `temp_${Date.now()}`,
+          title: signatureTitle.trim() || 'Drawn Signature',
+          type: 'draw',
+          dataUrl,
+          color: penColor,
+          createdAt: Date.now(),
+          isDefault: false,
+          aspectRatio,
+        };
+      }
+
+      actions.placeSignatureOnCanvas(sigRecord, store.currentPageIndex, canvasStore);
+    } catch (err) {
+      console.error('Failed to apply drawn signature:', err);
+    } finally {
+      isPlacing = false;
+      handleClose();
     }
-
-    actions.placeSignatureOnCanvas(sigRecord, store.currentPageIndex, canvasStore);
   }
 
   async function handleApplyTyped(): Promise<void> {
-    if (!typedName.trim()) return;
-    const { dataUrl, aspectRatio } = await renderTypedSignatureToDataUrl(
-      typedName.trim(),
-      selectedFont,
-      typedColor
-    );
+    if (!typedName.trim() || isPlacing) return;
+    isPlacing = true;
 
-    let sigRecord: SavedSignature;
-    if (saveToCollection) {
-      sigRecord = saveSignature({
-        title: `${typedName.trim()} (${selectedFont})`,
-        type: 'type',
-        dataUrl,
-        fontFamily: selectedFont,
-        text: typedName.trim(),
-        color: typedColor,
-        isDefault: savedSignatures.length === 0,
-        aspectRatio,
-      });
-      refreshSavedList();
-    } else {
-      sigRecord = {
-        id: `temp_${Date.now()}`,
-        title: `${typedName.trim()} (${selectedFont})`,
-        type: 'type',
-        dataUrl,
-        fontFamily: selectedFont,
-        text: typedName.trim(),
-        color: typedColor,
-        createdAt: Date.now(),
-        isDefault: false,
-        aspectRatio,
-      };
+    try {
+      const { dataUrl, aspectRatio } = await renderTypedSignatureToDataUrl(
+        typedName.trim(),
+        selectedFont,
+        typedColor
+      );
+
+      let sigRecord: SavedSignature;
+      if (saveToCollection) {
+        sigRecord = saveSignature({
+          title: `${typedName.trim()} (${selectedFont})`,
+          type: 'type',
+          dataUrl,
+          fontFamily: selectedFont,
+          text: typedName.trim(),
+          color: typedColor,
+          isDefault: savedSignatures.length === 0,
+          aspectRatio,
+        });
+        refreshSavedList();
+      } else {
+        sigRecord = {
+          id: `temp_${Date.now()}`,
+          title: `${typedName.trim()} (${selectedFont})`,
+          type: 'type',
+          dataUrl,
+          fontFamily: selectedFont,
+          text: typedName.trim(),
+          color: typedColor,
+          createdAt: Date.now(),
+          isDefault: false,
+          aspectRatio,
+        };
+      }
+
+      actions.placeSignatureOnCanvas(sigRecord, store.currentPageIndex, canvasStore);
+    } catch (err) {
+      console.error('Failed to apply typed signature:', err);
+    } finally {
+      isPlacing = false;
+      handleClose();
     }
-
-    actions.placeSignatureOnCanvas(sigRecord, store.currentPageIndex, canvasStore);
   }
 
   async function handleApplyUpload(): Promise<void> {
     const finalDataUrl = cleanedUploadDataUrl || uploadedDataUrl;
-    if (!finalDataUrl) return;
+    if (!finalDataUrl || isPlacing) return;
+    isPlacing = true;
 
-    let sigRecord: SavedSignature;
-    if (saveToCollection) {
-      sigRecord = saveSignature({
-        title: signatureTitle.trim() || 'Uploaded Signature',
-        type: 'upload',
-        dataUrl: finalDataUrl,
-        color: uploadColor || '#000000',
-        isDefault: savedSignatures.length === 0,
-        aspectRatio: uploadAspectRatio,
-      });
-      refreshSavedList();
-    } else {
-      sigRecord = {
-        id: `temp_${Date.now()}`,
-        title: signatureTitle.trim() || 'Uploaded Signature',
-        type: 'upload',
-        dataUrl: finalDataUrl,
-        color: uploadColor || '#000000',
-        createdAt: Date.now(),
-        isDefault: false,
-        aspectRatio: uploadAspectRatio,
-      };
+    try {
+      let sigRecord: SavedSignature;
+      if (saveToCollection) {
+        sigRecord = saveSignature({
+          title: signatureTitle.trim() || 'Uploaded Signature',
+          type: 'upload',
+          dataUrl: finalDataUrl,
+          color: uploadColor || '#000000',
+          isDefault: savedSignatures.length === 0,
+          aspectRatio: uploadAspectRatio,
+        });
+        refreshSavedList();
+      } else {
+        sigRecord = {
+          id: `temp_${Date.now()}`,
+          title: signatureTitle.trim() || 'Uploaded Signature',
+          type: 'upload',
+          dataUrl: finalDataUrl,
+          color: uploadColor || '#000000',
+          createdAt: Date.now(),
+          isDefault: false,
+          aspectRatio: uploadAspectRatio,
+        };
+      }
+
+      actions.placeSignatureOnCanvas(sigRecord, store.currentPageIndex, canvasStore);
+    } catch (err) {
+      console.error('Failed to apply uploaded signature:', err);
+    } finally {
+      isPlacing = false;
+      handleClose();
     }
-
-    actions.placeSignatureOnCanvas(sigRecord, store.currentPageIndex, canvasStore);
   }
 
   async function handleImageFile(file: File): Promise<void> {
@@ -344,23 +493,24 @@
   }
 
   function handleClose(): void {
+    isDrawing = false;
+    rafPending = false;
+    activeStrokePoints = [];
+    cleanupPointerListeners();
     store.showEsignDialog = false;
+  }
+
+  function handleOpenChange(open: boolean): void {
+    if (!open) {
+      handleClose();
+    }
   }
 </script>
 
-<svelte:head>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
-  <link
-    href="https://fonts.googleapis.com/css2?family=Alex+Brush&family=Allura&family=Caveat:wght@600&family=Dancing+Script:wght@600&family=Great+Vibes&family=Pacifico&display=swap"
-    rel="stylesheet"
-  />
-</svelte:head>
-
-<Dialog.Root open={store.showEsignDialog} onOpenChange={(open) => { if (!open) handleClose(); }}>
+<Dialog.Root open={store.showEsignDialog} onOpenChange={handleOpenChange}>
   <Dialog.Content class="sm:max-w-[620px] max-h-[90vh] flex flex-col p-0 overflow-hidden">
     <Dialog.Header class="px-6 pt-5 pb-3 border-b border-border bg-card">
-      <div class="flex items-center justify-between">
+      <div class="flex items-center justify-between pr-8">
         <Dialog.Title class="flex items-center gap-2 text-base font-semibold">
           <PenTool class="h-4 w-4 text-primary" />
           Add Electronic Signature (E-Sign)
@@ -377,7 +527,7 @@
     </Dialog.Header>
 
     <div class="flex-1 overflow-y-auto px-6 py-4">
-      <Tabs.Root value={activeTab} onValueChange={(val) => { activeTab = val as typeof activeTab; if (val === 'draw') queueMicrotask(redrawCanvas); }}>
+      <Tabs.Root value={activeTab} onValueChange={(val) => { activeTab = val as typeof activeTab; if (val === 'draw') requestAnimationFrame(() => setupCanvasDimensions()); }}>
         <Tabs.List class="grid grid-cols-4 mb-4">
           <Tabs.Trigger value="signatures" class="text-xs">
             My Signatures
@@ -423,7 +573,7 @@
                       {:else}
                         <button
                           type="button"
-                          class="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-amber-500 p-1 transition-opacity"
+                          class="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-warning p-1 transition-opacity"
                           title="Set as default"
                           onclick={(e) => handleSetDefault(sig.id, e)}
                         >
@@ -447,7 +597,7 @@
 
                   <div class="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
                     <span class="capitalize">{sig.type}</span>
-                    <Button size="sm" variant="ghost" class="h-6 text-[11px] px-2 text-primary font-medium hover:bg-primary/10">
+                    <Button size="sm" variant="ghost" class="h-6 text-[11px] px-2 text-primary font-medium hover:bg-primary/10" onclick={(e) => { e.stopPropagation(); handleUseSaved(sig); }}>
                       Use on PDF
                     </Button>
                   </div>
@@ -472,7 +622,7 @@
                 <Button size="sm" variant="ghost" class="h-7 text-xs px-2 text-muted-foreground" onclick={undoDraw} disabled={strokes.length === 0}>
                   <Undo2 class="h-3.5 w-3.5 mr-1" /> Undo
                 </Button>
-                <Button size="sm" variant="ghost" class="h-7 text-xs px-2 text-muted-foreground hover:text-destructive" onclick={clearDraw} disabled={strokes.length === 0 && currentStroke.length === 0}>
+                <Button size="sm" variant="ghost" class="h-7 text-xs px-2 text-muted-foreground hover:text-destructive" onclick={clearDraw} disabled={strokes.length === 0 && !isDrawing}>
                   <Eraser class="h-3.5 w-3.5 mr-1" /> Clear
                 </Button>
               </div>
@@ -487,7 +637,7 @@
                 onpointerup={handlePointerUp}
                 onpointercancel={handlePointerUp}
               ></canvas>
-              {#if strokes.length === 0 && currentStroke.length === 0}
+              {#if strokes.length === 0 && !isDrawing}
                 <div class="absolute inset-0 flex items-center justify-center pointer-events-none text-muted-foreground/40 text-sm select-none">
                   Sign here with mouse, trackpad, or stylus
                 </div>
@@ -520,25 +670,31 @@
                 <span>Stroke Width</span>
                 <span>{strokeWidth}px</span>
               </div>
-              <input
-                type="range"
-                min="1"
-                max="5"
-                step="0.5"
-                bind:value={strokeWidth}
-                oninput={redrawCanvas}
-                class="w-full h-1.5 bg-muted rounded cursor-pointer accent-primary"
+              <Slider
+                type="single"
+                min={1}
+                max={5}
+                step={0.5}
+                value={strokeWidth}
+                onValueChange={(val: number) => { strokeWidth = val; redrawCanvas(); }}
+                class="w-full mt-1.5"
               />
             </div>
           </div>
 
           <div class="pt-2 border-t border-border flex items-center justify-between">
-            <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-              <input type="checkbox" bind:checked={saveToCollection} class="rounded border-border text-primary accent-primary" />
-              Save signature persistently for reuse
-            </label>
-            <Button size="sm" class="text-xs px-4" onclick={handleApplyDrawn} disabled={strokes.length === 0}>
-              Place on Document
+            <div class="flex items-center gap-2">
+              <Checkbox id="save-collection-draw" bind:checked={saveToCollection} />
+              <Label for="save-collection-draw" class="text-xs cursor-pointer select-none font-normal">
+                Save signature persistently for reuse
+              </Label>
+            </div>
+            <Button size="sm" class="text-xs px-4" onclick={handleApplyDrawn} disabled={strokes.length === 0 || isPlacing}>
+              {#if isPlacing}
+                <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Placing...
+              {:else}
+                Place on Document
+              {/if}
             </Button>
           </div>
         </Tabs.Content>
@@ -591,12 +747,18 @@
           </div>
 
           <div class="pt-2 border-t border-border flex items-center justify-between">
-            <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-              <input type="checkbox" bind:checked={saveToCollection} class="rounded border-border text-primary accent-primary" />
-              Save signature persistently for reuse
-            </label>
-            <Button size="sm" class="text-xs px-4" onclick={handleApplyTyped} disabled={!typedName.trim()}>
-              Place on Document
+            <div class="flex items-center gap-2">
+              <Checkbox id="save-collection-type" bind:checked={saveToCollection} />
+              <Label for="save-collection-type" class="text-xs cursor-pointer select-none font-normal">
+                Save signature persistently for reuse
+              </Label>
+            </div>
+            <Button size="sm" class="text-xs px-4" onclick={handleApplyTyped} disabled={!typedName.trim() || isPlacing}>
+              {#if isPlacing}
+                <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Placing...
+              {:else}
+                Place on Document
+              {/if}
             </Button>
           </div>
         </Tabs.Content>
@@ -609,8 +771,10 @@
             accept="image/png,image/jpeg,image/svg+xml"
             class="hidden"
             onchange={(e) => {
-              const file = (e.target as HTMLInputElement).files?.[0];
+              const input = e.target as HTMLInputElement;
+              const file = input.files?.[0];
               if (file) handleImageFile(file);
+              input.value = '';
             }}
           />
 
@@ -643,15 +807,16 @@
                   <span class="flex items-center gap-1 text-muted-foreground font-medium">
                     <Sliders class="h-3.5 w-3.5" /> Background Cleanup Threshold
                   </span>
-                  <span class="text-xs font-mono">{threshold}</span>
+                  <span class="text-xs font-sans">{threshold}</span>
                 </div>
-                <input
-                  type="range"
-                  min="150"
-                  max="255"
-                  bind:value={threshold}
-                  onchange={() => { if (uploadedDataUrl) processUpload(uploadedDataUrl); }}
-                  class="w-full h-1.5 bg-muted rounded cursor-pointer accent-primary"
+                <Slider
+                  type="single"
+                  min={150}
+                  max={255}
+                  step={1}
+                  value={threshold}
+                  onValueChange={(val: number) => { threshold = val; if (uploadedDataUrl) processUpload(uploadedDataUrl); }}
+                  class="w-full mt-1.5"
                 />
                 <p class="text-[10px] text-muted-foreground">
                   Adjust threshold to automatically remove paper background and make signature transparent.
@@ -667,12 +832,18 @@
           {/if}
 
           <div class="pt-2 border-t border-border flex items-center justify-between">
-            <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-              <input type="checkbox" bind:checked={saveToCollection} class="rounded border-border text-primary accent-primary" />
-              Save signature persistently for reuse
-            </label>
-            <Button size="sm" class="text-xs px-4" onclick={handleApplyUpload} disabled={!uploadedDataUrl || isCleaning}>
-              Place on Document
+            <div class="flex items-center gap-2">
+              <Checkbox id="save-collection-upload" bind:checked={saveToCollection} />
+              <Label for="save-collection-upload" class="text-xs cursor-pointer select-none font-normal">
+                Save signature persistently for reuse
+              </Label>
+            </div>
+            <Button size="sm" class="text-xs px-4" onclick={handleApplyUpload} disabled={!uploadedDataUrl || isCleaning || isPlacing}>
+              {#if isPlacing}
+                <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Placing...
+              {:else}
+                Place on Document
+              {/if}
             </Button>
           </div>
         </Tabs.Content>
@@ -683,9 +854,13 @@
       <div class="text-[11px] text-muted-foreground">
         Canvas elements can be moved, resized, and rotated anytime before baking into PDF.
       </div>
-      <Button variant="outline" size="sm" class="text-xs" onclick={handleClose}>
-        Close
-      </Button>
+      <Dialog.Close>
+        {#snippet child({ props })}
+          <Button variant="outline" size="sm" class="text-xs" {...props} onclick={handleClose}>
+            Close
+          </Button>
+        {/snippet}
+      </Dialog.Close>
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
