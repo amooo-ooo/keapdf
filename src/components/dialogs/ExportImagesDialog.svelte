@@ -5,7 +5,8 @@
   import * as Select from '$lib/components/ui/select/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
-  import { downloadBlob } from '../../utils/download-utils';
+  import { downloadBlob, downloadBytes } from '../../utils/download-utils';
+  import { createZipArchive } from '../../services/conversion/zip-utils';
 
   interface Props {
     onClose: () => void;
@@ -24,13 +25,31 @@
   async function handleExportImages(): Promise<void> {
     isExporting = true;
     try {
+      if (actions.canvasStore && actions.canvasStore.elements.length > 0) {
+        await actions.service.burnElementsToDocument(actions.canvasStore.elements);
+        actions.canvasStore.elements = [];
+        actions.canvasStore.clearDragState();
+        actions.canvasStore.selectElement(null);
+        actions.refreshDocument();
+      }
+
       const baseName = store.fileName.replace(/\.[^/.]+$/, '');
       const indicesToExport =
         exportTarget === 'current'
           ? [store.currentPageIndex]
           : Array.from({ length: store.pageCount }, (_, i) => i);
 
-      for (const idx of indicesToExport) {
+      if (indicesToExport.length > 1) {
+        const zipFiles: Record<string, Uint8Array> = {};
+        for (const idx of indicesToExport) {
+          const blob = await actions.service.document.getPage(idx).exportAsBlob(exportFormat, exportScale);
+          const buffer = await blob.arrayBuffer();
+          zipFiles[`${baseName}_page_${idx + 1}.${exportFormat}`] = new Uint8Array(buffer);
+        }
+        const zipBytes = await createZipArchive(zipFiles);
+        downloadBytes(zipBytes, `${baseName}_images.zip`, 'application/zip');
+      } else if (indicesToExport.length === 1) {
+        const idx = indicesToExport[0];
         const blob = await actions.service.document.getPage(idx).exportAsBlob(exportFormat, exportScale);
         downloadBlob(blob, `${baseName}_page_${idx + 1}.${exportFormat}`);
       }
@@ -55,7 +74,7 @@
     <Dialog.Header>
       <Dialog.Title>Export pages as images</Dialog.Title>
       <Dialog.Description>
-        Select export range, file format, and resolution scale.
+        Select export range, file format, and resolution scale. Multi-page exports are downloaded as a zip archive.
       </Dialog.Description>
     </Dialog.Header>
 
