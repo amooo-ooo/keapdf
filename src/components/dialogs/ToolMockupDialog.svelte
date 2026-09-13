@@ -5,6 +5,7 @@
   import { Label } from '$lib/components/ui/label/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Slider } from '$lib/components/ui/slider/index.js';
   import { Wrench, CheckCircle2 } from 'lucide-svelte';
 
   const store = useEditorStore();
@@ -13,6 +14,13 @@
   let sampleText = $state('CONFIDENTIAL');
   let opacity = $state(40);
   let qualityDpi = $state(150);
+
+  import { onDestroy } from 'svelte';
+  let timeoutId: ReturnType<typeof setTimeout>;
+
+  onDestroy(() => {
+    if (timeoutId) clearTimeout(timeoutId);
+  });
 
   function handleClose(): void {
     store.activeMockupTool = null;
@@ -27,7 +35,7 @@
 
   function handleAction(): void {
     isApplied = true;
-    setTimeout(() => {
+    timeoutId = setTimeout(() => {
       handleClose();
     }, 1200);
   }
@@ -57,7 +65,15 @@
               <Label class="text-xs">Opacity</Label>
               <span class="text-muted-foreground">{opacity}%</span>
             </div>
-            <input type="range" min="10" max="100" bind:value={opacity} class="w-full h-1.5 bg-muted rounded" />
+            <Slider
+              type="single"
+              min={10}
+              max={100}
+              step={1}
+              value={opacity}
+              onValueChange={(val: number) => { opacity = val; }}
+              class="w-full mt-1.5"
+            />
           </div>
         {:else if store.activeMockupTool.includes('Compress')}
           <div class="grid gap-1.5">
@@ -65,7 +81,15 @@
               <Label class="text-xs">Target Quality (DPI)</Label>
               <span class="text-muted-foreground">{qualityDpi} DPI</span>
             </div>
-            <input type="range" min="72" max="300" step="10" bind:value={qualityDpi} class="w-full h-1.5 bg-muted rounded" />
+            <Slider
+              type="single"
+              min={72}
+              max={300}
+              step={10}
+              value={qualityDpi}
+              onValueChange={(val: number) => { qualityDpi = val; }}
+              class="w-full mt-1.5"
+            />
           </div>
         {:else if store.activeMockupTool.includes('OCR')}
           <div class="grid gap-1.5">
@@ -82,8 +106,8 @@
         {/if}
 
         {#if isApplied}
-          <div class="rounded-md bg-emerald-500/10 border border-emerald-500/30 p-2.5 flex items-center gap-2 text-xs font-medium text-emerald-400">
-            <CheckCircle2 class="h-4 w-4 shrink-0 text-emerald-400" />
+          <div class="rounded-md bg-success/10 border border-success/30 p-2.5 flex items-center gap-2 text-xs font-medium text-success">
+            <CheckCircle2 class="h-4 w-4 shrink-0 text-success" />
             {store.activeMockupTool} operation completed successfully!
           </div>
         {/if}
