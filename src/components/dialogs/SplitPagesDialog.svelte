@@ -5,6 +5,7 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
+  import { Checkbox } from '$lib/components/ui/checkbox/index.js';
 
   interface Props {
     mode: 'split' | 'extract';
@@ -17,10 +18,15 @@
   const actions = useEditorActions();
 
   let rangeInput = $state('');
+  let autoDownload = $state(true);
   let errorMessage = $state('');
 
+  let initialized = false;
   $effect(() => {
-    rangeInput = `1-${store.pageCount}`;
+    if (!initialized || !rangeInput) {
+      rangeInput = `1-${store.pageCount}`;
+      initialized = true;
+    }
   });
 
   function parsePageRanges(input: string, maxPages: number): number[] {
@@ -69,7 +75,7 @@
         return;
       }
 
-      actions.extractPages(targetIndices, mode, rangeInput);
+      actions.extractPages(targetIndices, mode, rangeInput, { autoDownload });
 
       onClose();
     } catch (err) {
@@ -106,6 +112,13 @@
           bind:value={rangeInput}
           placeholder="1-3, 5"
         />
+      </div>
+
+      <div class="flex items-center space-x-2">
+        <Checkbox id="auto-download" bind:checked={autoDownload} />
+        <Label for="auto-download" class="text-xs font-normal cursor-pointer">
+          Download extracted PDF file immediately
+        </Label>
       </div>
 
       {#if errorMessage}
