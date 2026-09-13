@@ -1,14 +1,38 @@
 <script lang="ts">
-  import { FileText, Layers, Shapes, Highlighter, LayoutGrid, Wrench, Settings, PanelLeftOpen } from 'lucide-svelte';
+  import type { Component } from 'svelte';
+  import { FileText, PanelLeftOpen, Globe, Files, FileType } from 'lucide-svelte';
   import { Button } from '$lib/components/ui/button';
+  import { Separator } from '$lib/components/ui/separator';
   import * as Tooltip from '$lib/components/ui/tooltip';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
+  import { useFeatureFlagStore } from '../../core/feature-flags';
+  import { usePanelRegistry } from '../../core/panel-registry';
   import type { LeftPanelMode } from '../../stores/types';
+  import type { FeatureFlag } from '../../core/feature-flags';
 
   const store = useEditorStore();
   const actions = useEditorActions();
+  const featureFlags = useFeatureFlagStore();
+  const panelRegistry = usePanelRegistry();
+
+  const leftPanels = $derived(panelRegistry.getByPosition('left'));
+
+  function isPanelEnabled(panelId: string): boolean {
+    const flagMap: Record<string, FeatureFlag> = {
+      workspace: 'workspace',
+      components: 'components',
+      annotate: 'annotations',
+      imposition: 'imposition',
+      tools: 'tools',
+      settings: 'settings',
+    };
+    const flag = flagMap[panelId];
+    return flag ? featureFlags.isEnabled(flag) : true;
+  }
+
+  const enabledLeftPanels = $derived(leftPanels.filter((panel) => isPanelEnabled(panel.id)));
 
   function selectTab(mode: LeftPanelMode): void {
     if (store.leftPanelCollapsed) {
@@ -27,7 +51,7 @@
 </script>
 
 <div class="h-full py-[4px] pl-[4px] {store.leftPanelCollapsed ? 'pr-[4px]' : ''}">
-  <div class="w-[40px] h-full bg-card flex flex-col items-center py-2.5 gap-2 select-none {store.leftPanelCollapsed ? 'border rounded-xl shadow-sm' : 'border-y border-l border-r rounded-l-xl shadow-sm'}">
+  <div class="w-[40px] h-full bg-card flex flex-col items-center py-1 gap-1 select-none {store.leftPanelCollapsed ? 'border rounded-xl shadow-sm' : 'border-y border-l border-r rounded-l-xl shadow-sm'}">
   <!-- Top App Brand Icon / Open File -->
   <DropdownMenu.Root>
     <DropdownMenu.Trigger>
@@ -42,107 +66,60 @@
         </Button>
       {/snippet}
     </DropdownMenu.Trigger>
-    <DropdownMenu.Content side="right">
-      <DropdownMenu.Item onclick={() => actions.triggerFileOpen(false)}>
-        Open PDF...
+    <DropdownMenu.Content side="right" class="w-48">
+      {#if featureFlags.isEnabled('workspace.open')}
+      <DropdownMenu.Item class="text-xs" onclick={() => actions.triggerFileOpen(false)}>
+        Open File...
       </DropdownMenu.Item>
-      <DropdownMenu.Item onclick={() => actions.triggerFileOpen(true)}>
-        Add PDF to workspace...
+      {/if}
+      {#if featureFlags.isEnabled('workspace.add')}
+      <DropdownMenu.Item class="text-xs" onclick={() => actions.triggerFileOpen(true)}>
+        Add File to workspace...
       </DropdownMenu.Item>
+      {/if}
+      <DropdownMenu.Separator />
+      {#if featureFlags.isEnabled('conversion')}
+      <DropdownMenu.Item class="text-xs" onclick={() => actions.openConvertDialog()}>
+        <FileType class="w-3 h-3 mr-2 text-primary" />
+        Convert to PDF...
+      </DropdownMenu.Item>
+      {/if}
+      {#if featureFlags.isEnabled('workspace.compliance')}
+      <DropdownMenu.Item class="text-xs" onclick={() => store.openUrlDialog()}>
+        <Globe class="w-3 h-3 mr-2 text-primary" />
+        Compliance Suites / URL...
+      </DropdownMenu.Item>
+      {/if}
+      {#if featureFlags.isEnabled('merge')}
+      <DropdownMenu.Item class="text-xs" onclick={() => actions.triggerMergeFiles()}>
+        <Files class="w-3 h-3 mr-2 text-primary" />
+        Merge Files...
+      </DropdownMenu.Item>
+      {/if}
     </DropdownMenu.Content>
   </DropdownMenu.Root>
 
-  <div class="w-[14px] h-[1px] bg-border my-1 shrink-0"></div>
+  <Separator class="w-[14px] h-[1px] bg-border shrink-0" />
 
-  <!-- 1. Workspace Tab -->
-  <Tooltip.Root>
-    <Tooltip.Trigger>
-      <Button
-        variant="ghost"
-        size="icon"
-        class="w-8 h-8 {isTabActive('workspace') ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}"
-        onclick={() => selectTab('workspace')}
-      >
-        <Layers class="w-4 h-4" />
-      </Button>
-    </Tooltip.Trigger>
-    <Tooltip.Content side="right">Workspace</Tooltip.Content>
-  </Tooltip.Root>
-
-  <!-- 2. Components Tab -->
-  <Tooltip.Root>
-    <Tooltip.Trigger>
-      <Button
-        variant="ghost"
-        size="icon"
-        class="w-8 h-8 {isTabActive('components') ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}"
-        onclick={() => selectTab('components')}
-      >
-        <Shapes class="w-4 h-4" />
-      </Button>
-    </Tooltip.Trigger>
-    <Tooltip.Content side="right">Components</Tooltip.Content>
-  </Tooltip.Root>
-
-  <!-- 3. Annotate Tab -->
-  <Tooltip.Root>
-    <Tooltip.Trigger>
-      <Button
-        variant="ghost"
-        size="icon"
-        class="w-8 h-8 {isTabActive('annotate') ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}"
-        onclick={() => selectTab('annotate')}
-      >
-        <Highlighter class="w-4 h-4" />
-      </Button>
-    </Tooltip.Trigger>
-    <Tooltip.Content side="right">Annotate</Tooltip.Content>
-  </Tooltip.Root>
-
-  <!-- 4. Imposition Tab -->
-  <Tooltip.Root>
-    <Tooltip.Trigger>
-      <Button
-        variant="ghost"
-        size="icon"
-        class="w-8 h-8 {isTabActive('imposition') ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}"
-        onclick={() => selectTab('imposition')}
-      >
-        <LayoutGrid class="w-4 h-4" />
-      </Button>
-    </Tooltip.Trigger>
-    <Tooltip.Content side="right">Imposition</Tooltip.Content>
-  </Tooltip.Root>
-
-  <!-- 5. Tools & OCR Tab -->
-  <Tooltip.Root>
-    <Tooltip.Trigger>
-      <Button
-        variant="ghost"
-        size="icon"
-        class="w-8 h-8 {isTabActive('tools') ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}"
-        onclick={() => selectTab('tools')}
-      >
-        <Wrench class="w-4 h-4" />
-      </Button>
-    </Tooltip.Trigger>
-    <Tooltip.Content side="right">Tools & OCR</Tooltip.Content>
-  </Tooltip.Root>
-
-  <!-- 6. Settings Tab -->
-  <Tooltip.Root>
-    <Tooltip.Trigger>
-      <Button
-        variant="ghost"
-        size="icon"
-        class="w-8 h-8 {isTabActive('settings') ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}"
-        onclick={() => selectTab('settings')}
-      >
-        <Settings class="w-4 h-4" />
-      </Button>
-    </Tooltip.Trigger>
-    <Tooltip.Content side="right">Settings</Tooltip.Content>
-  </Tooltip.Root>
+  <!-- Dynamic Left Panels from PanelRegistry -->
+  {#each enabledLeftPanels as panel (panel.id)}
+    {@const IconComp = panel.icon as Component<{ class?: string }> | undefined}
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="w-8 h-8 {isTabActive(panel.id as LeftPanelMode) ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}"
+          onclick={() => selectTab(panel.id as LeftPanelMode)}
+        >
+          {#if IconComp}
+            <IconComp class="w-4 h-4" />
+          {/if}
+        </Button>
+      </Tooltip.Trigger>
+      <Tooltip.Content side="right">{panel.label}</Tooltip.Content>
+    </Tooltip.Root>
+  {/each}
 
   <div class="flex-1"></div>
 
