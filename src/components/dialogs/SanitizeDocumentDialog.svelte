@@ -3,7 +3,9 @@
   import { useEditorActions } from '../../stores/editor-actions';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
+  import { ButtonGroup } from '$lib/components/ui/button-group/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Checkbox } from '$lib/components/ui/checkbox/index.js';
   import type {
     SanitizeOptions,
     SanitizeSummary,
@@ -212,7 +214,7 @@
         <div class="rounded-lg border bg-muted/30 p-3 flex flex-col gap-2">
           <div class="flex items-center justify-between">
             <span class="font-medium text-foreground flex items-center gap-1.5">
-              <ShieldAlert class="h-3.5 w-3.5 text-amber-500" />
+              <ShieldAlert class="h-3.5 w-3.5 text-warning" />
               Detected Elements in PDF
             </span>
             {#if isInspecting}
@@ -251,7 +253,7 @@
 
               <div class="flex flex-col bg-background/80 rounded p-1.5 border border-border/40">
                 <span class="text-[10px] text-muted-foreground">Scripts / JS</span>
-                <span class="font-medium {inspection.hasJavascript ? 'text-amber-500 font-semibold' : 'text-foreground'}">
+                <span class="font-medium {inspection.hasJavascript ? 'text-warning font-semibold' : 'text-foreground'}">
                   {inspection.hasJavascript ? 'Detected' : 'None'}
                 </span>
               </div>
@@ -262,31 +264,37 @@
         <!-- Presets Selection Bar -->
         <div class="flex flex-col gap-1.5">
           <span class="text-xs font-medium text-foreground">Sanitization Presets</span>
-          <div class="grid grid-cols-3 gap-1.5 bg-muted/40 p-1 rounded-lg border">
-            <button
+          <ButtonGroup class="grid grid-cols-3 w-full" variant="outline" size="sm">
+            <Button
               type="button"
-              class="py-1.5 px-2 rounded-md text-center transition-all {activePreset === 'maximum' ? 'bg-primary text-primary-foreground font-medium shadow-xs' : 'text-muted-foreground hover:text-foreground'}"
+              variant={activePreset === 'maximum' ? 'default' : 'outline'}
+              size="sm"
+              class="text-xs py-1.5 h-auto font-normal"
               onclick={() => applyPreset('maximum')}
             >
               Maximum Privacy
-            </button>
+            </Button>
 
-            <button
+            <Button
               type="button"
-              class="py-1.5 px-2 rounded-md text-center transition-all {activePreset === 'metadata_only' ? 'bg-primary text-primary-foreground font-medium shadow-xs' : 'text-muted-foreground hover:text-foreground'}"
+              variant={activePreset === 'metadata_only' ? 'default' : 'outline'}
+              size="sm"
+              class="text-xs py-1.5 h-auto font-normal"
               onclick={() => applyPreset('metadata_only')}
             >
               Metadata Only
-            </button>
+            </Button>
 
-            <button
+            <Button
               type="button"
-              class="py-1.5 px-2 rounded-md text-center transition-all {activePreset === 'clean_presentation' ? 'bg-primary text-primary-foreground font-medium shadow-xs' : 'text-muted-foreground hover:text-foreground'}"
+              variant={activePreset === 'clean_presentation' ? 'default' : 'outline'}
+              size="sm"
+              class="text-xs py-1.5 h-auto font-normal"
               onclick={() => applyPreset('clean_presentation')}
             >
               Clean Presentation
-            </button>
-          </div>
+            </Button>
+          </ButtonGroup>
         </div>
 
         <!-- Granular Options List -->
@@ -305,11 +313,12 @@
                     <span class="text-[11px] text-muted-foreground">Title, author, subject, keywords, creation & modification dates</span>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  bind:checked={removeMetadata}
-                  onchange={handleCustomToggle}
-                  class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                <Checkbox
+                  checked={removeMetadata}
+                  onCheckedChange={(checked) => {
+                    removeMetadata = checked;
+                    handleCustomToggle();
+                  }}
                 />
               </label>
 
@@ -321,11 +330,12 @@
                     <span class="text-[11px] text-muted-foreground">Embedded XML metadata packet in document catalog</span>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  bind:checked={removeXmpMetadata}
-                  onchange={handleCustomToggle}
-                  class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                <Checkbox
+                  checked={removeXmpMetadata}
+                  onCheckedChange={(checked) => {
+                    removeXmpMetadata = checked;
+                    handleCustomToggle();
+                  }}
                 />
               </label>
 
@@ -337,11 +347,12 @@
                     <span class="text-[11px] text-muted-foreground">Photoshop, Illustrator, and Acrobat proprietary edit streams</span>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  bind:checked={removePieceInfo}
-                  onchange={handleCustomToggle}
-                  class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                <Checkbox
+                  checked={removePieceInfo}
+                  onCheckedChange={(checked) => {
+                    removePieceInfo = checked;
+                    handleCustomToggle();
+                  }}
                 />
               </label>
             </div>
@@ -355,17 +366,18 @@
             <div class="rounded-lg border divide-y divide-border/60 bg-card overflow-hidden">
               <label class="flex items-center justify-between p-2.5 hover:bg-muted/40 cursor-pointer">
                 <div class="flex items-center gap-2.5">
-                  <Code class="h-4 w-4 text-amber-500 shrink-0" />
+                  <Code class="h-4 w-4 text-warning shrink-0" />
                   <div class="flex flex-col">
                     <span class="font-medium text-foreground">JavaScript & Action Triggers</span>
                     <span class="text-[11px] text-muted-foreground">Document-level scripts, OpenAction, and page trigger hooks</span>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  bind:checked={removeJavascript}
-                  onchange={handleCustomToggle}
-                  class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                <Checkbox
+                  checked={removeJavascript}
+                  onCheckedChange={(checked) => {
+                    removeJavascript = checked;
+                    handleCustomToggle();
+                  }}
                 />
               </label>
 
@@ -377,11 +389,12 @@
                     <span class="text-[11px] text-muted-foreground">Embedded file packages and Associated Files (/AF streams)</span>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  bind:checked={removeAttachments}
-                  onchange={handleCustomToggle}
-                  class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                <Checkbox
+                  checked={removeAttachments}
+                  onCheckedChange={(checked) => {
+                    removeAttachments = checked;
+                    handleCustomToggle();
+                  }}
                 />
               </label>
             </div>
@@ -401,11 +414,12 @@
                     <span class="text-[11px] text-muted-foreground">Visual highlights, ink markup, sticky notes, and stamps</span>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  bind:checked={removeAnnotations}
-                  onchange={handleCustomToggle}
-                  class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                <Checkbox
+                  checked={removeAnnotations}
+                  onCheckedChange={(checked) => {
+                    removeAnnotations = checked;
+                    handleCustomToggle();
+                  }}
                 />
               </label>
 
@@ -417,11 +431,12 @@
                     <span class="text-[11px] text-muted-foreground">Web links, GoTo actions, and URI launch targets</span>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  bind:checked={removeLinks}
-                  onchange={handleCustomToggle}
-                  class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                <Checkbox
+                  checked={removeLinks}
+                  onCheckedChange={(checked) => {
+                    removeLinks = checked;
+                    handleCustomToggle();
+                  }}
                 />
               </label>
 
@@ -433,11 +448,12 @@
                     <span class="text-[11px] text-muted-foreground">Form widgets, checkboxes, text fields, and radio buttons</span>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  bind:checked={removeFormFields}
-                  onchange={handleCustomToggle}
-                  class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                <Checkbox
+                  checked={removeFormFields}
+                  onCheckedChange={(checked) => {
+                    removeFormFields = checked;
+                    handleCustomToggle();
+                  }}
                 />
               </label>
 
@@ -449,11 +465,12 @@
                     <span class="text-[11px] text-muted-foreground">Hierarchical table of contents and bookmark tree</span>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  bind:checked={removeBookmarks}
-                  onchange={handleCustomToggle}
-                  class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                <Checkbox
+                  checked={removeBookmarks}
+                  onCheckedChange={(checked) => {
+                    removeBookmarks = checked;
+                    handleCustomToggle();
+                  }}
                 />
               </label>
 
@@ -465,11 +482,12 @@
                     <span class="text-[11px] text-muted-foreground">Embedded raster thumbnail image streams in page dictionaries</span>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  bind:checked={removeThumbnails}
-                  onchange={handleCustomToggle}
-                  class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                <Checkbox
+                  checked={removeThumbnails}
+                  onCheckedChange={(checked) => {
+                    removeThumbnails = checked;
+                    handleCustomToggle();
+                  }}
                 />
               </label>
             </div>
@@ -478,12 +496,12 @@
 
         <!-- Success or Error Feedback State -->
         {#if summary}
-          <div class="rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-3 flex flex-col gap-1.5 text-xs text-emerald-400">
+          <div class="rounded-lg bg-success/10 border border-success/30 p-3 flex flex-col gap-1.5 text-xs text-success">
             <div class="flex items-center gap-1.5 font-medium">
-              <CheckCircle2 class="h-4 w-4 shrink-0 text-emerald-400" />
+              <CheckCircle2 class="h-4 w-4 shrink-0 text-success" />
               Document successfully sanitized!
             </div>
-            <p class="text-[11px] text-emerald-300/90">
+            <p class="text-[11px] text-success/90">
               Purged: {summary.metadataCleared ? 'Metadata' : ''}{summary.xmpCleared ? ', XMP stream' : ''}{summary.attachmentsRemoved > 0 ? `, ${summary.attachmentsRemoved} attachments` : ''}{summary.javascriptActionsRemoved > 0 ? `, ${summary.javascriptActionsRemoved} script triggers` : ''}{summary.annotationsRemoved > 0 ? `, ${summary.annotationsRemoved} annotations` : ''}{summary.linksRemoved > 0 ? `, ${summary.linksRemoved} links` : ''}{summary.formFieldsRemoved > 0 ? `, ${summary.formFieldsRemoved} form fields` : ''}{summary.bookmarksRemoved ? ', Bookmarks' : ''}.
             </p>
           </div>
