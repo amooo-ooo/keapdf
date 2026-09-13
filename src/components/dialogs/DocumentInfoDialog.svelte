@@ -10,7 +10,6 @@
   import type { DocumentMetadata, MetadataEntry, DocumentMetadataUpdate } from '../../core/types';
   import {
     FileText,
-    ShieldCheck,
     ShieldAlert,
     Copy,
     Check,
@@ -20,17 +19,18 @@
     Search,
     Download,
     Tag,
-    Paperclip,
-    Lock,
-    Unlock,
     RefreshCw,
   } from 'lucide-svelte';
+  import SecurityComplianceSection from './SecurityComplianceSection.svelte';
+  import type { SignatureValidationResult } from '../../services/pdf/operations/signature-ops';
 
   const store = useEditorStore();
   const actions = useEditorActions();
 
   let activeTab = $state('metadata');
   let metadata = $state<DocumentMetadata | null>(null);
+  let signatureResults = $state<SignatureValidationResult[]>([]);
+  let isValidatingSignatures = $state(false);
   let isLoading = $state(false);
   let searchQuery = $state('');
   let filterCategory = $state<'all' | 'standard' | 'custom'>('all');
@@ -66,6 +66,7 @@
   $effect(() => {
     if (store.showDocumentInfoDialog && store.isDocumentLoaded) {
       loadMetadata();
+      loadSignatures();
     }
   });
 
@@ -79,6 +80,19 @@
       errorMessage = err instanceof Error ? err.message : 'Failed to load document metadata.';
     } finally {
       isLoading = false;
+    }
+  }
+
+  async function loadSignatures(): Promise<void> {
+    if (!store.isDocumentLoaded) return;
+    isValidatingSignatures = true;
+    try {
+      signatureResults = await actions.validateActiveDocumentSignatures();
+    } catch (err) {
+      console.warn('Failed to load signature compliance details:', err);
+      signatureResults = [];
+    } finally {
+      isValidatingSignatures = false;
     }
   }
 
@@ -246,7 +260,7 @@
             {#if isLoading}
               <RefreshCw class="h-3 w-3 animate-spin text-muted-foreground mr-1" />
             {/if}
-            <Badge variant="outline" class="text-[10px] uppercase font-mono">
+            <Badge variant="outline" class="text-[10px] uppercase font-sans">
               PDF {metadata?.pdfVersion || '1.4'}
             </Badge>
           </div>
@@ -331,7 +345,7 @@
                           <Input
                             bind:value={field.key}
                             placeholder="Key..."
-                            class="h-7 text-xs w-1/3 font-mono"
+                            class="h-7 text-xs w-1/3 font-sans"
                           />
                           <Input
                             bind:value={field.value}
@@ -426,12 +440,12 @@
                             {entry.key}
                           </span>
                           {#if !entry.isStandard}
-                            <Badge variant="secondary" class="text-[9px] px-1 py-0 h-4 font-mono">
+                            <Badge variant="secondary" class="text-[9px] px-1 py-0 h-4 font-sans">
                               custom
                             </Badge>
                           {/if}
                         </div>
-                        <span class="text-[10px] text-muted-foreground font-mono truncate">{entry.rawKey}</span>
+                        <span class="text-[10px] text-muted-foreground font-sans truncate">{entry.rawKey}</span>
                       </div>
 
                       <div class="flex-1 min-w-0 flex flex-col justify-center">
@@ -439,7 +453,7 @@
                           {entry.formattedValue || entry.value}
                         </span>
                         {#if entry.formattedValue && entry.formattedValue !== entry.value}
-                          <span class="text-[10px] text-muted-foreground truncate select-all font-mono">
+                          <span class="text-[10px] text-muted-foreground truncate select-all font-sans">
                             raw: {entry.value}
                           </span>
                         {/if}
@@ -453,7 +467,7 @@
                         title={`Copy ${entry.key}`}
                       >
                         {#if copiedKey === entry.key}
-                          <Check class="h-3 w-3 text-emerald-500" />
+                          <Check class="h-3 w-3 text-success" />
                         {:else}
                           <Copy class="h-3 w-3" />
                         {/if}
@@ -511,7 +525,7 @@
                 <span class="text-muted-foreground">Trapped State:</span>
                 <span class="text-foreground">
                   {#if metadata?.trapped === 'True'}
-                    <Badge variant="default" class="text-[10px] bg-emerald-600">Trapped (True)</Badge>
+                    <Badge variant="success" class="text-[10px]">Trapped (True)</Badge>
                   {:else if metadata?.trapped === 'False'}
                     <Badge variant="outline" class="text-[10px]">Untrapped (False)</Badge>
                   {:else}
@@ -542,68 +556,19 @@
 
           <!-- Tab 3: Security & Access -->
           <Tabs.Content value="security" class="flex-1 min-h-0 p-6 overflow-y-auto space-y-4 m-0">
-            <div class="border border-border rounded-lg p-4 bg-muted/20 flex items-center justify-between">
-              <div class="flex items-center gap-3">
-                <div class="w-9 h-9 rounded-full {metadata?.isEncrypted ? 'bg-emerald-500/10 text-emerald-500' : 'bg-primary/10 text-primary'} flex items-center justify-center">
-                  {#if metadata?.isEncrypted}
-                    <Lock class="h-4 w-4" />
-                  {:else}
-                    <Unlock class="h-4 w-4" />
-                  {/if}
-                </div>
-                <div>
-                  <h4 class="text-xs font-semibold text-foreground">
-                    {metadata?.isEncrypted ? 'Encrypted / Password Protected' : 'Standard Document Security'}
-                  </h4>
-                  <p class="text-[11px] text-muted-foreground">
-                    {metadata?.isEncrypted ? 'This document enforces user/owner access restrictions.' : 'No password encryption is required to read or modify content.'}
-                  </p>
-                </div>
-              </div>
-              <Badge variant={metadata?.isEncrypted ? 'default' : 'outline'} class="text-[10px]">
-                {metadata?.isEncrypted ? 'Protected' : 'Unrestricted'}
-              </Badge>
-            </div>
-
-            <div class="grid grid-cols-2 gap-3">
-              <div class="border border-border rounded-lg p-3 bg-card flex items-center gap-2.5">
-                <ShieldCheck class="h-4 w-4 text-primary shrink-0" />
-                <div class="flex flex-col min-w-0">
-                  <span class="text-[11px] text-muted-foreground">Digital Signatures</span>
-                  <span class="text-xs font-semibold text-foreground">
-                    {metadata?.signaturesCount || 0} signature{(metadata?.signaturesCount || 0) === 1 ? '' : 's'}
-                  </span>
-                </div>
-              </div>
-
-              <div class="border border-border rounded-lg p-3 bg-card flex items-center gap-2.5">
-                <Paperclip class="h-4 w-4 text-muted-foreground shrink-0" />
-                <div class="flex flex-col min-w-0">
-                  <span class="text-[11px] text-muted-foreground">Embedded Attachments</span>
-                  <span class="text-xs font-semibold text-foreground">
-                    {metadata?.attachmentsCount || 0} file{(metadata?.attachmentsCount || 0) === 1 ? '' : 's'}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div class="border border-border rounded-lg p-3.5 bg-card flex flex-col gap-2">
-              <span class="text-xs font-semibold text-foreground">Standard Permission Flags</span>
-              <div class="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
-                <div class="flex items-center gap-2">
-                  <Check class="h-3.5 w-3.5 text-emerald-500" /> Printing Content
-                </div>
-                <div class="flex items-center gap-2">
-                  <Check class="h-3.5 w-3.5 text-emerald-500" /> Copying Text & Graphics
-                </div>
-                <div class="flex items-center gap-2">
-                  <Check class="h-3.5 w-3.5 text-emerald-500" /> Modifying Document
-                </div>
-                <div class="flex items-center gap-2">
-                  <Check class="h-3.5 w-3.5 text-emerald-500" /> Form Field Completion
-                </div>
-              </div>
-            </div>
+            <SecurityComplianceSection
+              {metadata}
+              {signatureResults}
+              {isValidatingSignatures}
+              onRefreshSignatures={loadSignatures}
+              onOpenCertSign={() => {
+                handleClose();
+                actions.openCertSignDialog();
+              }}
+              onOpenValidateDialog={() => {
+                actions.openValidateSignaturesDialog();
+              }}
+            />
           </Tabs.Content>
 
           <!-- Tab 4: Raw JSON & XMP Stream -->
@@ -618,7 +583,7 @@
                   onclick={() => copyToClipboard(JSON.stringify(metadata, null, 2), 'raw_json')}
                 >
                   {#if copiedKey === 'raw_json'}
-                    <Check class="h-3 w-3 mr-1.5 text-emerald-500" /> Copied JSON
+                    <Check class="h-3 w-3 mr-1.5 text-success" /> Copied JSON
                   {:else}
                     <Copy class="h-3 w-3 mr-1.5" /> Copy JSON
                   {/if}
@@ -634,14 +599,14 @@
               </div>
             </div>
 
-            <div class="flex-1 min-h-0 overflow-y-auto rounded-md bg-zinc-950 p-3 text-[11px] font-mono text-zinc-300 border border-border select-all">
+            <div class="flex-1 min-h-0 overflow-y-auto rounded-md bg-zinc-950 p-3 text-[11px] font-sans text-zinc-300 border border-border select-all">
               {#if metadata?.xmpString}
                 <div class="mb-3 pb-3 border-b border-zinc-800">
-                  <span class="text-emerald-400 font-semibold block mb-1">XMP Metadata XML Packet:</span>
+                  <span class="text-success font-semibold block mb-1">XMP Metadata XML Packet:</span>
                   <pre class="whitespace-pre-wrap break-all text-[10px] text-zinc-400">{metadata.xmpString}</pre>
                 </div>
               {/if}
-              <span class="text-blue-400 font-semibold block mb-1">Normalized Metadata Dictionary:</span>
+              <span class="text-info font-semibold block mb-1">Normalized Metadata Dictionary:</span>
               <pre class="whitespace-pre-wrap">{JSON.stringify(metadata, null, 2)}</pre>
             </div>
           </Tabs.Content>
@@ -650,8 +615,8 @@
 
       <!-- Feedback / Error messages -->
       {#if saveSuccess}
-        <div class="px-6 py-2 bg-emerald-500/10 border-t border-emerald-500/30 flex items-center gap-2 text-xs font-medium text-emerald-400">
-          <Check class="h-4 w-4 shrink-0 text-emerald-400" />
+        <div class="px-6 py-2 bg-success/10 border-t border-success/30 flex items-center gap-2 text-xs font-medium text-success">
+          <Check class="h-4 w-4 shrink-0 text-success" />
           Document metadata successfully updated and saved!
         </div>
       {/if}
