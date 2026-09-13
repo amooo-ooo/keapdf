@@ -95,13 +95,13 @@
 
         <div class="space-y-3">
           {#each results as sig (sig.signatureId)}
-            <div class="border rounded-lg overflow-hidden bg-card transition-all {sig.status === 'valid' ? 'border-emerald-500/40 shadow-xs' : 'border-destructive/40'}">
+            <div class="border rounded-lg overflow-hidden bg-card transition-all {sig.status === 'valid' ? 'border-success/40 shadow-xs' : 'border-destructive/40'}">
               <div class="p-3.5 flex items-start justify-between border-b border-border/60 bg-muted/20">
                 <div class="space-y-1">
                   <div class="flex items-center gap-2">
                     <span class="font-semibold text-xs text-foreground">{sig.signerName}</span>
                     {#if sig.status === 'valid'}
-                      <Badge variant="outline" class="text-[10px] bg-emerald-500/10 text-emerald-600 border-emerald-500/30 flex items-center gap-1">
+                      <Badge variant="success" class="text-[10px] flex items-center gap-1">
                         <CheckCircle2 class="h-3 w-3" /> Valid & Untampered
                       </Badge>
                     {:else if sig.status === 'tampered'}
@@ -109,12 +109,30 @@
                         <XCircle class="h-3 w-3" /> Altered after Signing
                       </Badge>
                     {:else if sig.status === 'expired'}
-                      <Badge variant="outline" class="text-[10px] bg-amber-500/10 text-amber-600 border-amber-500/30 flex items-center gap-1">
+                      <Badge variant="warning" class="text-[10px] flex items-center gap-1">
                         <AlertTriangle class="h-3 w-3" /> Certificate Expired
                       </Badge>
                     {:else}
                       <Badge variant="destructive" class="text-[10px] flex items-center gap-1">
                         <XCircle class="h-3 w-3" /> Invalid Signature
+                      </Badge>
+                    {/if}
+
+                    {#if sig.padesProfile === 'PAdES-B-LT'}
+                      <Badge variant="info" class="text-[10px] font-sans">
+                        PAdES B-LT (LTV)
+                      </Badge>
+                    {:else if sig.padesProfile === 'PAdES-B-T'}
+                      <Badge variant="info" class="text-[10px] font-sans">
+                        PAdES B-T (Timestamped)
+                      </Badge>
+                    {:else if sig.padesProfile === 'PAdES-B-B'}
+                      <Badge variant="info" class="text-[10px] font-sans">
+                        PAdES B-B (Baseline)
+                      </Badge>
+                    {:else}
+                      <Badge variant="outline" class="text-[10px] bg-muted/60 text-muted-foreground border-border font-sans">
+                        Legacy PKCS#7
                       </Badge>
                     {/if}
                   </div>
@@ -123,7 +141,7 @@
                   </div>
                 </div>
 
-                <div class="text-[11px] font-mono text-muted-foreground">
+                <div class="text-[11px] font-sans text-muted-foreground">
                   {sig.subFilter}
                 </div>
               </div>
@@ -143,6 +161,70 @@
                   </div>
                 {/if}
 
+                <!-- Standards & Cryptographic Verification Audit Matrix -->
+                <div class="pt-2 border-t border-border/50 bg-muted/10 rounded p-2 text-[11px] space-y-1 font-sans">
+                  <div class="flex justify-between">
+                    <span class="text-muted-foreground">CAdES signingCertificateV2:</span>
+                    <span class={sig.hasSigningCertificateV2 ? 'text-success font-medium' : 'text-muted-foreground'}>
+                      {sig.hasSigningCertificateV2 ? 'Bound (RFC 5035 ESSCertIDv2)' : 'Not Bound (Legacy)'}
+                    </span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-muted-foreground">RFC 3161 Qualified Timestamp:</span>
+                    <span class={sig.hasTimestampToken ? 'text-success font-medium' : 'text-muted-foreground'}>
+                      {sig.hasTimestampToken ? (sig.timestampTime ? `Present (${sig.timestampTime})` : 'Present') : 'None'}
+                    </span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-muted-foreground">Certificate Legitimacy:</span>
+                    <span class={sig.hasIllegalTimeStampingUsage ? 'text-destructive font-semibold' : 'text-success'}>
+                      {sig.hasIllegalTimeStampingUsage ? 'Illegal (timeStamping EKU Conflict)' : 'Legitimate Document Signer'}
+                    </span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-muted-foreground">Document Security Store (/DSS):</span>
+                    <span class={sig.hasDss ? 'text-success font-medium' : 'text-muted-foreground'}>
+                      {sig.hasDss ? 'Present (Long Term Validation)' : 'Not Present'}
+                    </span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-muted-foreground">Certificate Chain Depth:</span>
+                    <span>{sig.certificateChainLength} Certificate{sig.certificateChainLength > 1 ? 's' : ''}</span>
+                  </div>
+                </div>
+
+                <!-- Swiss ESigA / ZertES Compliance Status Callout -->
+                {#if sig.esigaCompliance.status === 'indeterminate'}
+                  <div class="p-2 bg-warning/10 border border-warning/20 rounded text-[11px] text-warning space-y-1">
+                    <div class="font-semibold flex items-center gap-1">
+                      <AlertTriangle class="h-3 w-3 text-warning" />
+                      ESigA / ZertES Status: Indeterminate
+                    </div>
+                    <ul class="list-disc list-inside space-y-0.5 text-[10px] text-warning/90">
+                      {#each sig.esigaCompliance.reasons as reason}
+                        <li>{reason}</li>
+                      {/each}
+                    </ul>
+                  </div>
+                {:else if sig.esigaCompliance.status === 'non_compliant'}
+                  <div class="p-2 bg-destructive/10 border border-destructive/20 rounded text-[11px] text-destructive space-y-1">
+                    <div class="font-semibold flex items-center gap-1">
+                      <XCircle class="h-3 w-3" />
+                      ESigA / ZertES Status: Non-Compliant
+                    </div>
+                    <ul class="list-disc list-inside space-y-0.5 text-[10px]">
+                      {#each sig.esigaCompliance.reasons as reason}
+                        <li>{reason}</li>
+                      {/each}
+                    </ul>
+                  </div>
+                {:else}
+                  <div class="p-2 bg-success/10 border border-success/20 rounded text-[11px] text-success flex items-center gap-1.5 font-medium">
+                    <CheckCircle2 class="h-3.5 w-3.5 text-success shrink-0" />
+                    Compliant with Swiss ESigA / ZertES and ETSI EN 319 142 PAdES requirements.
+                  </div>
+                {/if}
+
                 <div class="pt-2 border-t border-border/50 grid grid-cols-2 gap-2 text-[11px]">
                   <div>
                     <span class="text-muted-foreground block text-[10px]">Certificate Subject</span>
@@ -156,7 +238,7 @@
                     <span class="text-muted-foreground block text-[10px]">Certificate Issuer</span>
                     <span class="font-medium">{sig.certificateIssuer.commonName}</span>
                     {#if sig.isSelfSigned}
-                      <span class="text-amber-600 dark:text-amber-400 block text-[10px]">Self-Signed Root</span>
+                      <span class="text-warning block text-[10px]">Self-Signed Root</span>
                     {/if}
                   </div>
 
@@ -167,7 +249,7 @@
 
                   <div>
                     <span class="text-muted-foreground block text-[10px]">Byte Range Coverage</span>
-                    <span class="font-mono text-[10px] truncate block" title={sig.byteRange.join(', ')}>
+                    <span class="font-sans text-[10px] truncate block" title={sig.byteRange.join(', ')}>
                       [{sig.byteRange[0]}, {sig.byteRange[1]}, {sig.byteRange[2]}, {sig.byteRange[3]}]
                     </span>
                   </div>
@@ -181,7 +263,7 @@
 
     <Dialog.Footer class="px-6 py-3 border-t border-border bg-card flex justify-between items-center">
       <div class="text-[11px] text-muted-foreground flex items-center gap-1">
-        <Lock class="h-3 w-3 text-emerald-500" /> Verified using detached PKCS#7 SHA-256 digests.
+        <Lock class="h-3 w-3 text-success" /> Verified using detached PKCS#7 SHA-256 digests.
       </div>
       <Button variant="outline" size="sm" class="text-xs" onclick={handleClose}>
         Close
