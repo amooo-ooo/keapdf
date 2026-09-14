@@ -11,11 +11,50 @@ export interface EmscriptenHeaps {
   HEAPF64: Float64Array;
 }
 
+export interface PdfiumSecurityMethods {
+  EPDF_IsEncrypted(docHandle: number): boolean;
+  EPDF_IsOwnerUnlocked(docHandle: number): boolean;
+  EPDF_UnlockOwnerPermissions(docHandle: number, password: string): boolean;
+  EPDF_RemoveEncryption(docHandle: number): boolean;
+  EPDF_SetEncryption(
+    docHandle: number,
+    userPassword: string,
+    ownerPassword: string,
+    permissions: number
+  ): boolean;
+  FPDF_GetDocPermissions(docHandle: number): number;
+  FPDF_GetDocUserPermissions?(docHandle: number): number;
+}
+
+export interface PdfiumImageMethods {
+  FPDFImageObj_GetBitmap?(imageObject: number): number;
+  FPDFImageObj_SetBitmap?(pagesPtr: number, count: number, imageObject: number, bitmap: number): boolean;
+  FPDFBitmap_FillRect?(bitmap: number, left: number, top: number, width: number, height: number, color: number): boolean;
+  FPDFBitmap_Destroy?(bitmap: number): void | null;
+  FPDFBitmap_GetWidth?(bitmap: number): number;
+  FPDFBitmap_GetHeight?(bitmap: number): number;
+  FPDFBitmap_GetStride?(bitmap: number): number;
+  FPDFBitmap_GetFormat?(bitmap: number): number;
+  FPDFBitmap_GetBuffer?(bitmap: number): number;
+}
+
 export type ExtendedPdfiumRuntime = PdfiumModule & PdfiumRuntimeMethods & EmscriptenHeaps;
 
-export type ExtendedWrappedPdfiumModule = Omit<WrappedPdfiumModule, 'pdfium'> & {
-  pdfium: ExtendedPdfiumRuntime;
-};
+export type ExtendedWrappedPdfiumModule = Omit<WrappedPdfiumModule, 'pdfium'> &
+  PdfiumSecurityMethods &
+  PdfiumImageMethods & {
+    pdfium: ExtendedPdfiumRuntime;
+  };
+
+/**
+ * Error raised when opening an encrypted PDF document that requires a password or received an invalid password.
+ */
+export class PasswordRequiredError extends Error {
+  constructor(message: string = 'Password required or incorrect password to open PDF.') {
+    super(message);
+    this.name = 'PasswordRequiredError';
+  }
+}
 
 /**
  * Singleton wrapper around PDFium WebAssembly module.
@@ -50,14 +89,14 @@ export class PdfiumEngine {
   }
 
   /**
-   * Indicates whether the underlying WebAssembly module has finished initialization.
+   * Indicates whether the underlying WebAssembly module has finished initialisation.
    */
   public get isReady(): boolean {
     return this.isInitialized && this.module !== null;
   }
 
   /**
-   * Initialize WebAssembly engine binary and PDFium extension runtime.
+   * Initialise WebAssembly engine binary and PDFium extension runtime.
    */
   public async initialize(options?: { wasmBinary?: ArrayBuffer | Uint8Array }): Promise<ExtendedWrappedPdfiumModule> {
     if (this.isInitialized && this.module) {
@@ -82,13 +121,15 @@ export class PdfiumEngine {
 
         const rawModule = await init({ wasmBinary });
 
-        // Initialize extension runtime
+        // Initialise extension runtime
         rawModule.PDFiumExt_Init();
         this.module = rawModule as unknown as ExtendedWrappedPdfiumModule;
         this.isInitialized = true;
         return this.module;
       } catch (err) {
         this.initPromise = null;
+        this.isInitialized = false;
+        this.module = null;
         throw err;
       }
     })();
@@ -107,12 +148,17 @@ export class PdfiumEngine {
 
   /**
    * Load document from ArrayBuffer or Uint8Array into WASM memory space.
+   * Accepts an optional decryption password for encrypted documents.
    */
-  public loadDocumentFromBuffer(buffer: ArrayBuffer | Uint8Array): number {
+  public loadDocumentFromBuffer(buffer: ArrayBuffer | Uint8Array, password: string = ''): number {
     const mod = this.getModule();
     this.closeCurrentDocument();
 
     const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    if (bytes.byteLength === 0) {
+      throw new Error('Cannot load empty or zero-byte buffer as PDF document.');
+    }
+
     this.activeBufferSize = bytes.byteLength;
     this.activeBufferPtr = mod.pdfium.wasmExports.malloc(this.activeBufferSize);
 
@@ -123,23 +169,26 @@ export class PdfiumEngine {
       );
     }
 
-    const heapBytes = new Uint8Array(
-      mod.pdfium.HEAPU8.buffer,
-      this.activeBufferPtr,
-      this.activeBufferSize
-    );
-    heapBytes.set(bytes);
+    try {
+      mod.pdfium.HEAPU8.set(bytes, this.activeBufferPtr);
 
-    // Call FPDF_LoadMemDocument(bufPtr, size, password)
-    this.activeDocumentHandle = mod.FPDF_LoadMemDocument(
-      this.activeBufferPtr,
-      this.activeBufferSize,
-      ''
-    );
+      // Call FPDF_LoadMemDocument(bufPtr, size, password)
+      this.activeDocumentHandle = mod.FPDF_LoadMemDocument(
+        this.activeBufferPtr,
+        this.activeBufferSize,
+        password
+      );
+    } catch (err) {
+      this.freeActiveBuffer();
+      throw err;
+    }
 
     if (!this.activeDocumentHandle) {
       this.freeActiveBuffer();
       const lastError = mod.FPDF_GetLastError();
+      if (lastError === 4) {
+        throw new PasswordRequiredError('Password required or incorrect password to open PDF.');
+      }
       throw new Error(`Failed to load PDF document from buffer. PDFium error code: ${lastError}`);
     }
 
@@ -157,9 +206,16 @@ export class PdfiumEngine {
    * Close active document and free memory buffers.
    */
   public closeCurrentDocument(): void {
-    if (this.activeDocumentHandle && this.module) {
-      this.module.FPDF_CloseDocument(this.activeDocumentHandle);
+    if (this.activeDocumentHandle) {
+      const handle = this.activeDocumentHandle;
       this.activeDocumentHandle = 0;
+      if (this.module) {
+        try {
+          this.module.FPDF_CloseDocument(handle);
+        } catch {
+          // Handle might have already been freed or closed
+        }
+      }
     }
     this.freeActiveBuffer();
     this.freeScratchBuffers();
@@ -169,10 +225,15 @@ export class PdfiumEngine {
    * Free active WebAssembly heap buffer.
    */
   private freeActiveBuffer(): void {
-    if (this.activeBufferPtr && this.module) {
-      this.module.pdfium.wasmExports.free(this.activeBufferPtr);
-      this.activeBufferPtr = 0;
-      this.activeBufferSize = 0;
+    const ptr = this.activeBufferPtr;
+    this.activeBufferPtr = 0;
+    this.activeBufferSize = 0;
+    if (ptr && this.module) {
+      try {
+        this.module.pdfium.wasmExports.free(ptr);
+      } catch {
+        // Handle might have already been freed
+      }
     }
   }
 
@@ -208,7 +269,7 @@ export class PdfiumEngine {
   }
 
   /**
-   * Retrieve persistent scratch buffer for character fill color queries (16 bytes for RGBA uint32s).
+   * Retrieve persistent scratch buffer for character fill colour queries (16 bytes for RGBA uint32s).
    * Eliminates 4 WASM allocations per character.
    */
   public getColorScratchBuffer(): {
@@ -257,21 +318,20 @@ export class PdfiumEngine {
    * Releases all persistent scratch buffers.
    */
   public freeScratchBuffers(): void {
-    if (this.fontNameBufPtr) {
-      this.freeMemory(this.fontNameBufPtr);
-      this.fontNameBufPtr = 0;
-    }
-    if (this.fontFlagsPtr) {
-      this.freeMemory(this.fontFlagsPtr);
-      this.fontFlagsPtr = 0;
-    }
-    if (this.colorScratchPtr) {
-      this.freeMemory(this.colorScratchPtr);
-      this.colorScratchPtr = 0;
-    }
-    if (this.boundsScratchPtr) {
-      this.freeMemory(this.boundsScratchPtr);
-      this.boundsScratchPtr = 0;
-    }
+    const fontBuf = this.fontNameBufPtr;
+    this.fontNameBufPtr = 0;
+    if (fontBuf) this.freeMemory(fontBuf);
+
+    const flagsBuf = this.fontFlagsPtr;
+    this.fontFlagsPtr = 0;
+    if (flagsBuf) this.freeMemory(flagsBuf);
+
+    const colorBuf = this.colorScratchPtr;
+    this.colorScratchPtr = 0;
+    if (colorBuf) this.freeMemory(colorBuf);
+
+    const boundsBuf = this.boundsScratchPtr;
+    this.boundsScratchPtr = 0;
+    if (boundsBuf) this.freeMemory(boundsBuf);
   }
 }
