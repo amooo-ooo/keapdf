@@ -14,12 +14,15 @@ export default defineConfig({
     port: 3000,
     open: true,
   },
+  preview: {
+    port: 3000,
+  },
   build: {
     outDir: 'dist',
     rollupOptions: {
       input: 'index.html',
       output: {
-        manualChunks(id) {
+        manualChunks(id: string): string | void {
           if (id.includes('node_modules')) {
             if (id.includes('@embedpdf/pdfium')) return 'vendor-pdfium';
             if (id.includes('node-forge')) return 'vendor-forge';
