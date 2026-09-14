@@ -43,6 +43,9 @@
 	--info-foreground: oklch(0.988 0.003 106.5);
 	--selection: #0D99FF;
 	--selection-subtle: rgba(13, 153, 255, 0.08);
+	--snap-guide: #E01E5A;
+	--snap-guide-subtle: rgba(224, 30, 90, 0.12);
+	--snap-guide-foreground: #FFFFFF;
 	--border: oklch(0.93 0.007 106.5);
 	--input: oklch(0.93 0.007 106.5);
 	--ring: oklch(0.737 0.021 106.9);
@@ -86,6 +89,9 @@
 	--info-foreground: oklch(0.153 0.006 107.1);
 	--selection: #0D99FF;
 	--selection-subtle: rgba(13, 153, 255, 0.12);
+	--snap-guide: #FF337F;
+	--snap-guide-subtle: rgba(255, 51, 127, 0.16);
+	--snap-guide-foreground: #FFFFFF;
 	--border: oklch(1 0 0 / 10%);
 	--input: oklch(1 0 0 / 15%);
 	--ring: oklch(0.58 0.031 107.3);
@@ -132,6 +138,9 @@
 	--color-info-foreground: var(--info-foreground);
 	--color-selection: var(--selection);
 	--color-selection-subtle: var(--selection-subtle);
+	--color-snap-guide: var(--snap-guide);
+	--color-snap-guide-foreground: var(--snap-guide-foreground);
+	--color-snap-guide-subtle: var(--snap-guide-subtle);
 	--color-accent-foreground: var(--accent-foreground);
 	--color-accent: var(--accent);
 	--color-muted-foreground: var(--muted-foreground);
