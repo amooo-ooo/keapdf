@@ -480,6 +480,7 @@
 						)}
 						onclick={selectNone}
 						title="None / Transparent"
+						aria-label="None or transparent colour"
 					>
 						<div class="size-full bg-transparency-grid relative">
 							<div class="absolute inset-0 flex items-center justify-center">
@@ -499,6 +500,7 @@
 						style="background-color: {preset.color};"
 						onclick={() => selectPreset(preset.color)}
 						title={preset.label}
+						aria-label={preset.label}
 					></button>
 				{/each}
 			</div>
