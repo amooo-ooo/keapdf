@@ -1,6 +1,10 @@
 import { mount } from 'svelte';
 import App from './App.svelte';
 import './app.css';
+import { ensureWebMcpInstalled } from './core/webmcp/webmcp-polyfill';
+
+// Ensure WebMCP runtime is globally installed on navigator, window, and document
+ensureWebMcpInstalled();
 
 const target = document.getElementById('app');
 if (!target) {
