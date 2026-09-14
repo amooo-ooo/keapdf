@@ -2,7 +2,7 @@
  * Shared low-level PDFium WASM interop utilities.
  *
  * Extracts repeated boilerplate (UTF-16LE encoding, FS_MATRIX writes,
- * page handle lifecycle, font name normalization, text width calculation)
+ * page handle lifecycle, font name normalisation, text width calculation)
  * into composable, fully-typed helper functions.
  */
 
@@ -270,9 +270,9 @@ export function withTextPageHandle<T>(
   });
 }
 
-// Font name normalization
+// Font name normalisation
 
-/** Map of normalized (lowercase, stripped) font names to standard PDF fonts. */
+/** Map of normalised (lowercase, stripped) font names to standard PDF fonts. */
 const FONT_NAME_MAP: Record<string, StandardFontName> = {
   // Helvetica family
   arial: 'Helvetica',
@@ -726,7 +726,7 @@ export function removeTextObjectsInBounds(
 }
 
 /**
- * Removes all text objects that overlap any of the provided bounding rectangles from the page.
+ * Removes all text objects that are fully enclosed within any of the provided bounding rectangles from the page.
  * Coordinates in `rects` are in DOM coordinate space (top-left origin).
  *
  * @param engine The PDFium engine instance.
@@ -762,10 +762,10 @@ export function removeTextObjectsInRects(
     const p1 = domToPdfCoords(r.x, r.y, cropInfo);
     const p2 = domToPdfCoords(r.x + r.width, r.y + r.height, cropInfo);
     return {
-      targetLeft: Math.min(p1.x, p2.x) - 2,
-      targetRight: Math.max(p1.x, p2.x) + 2,
-      targetTop: Math.max(p1.y, p2.y) + 2,
-      targetBottom: Math.min(p1.y, p2.y) - 2,
+      targetLeft: Math.min(p1.x, p2.x),
+      targetRight: Math.max(p1.x, p2.x),
+      targetTop: Math.max(p1.y, p2.y),
+      targetBottom: Math.min(p1.y, p2.y),
     };
   });
 
@@ -782,20 +782,29 @@ export function removeTextObjectsInRects(
     if (!ok) continue;
 
     const heapF32 = mod.pdfium.HEAPF32;
-    const objLeft = heapF32[leftPtr >> 2];
-    const objBottom = heapF32[bottomPtr >> 2];
-    const objRight = heapF32[rightPtr >> 2];
-    const objTop = heapF32[topPtr >> 2];
+    const rawLeft = heapF32[leftPtr >> 2];
+    const rawBottom = heapF32[bottomPtr >> 2];
+    const rawRight = heapF32[rightPtr >> 2];
+    const rawTop = heapF32[topPtr >> 2];
 
-    const overlapsAny = targetBoxes.some(
-      (b) =>
-        objLeft < b.targetRight &&
-        objRight > b.targetLeft &&
-        objBottom < b.targetTop &&
-        objTop > b.targetBottom
+    const objMinX = Math.min(rawLeft, rawRight);
+    const objMaxX = Math.max(rawLeft, rawRight);
+    const objMinY = Math.min(rawBottom, rawTop);
+    const objMaxY = Math.max(rawBottom, rawTop);
+
+    const objWidth = objMaxX - objMinX;
+    const objHeight = objMaxY - objMinY;
+    if (objWidth <= 0 || objHeight <= 0) continue;
+
+    // Strict full enclosure containment check
+    const isFullyEnclosed = targetBoxes.some((b) =>
+      objMinX >= b.targetLeft &&
+      objMaxX <= b.targetRight &&
+      objMinY >= b.targetBottom &&
+      objMaxY <= b.targetTop
     );
 
-    if (overlapsAny) {
+    if (isFullyEnclosed) {
       objectsToRemove.push(i);
     }
   }
@@ -809,8 +818,8 @@ export function removeTextObjectsInRects(
     const objHandle = mod.FPDFPage_GetObject(pageHandle, idx);
     if (!objHandle) continue;
 
-    mod.FPDFPage_RemoveObject(pageHandle, objHandle);
-    if (hasDestroy) {
+    const removedOk = mod.FPDFPage_RemoveObject(pageHandle, objHandle);
+    if (removedOk && hasDestroy) {
       mod.FPDFPageObj_Destroy(objHandle);
     }
   }
@@ -923,9 +932,9 @@ export function setTextObjectInBounds(
 
 /**
  * Identify the exact page object indices that back a text span using
- * center-containment matching. An object is considered part of the span
- * only if the object's geometric center falls within the span's tight
- * bounding region. This avoids catching neighboring text objects that
+ * centre-containment matching. An object is considered part of the span
+ * only if the object's geometric centre falls within the span's tight
+ * bounding region. This avoids catching neighbouring text objects that
  * merely overlap at the edges.
  *
  * @param engine The PDFium engine instance.
@@ -935,7 +944,7 @@ export function setTextObjectInBounds(
  * @param spanBaselineY Baseline Y coordinate of the text span (PDF coords).
  * @param spanWidth Width of the text span.
  * @param spanFontSize Font size of the text span.
- * @return Array of page object indices whose centers fall inside the span region.
+ * @return Array of page object indices whose centres fall inside the span region.
  */
 export function findTextObjectIndicesForSpan(
   engine: PdfiumEngine,
@@ -982,7 +991,7 @@ export function findTextObjectIndicesForSpan(
     const objCenterX = (objLeft + objRight) / 2;
     const objCenterY = (objBottom + objTop) / 2;
 
-    // Require the object's center to be inside the span's tight region
+    // Require the object's centre to be inside the span's tight region
     let centerInTarget = false;
     if (cropInfo.rotation === 0) {
       centerInTarget =
@@ -1166,13 +1175,13 @@ export function readCharFontName(
 }
 
 /**
- * Reads the fill color of a specific character in a text page.
+ * Reads the fill colour of a specific character in a text page.
  *
  * @param engine The PDFium engine instance.
  * @param mod The extended WASM module instance.
  * @param textPageHandle Handle to the loaded text page.
  * @param charIndex Zero-based index of the target character.
- * @return Object containing red, green, blue, and alpha color components (0-255).
+ * @return Object containing red, green, blue, and alpha colour components (0-255).
  */
 export function readCharFillColor(
   engine: PdfiumEngine,
@@ -1251,7 +1260,7 @@ export function extractBaseFontFamily(fontName: string): string {
  * @param engine The PDFium engine instance.
  * @param mod The extended WASM module instance.
  * @param pageHandle Handle to the loaded page.
- * @param targetFontFamily Normalized font family name.
+ * @param targetFontFamily Normalised font family name.
  * @param rawFontFamily Raw font family name (potentially with subset prefix).
  * @return FPDF_FONT handle if found, or 0 if not present on the page.
  */
