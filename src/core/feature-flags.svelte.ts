@@ -66,6 +66,7 @@ export type FeatureFlag =
   | 'components.forms.radio'
   | 'components.forms.dropdown'
   | 'components.forms.signature'
+  | 'components.forms.button'
   | 'components.forms.attachment'
   | 'components.media'
   | 'components.media.image-import'
@@ -144,7 +145,12 @@ export type FeatureFlag =
   | 'flatten'
   | 'export-images'
   | 'text'
-  | 'text.vertical-align';
+  | 'text.vertical-align'
+  | 'snapping'
+  | 'snapping.page'
+  | 'snapping.elements'
+  | 'snapping.smart-guides'
+  | 'snapping.spacing';
 
 /** Type alias for backwards compatibility. */
 export type FeatureId = FeatureFlag;
