@@ -14,7 +14,7 @@ export type PanelPosition = 'left' | 'right' | 'bottom';
 
 /** Specification for a registered sidebar panel or tool tab. */
 export interface PanelDefinition {
-  /** Unique panel identifier (e.g., 'workspace', 'components', 'annotate', 'imposition', 'tools', 'settings'). */
+  /** Unique panel identifier (e.g., 'workspace', 'components', 'annotate', 'tools', 'settings'). */
   id: string;
   /** Primary label displayed in navigation rail tooltips and panel headers. */
   label: string;

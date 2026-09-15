@@ -2,11 +2,10 @@
  * Built-in panel registrations for left and right sidebars.
  */
 
-import { Layers, Shapes, Highlighter, LayoutGrid, Wrench, Settings } from 'lucide-svelte';
+import { Layers, Shapes, Highlighter, Wrench, Settings } from 'lucide-svelte';
 import type { PanelRegistry } from '../core/panel-registry';
 import ComponentsPanel from '../components/panels/ComponentsPanel.svelte';
 import AnnotatePanel from '../components/panels/AnnotatePanel.svelte';
-import ImpositionPanel from '../components/panels/ImpositionPanel.svelte';
 import ToolsPanel from '../components/panels/ToolsPanel.svelte';
 import SettingsPanel from '../components/panels/SettingsPanel.svelte';
 
@@ -46,23 +45,13 @@ export function registerBuiltinPanels(registry: PanelRegistry): void {
   });
 
   registry.registerBuiltin({
-    id: 'imposition',
-    label: 'Page Imposition',
-    subtitle: 'N-Up, booklet & sheet layouts',
-    icon: LayoutGrid,
-    position: 'left',
-    component: ImpositionPanel,
-    order: 40,
-  });
-
-  registry.registerBuiltin({
     id: 'tools',
     label: 'Tools & OCR',
     subtitle: 'OCR, extract & page numbers',
     icon: Wrench,
     position: 'left',
     component: ToolsPanel,
-    order: 50,
+    order: 40,
   });
 
   registry.registerBuiltin({
@@ -72,7 +61,7 @@ export function registerBuiltinPanels(registry: PanelRegistry): void {
     icon: Settings,
     position: 'left',
     component: SettingsPanel,
-    order: 60,
+    order: 50,
   });
 
   // Right Panels
