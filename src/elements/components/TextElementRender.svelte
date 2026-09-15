@@ -56,7 +56,7 @@
         }
         lineDiv.style.fontSize = `${lFontSize * zoom}px`;
         lineDiv.style.textAlign = element.textAlign;
-        lineDiv.style.whiteSpace = 'nowrap';
+        lineDiv.style.whiteSpace = 'pre';
         lineDiv.style.lineHeight = (line.lineHeight || element.lineHeight) ? `${((line.lineHeight || element.lineHeight)! * zoom).toFixed(2)}px` : '1.25';
 
         if (line.segments && line.segments.length > 0) {
@@ -77,6 +77,10 @@
             }
             spanEl.style.letterSpacing = element.letterSpacing || 'normal';
             spanEl.style.verticalAlign = 'baseline';
+            if (seg.width && seg.text.trim().length === 0) {
+              spanEl.style.display = 'inline-block';
+              spanEl.style.width = `${(seg.width * zoom).toFixed(2)}px`;
+            }
             spanEl.textContent = seg.text;
             lineDiv.appendChild(spanEl);
           }
@@ -479,7 +483,7 @@
           data-line-index={lineIdx}
           style="
             display: block;
-            white-space: nowrap;
+            white-space: pre;
             text-align: {element.textAlign};
             line-height: {(line.lineHeight || element.lineHeight) ? `${((line.lineHeight || element.lineHeight)! * zoom).toFixed(2)}px` : '1.25'};
             font-size: {(line.fontSize || element.fontSize) * zoom}px;
@@ -500,6 +504,7 @@
                   text-decoration: {resolveTextDecoration(segment.underline, segment.strikethrough)};
                   background-color: {segment.backgroundColor || 'transparent'};
                   vertical-align: baseline;
+                  {segment.width && segment.text.trim().length === 0 ? `display: inline-block; width: ${(segment.width * zoom).toFixed(2)}px;` : ''}
                 "
               >{segment.text}</span>
             {/each}
