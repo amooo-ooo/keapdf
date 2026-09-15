@@ -184,6 +184,8 @@ export interface HighlightRect {
   width: number;
   /** Box height in points. */
   height: number;
+  /** Vertical baseline position in DOM coordinates for underline calibration. */
+  baselineY?: number;
 }
 
 export interface PageTextResult {
