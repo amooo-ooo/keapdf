@@ -34,6 +34,7 @@
         canvasActions.deleteElement(element.id);
       }}
       title="Delete Note"
+      aria-label="Delete Note"
     >
       <X class="w-3 h-3" />
     </button>
