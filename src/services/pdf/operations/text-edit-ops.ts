@@ -1,7 +1,7 @@
 import type { PdfiumEngine } from '../../../core/pdfium-engine';
 import { FontCharsetIndex, extractBaseFontFamily } from '../font-charset-index';
 import { isColorEqual, parseColor, isControlOrUnidentified, isZeroWidthOrInvisible } from '../utils';
-import type { ColorRgba, EditableTextSpan, TextMutationOptions, StandardFontName, PageCharacter, HighlightRect, TextWord } from '../../../core/types';
+import type { ColorRgba, EditableTextSpan, TextMutationOptions, StandardFontName, PageCharacter, HighlightRect, TextWord, TextLine, PdfMatrix } from '../../../core/types';
 import {
   encodeUtf16Le,
   setPageObjectMatrix,
@@ -12,6 +12,7 @@ import {
   removeTextObjectsInRects,
   setTextObjectInBounds,
   findTextObjectIndicesForSpan,
+  findPageFontHandle,
   removeTextObjectsByIndex,
   setTextObjectByIndex,
   getPageObjectMatrix,
@@ -24,7 +25,7 @@ import { detectParagraphs, normalizeAngleDeg, getCardinalRotation, isVerticalRot
 import { reflowAndReplaceParagraph, wrapTextToWidth } from './paragraph-reflow';
 
 /**
- * Analyzes the text stream of a page to group characters into semantic multi-line paragraphs and blocks.
+ * Analyses the text stream of a page to group characters into semantic multi-line paragraphs and blocks.
  * Uses deterministic multi-pass spatial analysis (baselines, font sizes, leading, column overlap).
  * @param engine The PDFium engine instance.
  * @param pageIndex The zero-based index of the page.
@@ -41,8 +42,8 @@ export function extractEditableSpans(
 
 /**
  * Temporarily hides a text span by replacing its string with a space.
- * Uses center-containment matching to identify only the span's own
- * objects, preserving neighboring text in crowded layouts.
+ * Uses centre-containment matching to identify only the span's own
+ * objects, preserving neighbouring text in crowded layouts.
  */
 export function hideTextSpan(
   engine: PdfiumEngine,
@@ -100,8 +101,8 @@ export function hideTextSpan(
 /**
  * Replaces or mutates a specific text block on the page.
  *
- * Uses center-containment matching to identify the exact page objects
- * backing the target span, preventing collateral damage to neighboring
+ * Uses centre-containment matching to identify the exact page objects
+ * backing the target span, preventing collateral damage to neighbouring
  * text. Falls back to spatial matching only when precise matching fails.
  *
  * When a FontCharsetIndex is provided, uses the document-wide character
@@ -197,7 +198,7 @@ export function replaceTextSpan(
     const deltaX = calculatedNewWidth - targetSpan.width;
     const needsReflow = Math.abs(deltaX) > 0.5 && lineSubsequentSpans.length > 0;
 
-    // -- In-place edit path (preserves original embedded font subset) --
+    // In-place edit path (preserves original embedded font subset)
     // Only safe if font is unchanged and no trailing spans on the line need shifting
     const isOnlyTextChanged = 
       (options.fontSize === undefined || Math.abs(options.fontSize - targetSpan.fontSize) < 0.1) &&
@@ -225,7 +226,7 @@ export function replaceTextSpan(
         );
 
         if (canEditInPlace) {
-          // Blank remaining owning objects only (not neighbors)
+          // Blank remaining owning objects only (not neighbours)
           for (let k = 1; k < targetObjectIndices.length; k++) {
             setTextObjectByIndex(engine, mod, pageHandle, targetObjectIndices[k], ' ');
           }
@@ -235,7 +236,7 @@ export function replaceTextSpan(
       }
     }
 
-    // -- Fallback: remove owning objects and recreate with standard font --
+    // Fallback: remove owning objects and recreate with standard font
 
     // Collect ALL object indices to remove in one pass (target + reflowed)
     const allIndicesToRemove = new Set<number>();
@@ -342,10 +343,12 @@ export function replaceTextSpan(
 
 /**
  * Completely remove an identified text span from the page content stream.
- * Uses center-containment matching to identify only the span's own objects,
- * preventing collateral removal of neighboring text in crowded regions.
+ * Uses centre-containment matching to identify only the span's own objects,
+ * preventing collateral removal of neighbouring text in crowded regions.
  *
  * @param engine The PDFium engine instance.
+ * @param docHandle The active document handle.
+ * @param pageIndex The zero-based index of the page.
  * @param pageHandle The active page handle.
  * @param targetSpan The exact dimensions and location of the text to destroy.
  */
@@ -406,7 +409,7 @@ export function updateTextSpanTransform(
   pageHandle: number,
   targetSpan: EditableTextSpan,
   newText: string,
-  matrix: import('../../../core/types').PdfMatrix
+  matrix: PdfMatrix
 ): boolean {
   const mod = engine.getModule();
   const objectIndices = findTextObjectIndicesForSpan(
@@ -800,23 +803,641 @@ export function findClosestCharacter(
 }
 
 /**
- * Permanently removes all text objects within the specified DOM bounding rectangles
- * from the PDF page content stream and regenerates page content.
+ * Completely wipes or removes images and vector paths that fall within or intersect the specified DOM rectangles.
+ * Fully enclosed objects are permanently deleted from the page content stream.
+ * Partially covered images have their pixel data in the intersecting region wiped with solid black.
  *
  * @param engine The PDFium engine instance.
  * @param pageHandle Handle to the active page.
  * @param rects Array of bounding rectangles in DOM coordinates.
- * @return True if page content was modified.
+ * @returns True if any objects or bitmaps were modified.
  */
-export function removeTextInRects(
+export function wipeImagesInRects(
   engine: PdfiumEngine,
   pageHandle: number,
   rects: HighlightRect[]
 ): boolean {
   if (rects.length === 0) return false;
   const mod = engine.getModule();
-  const didRemove = removeTextObjectsInRects(engine, mod, pageHandle, rects);
-  if (didRemove) {
+  if (typeof mod.FPDFPage_CountObjects !== 'function' || typeof mod.FPDFPage_GetObject !== 'function') {
+    return false;
+  }
+
+  const objectCount = mod.FPDFPage_CountObjects(pageHandle);
+  if (objectCount === 0) return false;
+
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const { leftPtr, bottomPtr, rightPtr, topPtr } = engine.getBoundsScratchBuffer();
+  const objectsToRemove: number[] = [];
+  let modified = false;
+
+  for (let i = objectCount - 1; i >= 0; i--) {
+    const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
+    if (!objHandle) continue;
+
+    const objType = typeof mod.FPDFPageObj_GetType === 'function' ? mod.FPDFPageObj_GetType(objHandle) : 0;
+    if (objType !== 3 && objType !== 2) continue;
+
+    const ok = typeof mod.FPDFPageObj_GetBounds === 'function'
+      ? mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr)
+      : false;
+    if (!ok) continue;
+
+    const heapF32 = mod.pdfium.HEAPF32;
+    const objLeft = heapF32[leftPtr >> 2];
+    const objBottom = heapF32[bottomPtr >> 2];
+    const objRight = heapF32[rightPtr >> 2];
+    const objTop = heapF32[topPtr >> 2];
+
+    const domBounds = pdfBoxToDomBounds(objLeft, objBottom, objRight, objTop, cropInfo);
+    const objW = domBounds.right - domBounds.left;
+    const objH = domBounds.bottom - domBounds.top;
+    if (objW <= 0 || objH <= 0) continue;
+
+    const isFullyEnclosed = rects.some((r) =>
+      domBounds.left >= r.x - 1 &&
+      domBounds.right <= r.x + r.width + 1 &&
+      domBounds.top >= r.y - 1 &&
+      domBounds.bottom <= r.y + r.height + 1
+    );
+
+    if (isFullyEnclosed) {
+      objectsToRemove.push(i);
+      modified = true;
+      continue;
+    }
+
+    if (objType === 3) {
+      const intersectingRects = rects.filter((r) => {
+        const ox0 = Math.max(domBounds.left, r.x);
+        const ox1 = Math.min(domBounds.right, r.x + r.width);
+        const oy0 = Math.max(domBounds.top, r.y);
+        const oy1 = Math.min(domBounds.bottom, r.y + r.height);
+        return ox0 < ox1 && oy0 < oy1;
+      });
+
+      if (intersectingRects.length > 0 && typeof mod.FPDFImageObj_GetBitmap === 'function' && typeof mod.FPDFImageObj_SetBitmap === 'function') {
+        const bitmap = mod.FPDFImageObj_GetBitmap(objHandle);
+        if (bitmap) {
+          try {
+            const bmpWidth = typeof mod.FPDFBitmap_GetWidth === 'function' ? mod.FPDFBitmap_GetWidth(bitmap) : 0;
+            const bmpHeight = typeof mod.FPDFBitmap_GetHeight === 'function' ? mod.FPDFBitmap_GetHeight(bitmap) : 0;
+            const stride = typeof mod.FPDFBitmap_GetStride === 'function' ? mod.FPDFBitmap_GetStride(bitmap) : 0;
+            const bufferPtr = typeof mod.FPDFBitmap_GetBuffer === 'function' ? mod.FPDFBitmap_GetBuffer(bitmap) : 0;
+
+            if (bmpWidth > 0 && bmpHeight > 0) {
+              let didWipePixels = false;
+              for (const r of intersectingRects) {
+                const ox0 = Math.max(domBounds.left, r.x);
+                const ox1 = Math.min(domBounds.right, r.x + r.width);
+                const oy0 = Math.max(domBounds.top, r.y);
+                const oy1 = Math.min(domBounds.bottom, r.y + r.height);
+
+                let u0 = (ox0 - domBounds.left) / objW;
+                let u1 = (ox1 - domBounds.left) / objW;
+                let v0 = (oy0 - domBounds.top) / objH;
+                let v1 = (oy1 - domBounds.top) / objH;
+
+                if (cropInfo.rotation === 1) {
+                  // 90 degrees clockwise rotation
+                  const nu0 = v0;
+                  const nu1 = v1;
+                  const nv0 = 1 - u1;
+                  const nv1 = 1 - u0;
+                  u0 = nu0; u1 = nu1; v0 = nv0; v1 = nv1;
+                } else if (cropInfo.rotation === 2) {
+                  // 180 degrees rotation
+                  const nu0 = 1 - u1;
+                  const nu1 = 1 - u0;
+                  const nv0 = 1 - v1;
+                  const nv1 = 1 - v0;
+                  u0 = nu0; u1 = nu1; v0 = nv0; v1 = nv1;
+                } else if (cropInfo.rotation === 3) {
+                  // 270 degrees clockwise rotation
+                  const nu0 = 1 - v1;
+                  const nu1 = 1 - v0;
+                  const nv0 = u0;
+                  const nv1 = u1;
+                  u0 = nu0; u1 = nu1; v0 = nv0; v1 = nv1;
+                }
+
+                const px = Math.max(0, Math.floor(Math.min(u0, u1) * bmpWidth));
+                const py = Math.max(0, Math.floor(Math.min(v0, v1) * bmpHeight));
+                const pw = Math.min(bmpWidth - px, Math.ceil(Math.abs(u1 - u0) * bmpWidth));
+                const ph = Math.min(bmpHeight - py, Math.ceil(Math.abs(v1 - v0) * bmpHeight));
+
+                if (pw > 0 && ph > 0) {
+                  let filledWithApi = false;
+                  if (typeof mod.FPDFBitmap_FillRect === 'function') {
+                    const fillOk = mod.FPDFBitmap_FillRect(bitmap, px, py, pw, ph, 0xFF000000);
+                    if (fillOk !== false) {
+                      filledWithApi = true;
+                      didWipePixels = true;
+                    }
+                  }
+                  if (!filledWithApi && bufferPtr && stride > 0) {
+                    const format = typeof mod.FPDFBitmap_GetFormat === 'function'
+                      ? mod.FPDFBitmap_GetFormat(bitmap)
+                      : 0;
+                    const bpp = (format === 4 || format === 3)
+                      ? 4
+                      : (format === 2 ? 3 : (format === 1 ? 1 : Math.max(1, Math.round(stride / bmpWidth))));
+                    const heapU8 = mod.pdfium.HEAPU8;
+                    for (let row = py; row < py + ph; row++) {
+                      const rowStart = bufferPtr + row * stride + px * bpp;
+                      const rowEnd = rowStart + pw * bpp;
+                      if (rowStart >= 0 && rowEnd <= heapU8.length) {
+                        for (let byteIdx = rowStart; byteIdx < rowEnd; byteIdx++) {
+                          const channel = (byteIdx - rowStart) % bpp;
+                          heapU8[byteIdx] = (bpp === 4 && channel === 3) ? 255 : 0;
+                        }
+                        didWipePixels = true;
+                      }
+                    }
+                  }
+                }
+              }
+
+              if (didWipePixels) {
+                const setOk = mod.FPDFImageObj_SetBitmap(0, 0, objHandle, bitmap);
+                if (setOk) {
+                  modified = true;
+                }
+              }
+            }
+          } finally {
+            if (typeof mod.FPDFBitmap_Destroy === 'function') {
+              mod.FPDFBitmap_Destroy(bitmap);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (objectsToRemove.length > 0) {
+    removeTextObjectsByIndex(mod, pageHandle, objectsToRemove);
+    modified = true;
+  }
+
+  if (modified) {
+    mod.FPDFPage_GenerateContent(pageHandle);
+  }
+
+  return modified;
+}
+
+interface SurvivingSegment {
+  text: string;
+  originX: number;
+  originY: number;
+  fontSize: number;
+  startCharIndex: number;
+}
+
+interface LineCharToken {
+  charData: PageCharacter;
+  hasPrecedingSpace: boolean;
+}
+
+function extractLineCharTokens(
+  line: Partial<TextLine> & {
+    left: number;
+    baselineY: number;
+    width: number;
+    fontSize: number;
+    text?: string;
+    charStartIndex?: number;
+    words?: TextWord[];
+  },
+  charMap: Map<number, PageCharacter>,
+  allCharacters: PageCharacter[]
+): LineCharToken[] {
+  const tokens: LineCharToken[] = [];
+
+  if (line.words && line.words.length > 0) {
+    for (let wIdx = 0; wIdx < line.words.length; wIdx++) {
+      const word = line.words[wIdx];
+      const prevWord = wIdx > 0 ? line.words[wIdx - 1] : null;
+      const hasSpace = prevWord
+        ? Boolean(word.hasPrecedingSpace) || (word.left - prevWord.right) >= Math.min(prevWord.fontSize, word.fontSize) * 0.18
+        : false;
+
+      for (let k = 0; k < word.charCount; k++) {
+        const cIdx = word.charStartIndex + k;
+        const charData = charMap.get(cIdx);
+        if (charData) {
+          tokens.push({
+            charData,
+            hasPrecedingSpace: k === 0 ? hasSpace : false,
+          });
+        }
+      }
+    }
+  }
+
+  if (tokens.length === 0) {
+    const matched = allCharacters.filter(
+      (c) =>
+        Math.abs(c.originY - line.baselineY) < 1.5 &&
+        c.left >= line.left - 2.5 &&
+        c.right <= line.left + line.width + 2.5
+    );
+    matched.sort((a, b) => a.originX - b.originX);
+
+    for (let i = 0; i < matched.length; i++) {
+      const c = matched[i];
+      const prev = i > 0 ? matched[i - 1] : null;
+      const hasSpace = prev ? (c.left - prev.right) >= Math.min(prev.fontSize, c.fontSize) * 0.18 : false;
+      tokens.push({
+        charData: c,
+        hasPrecedingSpace: hasSpace,
+      });
+    }
+  }
+
+  return tokens;
+}
+
+function partitionSurvivingSegments(
+  tokens: LineCharToken[],
+  isRedacted: (charIndex: number) => boolean,
+  handledCharIndices: Set<number>
+): { survivingSegments: SurvivingSegment[]; lineHasRedacted: boolean } {
+  const survivingSegments: SurvivingSegment[] = [];
+  let currentSeg: SurvivingSegment | null = null;
+  let lineHasRedacted = false;
+
+  for (const token of tokens) {
+    const isCharRedacted = isRedacted(token.charData.charIndex);
+    if (isCharRedacted) {
+      lineHasRedacted = true;
+      handledCharIndices.add(token.charData.charIndex);
+      if (currentSeg) {
+        currentSeg.text = currentSeg.text.trimEnd();
+        if (currentSeg.text.length > 0) {
+          survivingSegments.push(currentSeg);
+        }
+        currentSeg = null;
+      }
+    } else {
+      if (!currentSeg) {
+        if (token.charData.unicode.trim().length === 0) {
+          continue;
+        }
+        currentSeg = {
+          text: token.charData.unicode,
+          originX: token.charData.originX,
+          originY: token.charData.originY,
+          fontSize: token.charData.fontSize,
+          startCharIndex: token.charData.charIndex,
+        };
+      } else {
+        if (token.hasPrecedingSpace) {
+          currentSeg.text += ' ';
+        }
+        currentSeg.text += token.charData.unicode;
+      }
+    }
+  }
+
+  if (currentSeg) {
+    currentSeg.text = currentSeg.text.trimEnd();
+    if (currentSeg.text.length > 0) {
+      survivingSegments.push(currentSeg);
+    }
+  }
+
+  return { survivingSegments, lineHasRedacted };
+}
+
+function applySegmentPartitionToLine(
+  engine: PdfiumEngine,
+  mod: ReturnType<PdfiumEngine['getModule']>,
+  docHandle: number,
+  pageHandle: number,
+  line: Partial<TextLine> & {
+    left: number;
+    baselineY: number;
+    width: number;
+    fontSize: number;
+    fontFamily?: string;
+    rawFontFamily?: string;
+    fontWeight?: string;
+    fontStyle?: string;
+    color?: ColorRgba;
+  },
+  survivingSegments: SurvivingSegment[]
+): boolean {
+  const objectIndices = findTextObjectIndicesForSpan(
+    engine,
+    mod,
+    pageHandle,
+    line.left,
+    line.baselineY,
+    line.width,
+    line.fontSize
+  );
+
+  if (survivingSegments.length === 0) {
+    if (objectIndices.length > 0) {
+      removeTextObjectsByIndex(mod, pageHandle, objectIndices);
+    } else {
+      removeTextObjectsInBounds(
+        engine,
+        mod,
+        pageHandle,
+        line.left,
+        line.baselineY,
+        line.width,
+        line.fontSize
+      );
+    }
+    return true;
+  }
+
+  const baseObjHandle = objectIndices.length > 0
+    ? mod.FPDFPage_GetObject(pageHandle, objectIndices[0])
+    : 0;
+  const origMatrix = baseObjHandle
+    ? getPageObjectMatrix(engine, mod, baseObjHandle)
+    : null;
+
+  const countToUpdate = Math.min(survivingSegments.length, objectIndices.length);
+  for (let i = 0; i < countToUpdate; i++) {
+    const seg = survivingSegments[i];
+    const targetObjHandle = mod.FPDFPage_GetObject(pageHandle, objectIndices[i]);
+    const targetMatrix = targetObjHandle
+      ? getPageObjectMatrix(engine, mod, targetObjHandle)
+      : origMatrix;
+    const matrix: PdfMatrix = targetMatrix
+      ? { a: targetMatrix.a, b: targetMatrix.b, c: targetMatrix.c, d: targetMatrix.d, e: seg.originX, f: seg.originY }
+      : translationMatrix(seg.originX, seg.originY);
+
+    setTextObjectByIndex(engine, mod, pageHandle, objectIndices[i], seg.text, matrix);
+  }
+
+  if (objectIndices.length > survivingSegments.length) {
+    const surplusIndices = objectIndices.slice(survivingSegments.length);
+    removeTextObjectsByIndex(mod, pageHandle, surplusIndices);
+  }
+
+  if (survivingSegments.length > objectIndices.length) {
+    let fontHandle = 0;
+    if (baseObjHandle && typeof mod.FPDFTextObj_GetFont === 'function') {
+      fontHandle = mod.FPDFTextObj_GetFont(baseObjHandle);
+    }
+    if (!fontHandle) {
+      fontHandle = findPageFontHandle(engine, mod, pageHandle, line.fontFamily, line.rawFontFamily);
+    }
+    if (!fontHandle && docHandle) {
+      const stdName = mapStandardFontName(line.fontFamily || 'Helvetica', line.fontWeight, line.fontStyle);
+      fontHandle = mod.FPDFText_LoadStandardFont(docHandle, stdName);
+    }
+    if (!fontHandle && docHandle) {
+      fontHandle = mod.FPDFText_LoadStandardFont(docHandle, 'Helvetica');
+    }
+
+    const col = line.color || { r: 0, g: 0, b: 0, a: 255 };
+
+    if (typeof mod.FPDFPageObj_CreateTextObj === 'function' && docHandle && fontHandle) {
+      for (let i = objectIndices.length; i < survivingSegments.length; i++) {
+        const seg = survivingSegments[i];
+        const segFontSize = seg.fontSize || line.fontSize || 12;
+        const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, fontHandle, segFontSize);
+        if (textObjHandle) {
+          const textBuf = encodeUtf16Le(engine, seg.text);
+          try {
+            mod.FPDFText_SetText(textObjHandle, textBuf.ptr);
+            if (typeof mod.FPDFPageObj_SetFillColor === 'function') {
+              mod.FPDFPageObj_SetFillColor(textObjHandle, col.r, col.g, col.b, col.a);
+            }
+            const matrix: PdfMatrix = origMatrix
+              ? { a: origMatrix.a, b: origMatrix.b, c: origMatrix.c, d: origMatrix.d, e: seg.originX, f: seg.originY }
+              : translationMatrix(seg.originX, seg.originY);
+            setPageObjectMatrix(engine, mod, textObjHandle, matrix);
+            mod.FPDFPage_InsertObject(pageHandle, textObjHandle);
+          } finally {
+            textBuf.dispose();
+          }
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Permanently redacts only the characters within the specified DOM bounding rectangles,
+ * preserving surviving prefix and suffix text at stationary origin coordinates.
+ *
+ * @param engine The PDFium engine instance.
+ * @param _docHandle The active document handle.
+ * @param pageIndex Zero-based page index.
+ * @param pageHandle The active page handle.
+ * @param rects Array of bounding rectangles in DOM coordinates.
+ * @returns True if page content was modified.
+ */
+export function redactInRects(
+  engine: PdfiumEngine,
+  _docHandle: number,
+  pageIndex: number,
+  pageHandle: number,
+  rects: HighlightRect[]
+): boolean {
+  if (rects.length === 0 || !pageHandle) return false;
+  const mod = engine.getModule();
+  const docHandle = _docHandle || engine.getDocumentHandle() || 0;
+
+  const normalizedRects = rects.map((r) => ({
+    x: Math.min(r.x, r.x + r.width),
+    y: Math.min(r.y, r.y + r.height),
+    width: Math.abs(r.width),
+    height: Math.abs(r.height),
+  }));
+
+  const allCharacters = extractPageCharacters(engine, pageIndex, pageHandle);
+  const redactedCharIndices = new Set<number>();
+  const charMap = new Map<number, PageCharacter>();
+
+  for (const c of allCharacters) {
+    charMap.set(c.charIndex, c);
+    const midX = (c.domLeft + c.domRight) / 2;
+    const midY = (c.domTop + c.domBottom) / 2;
+
+    for (const r of normalizedRects) {
+      if (midX >= r.x && midX <= r.x + r.width && midY >= r.y && midY <= r.y + r.height) {
+        redactedCharIndices.add(c.charIndex);
+        break;
+      }
+    }
+  }
+
+  if (redactedCharIndices.size === 0) {
+    return false;
+  }
+
+  const spans = extractEditableSpans(engine, pageIndex, pageHandle);
+  let modified = false;
+  const handledCharIndices = new Set<number>();
+  const isRedacted = (charIndex: number): boolean => redactedCharIndices.has(charIndex);
+
+  for (const span of spans) {
+    const targetLines: Array<Partial<TextLine> & {
+      left: number;
+      baselineY: number;
+      width: number;
+      fontSize: number;
+      text?: string;
+      charStartIndex?: number;
+      words?: TextWord[];
+      fontFamily?: string;
+      rawFontFamily?: string;
+      fontWeight?: string;
+      fontStyle?: string;
+      color?: ColorRgba;
+    }> = span.lines && span.lines.length > 0 ? span.lines : [{
+      left: span.left,
+      baselineY: span.baselineY,
+      width: span.width,
+      fontSize: span.fontSize,
+      text: span.text,
+      charStartIndex: span.charStartIndex,
+      color: span.color,
+      fontFamily: span.fontFamily,
+      rawFontFamily: span.rawFontFamily,
+      fontWeight: span.fontWeight,
+      fontStyle: span.fontStyle,
+    }];
+
+    for (const line of targetLines) {
+      const tokens = extractLineCharTokens(line, charMap, allCharacters);
+      const { survivingSegments, lineHasRedacted } = partitionSurvivingSegments(
+        tokens,
+        isRedacted,
+        handledCharIndices
+      );
+
+      if (!lineHasRedacted) continue;
+
+      const lineModified = applySegmentPartitionToLine(
+        engine,
+        mod,
+        docHandle,
+        pageHandle,
+        line,
+        survivingSegments
+      );
+      if (lineModified) modified = true;
+    }
+  }
+
+  const remainingChars = allCharacters.filter(
+    (c) => isRedacted(c.charIndex) && !handledCharIndices.has(c.charIndex)
+  );
+
+  for (const char of remainingChars) {
+    const objectIndices = findTextObjectIndicesForSpan(
+      engine,
+      mod,
+      pageHandle,
+      char.left,
+      char.originY,
+      Math.max(1, char.right - char.left),
+      char.fontSize
+    );
+    if (objectIndices.length > 0) {
+      removeTextObjectsByIndex(mod, pageHandle, objectIndices);
+      modified = true;
+    }
+  }
+
+  return modified;
+}
+
+/**
+ * Permanently removes all text and wipes images within the specified DOM bounding rectangles
+ * from the PDF page content stream and regenerates page content.
+ *
+ * Supports both full signature with docHandle and pageIndex for character-level precision
+ * and legacy signature for backwards compatibility.
+ *
+ * @param engine The PDFium engine instance.
+ * @param pageHandle Active page handle.
+ * @param rects Array of bounding rectangles in DOM coordinates.
+ * @returns True if page content was modified.
+ */
+export function removeTextInRects(
+  engine: PdfiumEngine,
+  pageHandle: number,
+  rects: HighlightRect[]
+): boolean;
+/**
+ * Permanently removes all text and wipes images within the specified DOM bounding rectangles
+ * from the PDF page content stream and regenerates page content.
+ *
+ * @param engine The PDFium engine instance.
+ * @param docHandle Active document handle for character-level precision.
+ * @param pageIndex Zero-based page index.
+ * @param pageHandle Active page handle.
+ * @param rects Array of bounding rectangles in DOM coordinates.
+ * @returns True if page content was modified.
+ */
+export function removeTextInRects(
+  engine: PdfiumEngine,
+  docHandle: number,
+  pageIndex: number,
+  pageHandle: number,
+  rects: HighlightRect[]
+): boolean;
+export function removeTextInRects(
+  engine: PdfiumEngine,
+  docHandleOrPageHandle: number,
+  pageIndexOrRects: number | HighlightRect[],
+  pageHandleOrUndefined?: number,
+  rectsOrUndefined?: HighlightRect[]
+): boolean {
+  let docHandle = 0;
+  let pageIndex = 0;
+  let pageHandle = 0;
+  let rects: HighlightRect[] = [];
+
+  if (
+    typeof pageIndexOrRects === 'number' &&
+    typeof pageHandleOrUndefined === 'number' &&
+    Array.isArray(rectsOrUndefined)
+  ) {
+    docHandle = docHandleOrPageHandle;
+    pageIndex = pageIndexOrRects;
+    pageHandle = pageHandleOrUndefined;
+    rects = rectsOrUndefined;
+  } else if (Array.isArray(pageIndexOrRects)) {
+    pageHandle = docHandleOrPageHandle;
+    rects = pageIndexOrRects;
+  }
+
+  if (rects.length === 0 || !pageHandle) return false;
+
+  const mod = engine.getModule();
+  let modified = false;
+
+  const didRedactText = redactInRects(engine, docHandle, pageIndex, pageHandle, rects);
+  if (didRedactText) modified = true;
+
+  const didWipeImages = wipeImagesInRects(engine, pageHandle, rects);
+  if (didWipeImages) modified = true;
+
+  const normalizedRects = rects.map((r) => ({
+    x: Math.min(r.x, r.x + r.width),
+    y: Math.min(r.y, r.y + r.height),
+    width: Math.abs(r.width),
+    height: Math.abs(r.height),
+  }));
+  const didRemoveEnclosed = removeTextObjectsInRects(engine, mod, pageHandle, normalizedRects);
+  if (didRemoveEnclosed) modified = true;
+
+  if (modified) {
     mod.FPDFPage_GenerateContent(pageHandle);
   }
   return didRemove;
