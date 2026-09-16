@@ -144,6 +144,12 @@ export interface FormFieldPlaceholderOptions extends DrawOptions {
   value?: string | boolean;
   /** Option choices for choice fields. */
   options?: string[];
+  /** Whether multi-line text input is enabled. */
+  multiline?: boolean;
+  /** Whether characters are masked as a password field. */
+  password?: boolean;
+  /** Maximum character limit. */
+  maxLength?: number;
   /** Original native AcroForm field name if promoted/extracted from document. */
   sourceFieldName?: string;
 }
