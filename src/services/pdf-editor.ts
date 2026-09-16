@@ -16,6 +16,8 @@ import type { SignPdfOptions, SignatureValidationResult } from './pdf/operations
 import type { WorkspaceFile } from '../stores/editor.svelte';
 import { deleteFileBuffer, clearAllFileBuffers } from '../stores/editor.svelte';
 import type { ElementRegistry, BurnContext } from '../core/element-registry';
+import { unlockAcroFormFields, type UnlockFormsResult } from './pdf/operations/form-ops';
+import type { SecurityOptions } from './pdf/operations/security-ops';
 
 /**
  * Manages the PDF editor workspace and provides direct access to the PdfDocument facade.
@@ -66,14 +68,43 @@ export class PdfEditorService {
   /**
    * Loads a PDF document from an ArrayBuffer into the active engine.
    * @param buffer The ArrayBuffer containing the PDF document.
+   * @param password Optional password for opening encrypted documents.
    */
-  public loadDocumentFromBuffer(buffer: ArrayBuffer): void {
+  public loadDocumentFromBuffer(buffer: ArrayBuffer, password: string = ''): void {
     if (this._document) {
       this._document.closeAllPages();
     }
     this._document = null;
-    this.engine.loadDocumentFromBuffer(buffer);
+    this.engine.loadDocumentFromBuffer(buffer, password);
     this.document.setRawBuffer(buffer);
+  }
+
+  /**
+   * Unlocks AcroForm interactive form fields and widget annotations.
+   */
+  public async unlockAcroFormFields(bytes: Uint8Array): Promise<UnlockFormsResult> {
+    return unlockAcroFormFields(bytes);
+  }
+
+  /**
+   * Applies ISO 32000 standard encryption and access permissions to the active document.
+   */
+  public applyPasswordSecurity(options: SecurityOptions): { success: boolean; isEncrypted: boolean; permissions: number } {
+    return this.document.applySecurity(options);
+  }
+
+  /**
+   * Removes encryption and security restrictions from the active document.
+   */
+  public removePasswordSecurity(ownerPassword?: string): { success: boolean } {
+    return this.document.removeSecurity(ownerPassword);
+  }
+
+  /**
+   * Authenticates with owner password to unlock administrative permissions.
+   */
+  public unlockOwnerPermissions(ownerPassword: string): boolean {
+    return this.document.unlockOwnerPermissions(ownerPassword);
   }
 
   /**
