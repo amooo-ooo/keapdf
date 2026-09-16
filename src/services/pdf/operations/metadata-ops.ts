@@ -331,7 +331,9 @@ export function getDocumentInfo(
   const mod = engine.getModule();
   const pageCount = mod.FPDF_GetPageCount(docHandle);
   const isEncrypted = mod.EPDF_IsEncrypted(docHandle);
-  const permissions = mod.FPDF_GetDocPermissions(docHandle);
+  const permissions = mod.FPDF_GetDocUserPermissions
+    ? mod.FPDF_GetDocUserPermissions(docHandle)
+    : mod.FPDF_GetDocPermissions(docHandle);
 
   const versionPtr = engine.allocateMemory(4);
   let versionStr = '1.4';
@@ -417,7 +419,9 @@ export async function extractAllMetadata(
 
   const pageCount = mod.FPDF_GetPageCount(docHandle);
   const isEncrypted = mod.EPDF_IsEncrypted(docHandle);
-  const permissions = mod.FPDF_GetDocPermissions(docHandle);
+  const permissions = mod.FPDF_GetDocUserPermissions
+    ? mod.FPDF_GetDocUserPermissions(docHandle)
+    : mod.FPDF_GetDocPermissions(docHandle);
   const signaturesCount = mod.FPDF_GetSignatureCount(docHandle);
   const attachmentsCount = mod.FPDFDoc_GetAttachmentCount(docHandle);
 
