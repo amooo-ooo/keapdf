@@ -15,45 +15,70 @@ import type {
   FormatConverter,
 } from '../types';
 import { layoutFlowDocument } from '../pdf-layout-engine';
+import { sanitizeTextForWinAnsi } from '../winansi-sanitizer';
+
+/**
+ * Pretty prints JSON text with 2-space indentation, falling back to raw text if invalid.
+ */
+export function formatJsonText(text: string): string {
+  try {
+    const parsed = JSON.parse(text);
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return text;
+  }
+}
 
 /**
  * Parses inline Markdown formatting into styled runs.
- * Supports **bold**, *italic*, `code`, and ~~strike~~.
+ * Supports links, bold, italic, code, strikethrough, and literal characters.
  */
 export function parseInlineMarkdown(text: string): StyledRun[] {
   const runs: StyledRun[] = [];
-  const regex = /(\*\*|__)(.*?)\1|(\*|_)(.*?)\3|(`)(.*?)\5|(~~)(.*?)\7|([^*_`~]+)/g;
+  const regex =
+    /\[([^\]]+)\]\(([^)]+)\)|(\*\*|__)(.*?)\3|(\*|_)(.*?)\5|(`)(.*?)\7|(~~)(.*?)\9|([^*_`~\[\]]+)|([*_`~\[\]])/g;
 
   let match: RegExpExecArray | null;
   while ((match = regex.exec(text)) !== null) {
-    if (match[2] !== undefined) {
-      // Bold
+    if (match[1] !== undefined) {
+      // Link: [text](url)
       runs.push({
-        text: match[2],
-        style: { bold: true },
+        text: match[1],
+        style: { fontColor: '#1D4ED8', underline: true },
       });
     } else if (match[4] !== undefined) {
-      // Italic
+      // Bold
       runs.push({
         text: match[4],
-        style: { italic: true },
+        style: { bold: true },
       });
     } else if (match[6] !== undefined) {
-      // Inline code
+      // Italic
       runs.push({
         text: match[6],
-        style: { fontFamily: 'courier', fontColor: '#1E293B' },
+        style: { italic: true },
       });
     } else if (match[8] !== undefined) {
-      // Strikethrough
+      // Inline code
       runs.push({
         text: match[8],
+        style: { fontFamily: 'courier', fontColor: '#1E293B' },
+      });
+    } else if (match[10] !== undefined) {
+      // Strikethrough
+      runs.push({
+        text: match[10],
         style: { strike: true },
       });
-    } else if (match[9] !== undefined) {
-      // Plain text
+    } else if (match[11] !== undefined) {
+      // Plain text chunk
       runs.push({
-        text: match[9],
+        text: match[11],
+      });
+    } else if (match[12] !== undefined) {
+      // Literal delimiter character to prevent character dropping
+      runs.push({
+        text: match[12],
       });
     }
   }
@@ -101,6 +126,13 @@ function parseMarkdownTable(lines: string[]): TableBlock | null {
 }
 
 /**
+ * Checks whether a trimmed line represents a Markdown horizontal rule.
+ */
+function isHorizontalRule(line: string): boolean {
+  return /^(\*{3,}|-{3,}|_{3,}|(-\s*){3,}|(\*\s*){3,}|(_\s*){3,})$/.test(line);
+}
+
+/**
  * Parses Markdown source text into an IDR FlowDocument.
  */
 export function parseMarkdownText(markdown: string, baseTitle?: string): FlowDocument {
@@ -110,6 +142,7 @@ export function parseMarkdownText(markdown: string, baseTitle?: string): FlowDoc
 
   let i = 0;
   while (i < lines.length) {
+    const prevI = i;
     const line = lines[i];
     const trimmed = line.trim();
 
@@ -137,12 +170,13 @@ export function parseMarkdownText(markdown: string, baseTitle?: string): FlowDoc
       continue;
     }
 
-    // Headings: # H1, ## H2, ### H3, #### H4
-    const headingMatch = /^(#{1,4})\s+(.+)$/.exec(trimmed);
+    // Headings: # H1 through ###### H6
+    const headingMatch = /^(#{1,6})\s+(.+)$/.exec(trimmed);
     if (headingMatch) {
-      const level = headingMatch[1].length as 1 | 2 | 3 | 4;
+      const rawLevel = headingMatch[1].length;
+      const level = Math.min(rawLevel, 4) as 1 | 2 | 3 | 4;
       const text = headingMatch[2].trim();
-      if (level === 1) {
+      if (rawLevel === 1) {
         docTitle = text;
       }
       blocks.push({
@@ -154,8 +188,8 @@ export function parseMarkdownText(markdown: string, baseTitle?: string): FlowDoc
       continue;
     }
 
-    // Horizontal Rule: ---, ***, ___
-    if (/^(\*{3,}|-{3,}|_{3,})$/.test(trimmed)) {
+    // Horizontal Rule: ---, ***, ___, including spaced variations "- - -"
+    if (isHorizontalRule(trimmed)) {
       blocks.push({ type: 'divider' });
       i++;
       continue;
@@ -226,14 +260,20 @@ export function parseMarkdownText(markdown: string, baseTitle?: string): FlowDoc
     while (
       i < lines.length &&
       lines[i].trim().length > 0 &&
-      !lines[i].trim().startsWith('#') &&
+      !/^(#{1,6})\s+/.test(lines[i].trim()) &&
       !lines[i].trim().startsWith('```') &&
       !lines[i].trim().startsWith('>') &&
       !lines[i].trim().startsWith('|') &&
       !/^[-*+]\s+/.test(lines[i].trim()) &&
       !/^\d+\.\s+/.test(lines[i].trim()) &&
-      !/^(\*{3,}|-{3,}|_{3,})$/.test(lines[i].trim())
+      !isHorizontalRule(lines[i].trim())
     ) {
+      paraLines.push(lines[i].trim());
+      i++;
+    }
+
+    // Safeguard ensuring loop progress
+    if (i === prevI) {
       paraLines.push(lines[i].trim());
       i++;
     }
@@ -337,21 +377,38 @@ export class TextConverter implements FormatConverter {
     options?: DocumentConversionOptions
   ): Promise<ConvertedDocumentResult> {
     const startTime = Date.now();
-    const baseName = input.name.replace(/\.[^/.]+$/, '');
+    const baseName = input.name.replace(/\.[^/.]+$/, '') || 'document';
     const lower = input.name.toLowerCase();
 
     const rawText = typeof input.buffer === 'string'
       ? input.buffer
       : new TextDecoder('utf-8').decode(input.buffer);
 
+    const isJson = lower.endsWith('.json') || input.mimeType === 'application/json';
     const isMarkdown = lower.endsWith('.md') || lower.endsWith('.markdown') || input.mimeType === 'text/markdown';
-    const isCode = lower.endsWith('.json') || lower.endsWith('.xml') || lower.endsWith('.yaml') || lower.endsWith('.yml') || lower.endsWith('.log') || lower.endsWith('.js') || lower.endsWith('.ts');
+    const isCode =
+      isJson ||
+      lower.endsWith('.xml') ||
+      lower.endsWith('.html') ||
+      lower.endsWith('.htm') ||
+      lower.endsWith('.yaml') ||
+      lower.endsWith('.yml') ||
+      lower.endsWith('.log') ||
+      lower.endsWith('.js') ||
+      lower.endsWith('.ts') ||
+      lower.endsWith('.rtf') ||
+      (input.mimeType !== undefined && (input.mimeType.includes('xml') || input.mimeType.includes('yaml')));
+
+    // Normalise encoding and strip BOM
+    const sanitisedText = sanitizeTextForWinAnsi(rawText);
 
     let flowDoc: FlowDocument;
     if (isMarkdown) {
-      flowDoc = parseMarkdownText(rawText, baseName);
+      flowDoc = parseMarkdownText(sanitisedText, baseName);
+    } else if (isJson) {
+      flowDoc = parsePlainText(formatJsonText(sanitisedText), baseName, true);
     } else {
-      flowDoc = parsePlainText(rawText, baseName, isCode);
+      flowDoc = parsePlainText(sanitisedText, baseName, isCode);
     }
 
     const doc = await PDFDocument.create();
@@ -369,7 +426,7 @@ export class TextConverter implements FormatConverter {
       buffer,
       pageCount,
       fileName: `${baseName}.pdf`,
-      format: isMarkdown ? 'markdown' : isCode ? 'code' : 'text',
+      format: isJson ? 'json' : isMarkdown ? 'markdown' : isCode ? 'code' : 'text',
       metadata: {
         title: flowDoc.title ?? baseName,
         wordCount,
