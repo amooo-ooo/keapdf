@@ -1,6 +1,6 @@
 import type { PdfiumEngine } from '../../core/pdfium-engine';
-import type { TextOptions, ShapeOptions, ImageOptions, FormFieldPlaceholderOptions } from './operations/types';
-import type { EditableTextSpan, EditableFormFieldSpan, TextMutationOptions, AnnotationItem, EditableImageSpan, EditableShapeSpan, PageCharacter, PageCropInfo } from '../../core/types';
+import type { TextOptions, ShapeOptions, ImageOptions, FormFieldPlaceholderOptions, PathOptions } from './operations/types';
+import type { EditableTextSpan, EditableFormFieldSpan, TextMutationOptions, AnnotationItem, EditableImageSpan, EditableShapeSpan, PageCharacter, PageCropInfo, HighlightRect, PdfMatrix } from '../../core/types';
 import type { FontCharsetIndex } from './font-charset-index';
 import { getPageObjectMatrix, getPageCropInfo, pdfBoxToDomBounds, pdfToDomCoords } from '../../core/pdfium-helpers';
 
@@ -21,7 +21,7 @@ import type { ContentBounds } from './operations/crop-ops';
  */
 export class PdfPage {
   /**
-   * Initializes a new PdfPage.
+   * Initialises a new PdfPage.
    * @param engine The underlying PDFium engine instance.
    * @param pageIndex The zero-based index of this page.
    * @param docHandle The handle of the parent document.
@@ -151,7 +151,7 @@ export class PdfPage {
   }
 
   /**
-   * Analyzes the page content stream to extract text blocks that can be natively edited.
+   * Analyses the page content stream to extract text blocks that can be natively edited.
    * @returns An array of EditableTextSpan objects.
    */
   public extractTextSpans(): EditableTextSpan[] {
@@ -171,7 +171,7 @@ export class PdfPage {
   /**
    * Extracts all individual character metrics and bounding boxes on the page.
    *
-   * @return An array of PageCharacter objects.
+   * @returns An array of PageCharacter objects.
    */
   public extractCharacters(): PageCharacter[] {
     this.assertNotDisposed();
@@ -207,25 +207,31 @@ export class PdfPage {
   }
 
   /**
-   * Permanently deletes all text objects that fall within the specified bounding rectangles.
-   * Used for free-form area / marquee redactions.
+   * Permanently deletes text and wipes images that fall within or intersect the specified bounding rectangles.
+   * Used for free-form area redactions.
    *
    * @param rects Array of bounding rectangles in DOM coordinates to redact.
-   * @return The current PdfPage instance for chaining.
+   * @returns The current PdfPage instance for chaining.
    */
-  public deleteTextInRects(rects: import('../../core/types').HighlightRect[]): this {
+  public deleteTextInRects(rects: HighlightRect[]): this {
     this.assertNotDisposed();
-    textEditOps.removeTextInRects(this.engine, this.pageHandle, rects);
+    textEditOps.removeTextInRects(
+      this.engine,
+      this.docHandle,
+      this.pageIndex,
+      this.pageHandle,
+      rects
+    );
     return this;
   }
 
   /**
    * Permanently redacts only the characters in the specified character range,
-   * leaving neighboring text and surrounding spans completely intact.
+   * leaving neighbouring text and surrounding spans completely intact.
    *
    * @param startIndex Starting character index (inclusive).
    * @param endIndex Ending character index (inclusive).
-   * @return The current PdfPage instance for chaining.
+   * @returns The current PdfPage instance for chaining.
    */
   public redactTextRange(startIndex: number, endIndex: number): this {
     this.assertNotDisposed();
@@ -247,7 +253,7 @@ export class PdfPage {
    * @param matrix The new transformation matrix.
    * @returns boolean true if successfully updated, false otherwise.
    */
-  public updateTextSpanTransform(targetSpan: EditableTextSpan, newText: string, matrix: import('../../core/types').PdfMatrix): boolean {
+  public updateTextSpanTransform(targetSpan: EditableTextSpan, newText: string, matrix: PdfMatrix): boolean {
     this.assertNotDisposed();
     return textEditOps.updateTextSpanTransform(this.engine, this.pageHandle, targetSpan, newText, matrix);
   }
@@ -305,7 +311,7 @@ export class PdfPage {
   }
 
   /**
-   * Analyzes the page content stream to extract editable objects (images, shapes).
+   * Analyses the page content stream to extract editable objects (images, shapes).
    * @returns An object containing arrays of EditableImageSpan and EditableShapeSpan.
    */
   public extractObjects(): {
@@ -335,7 +341,7 @@ export class PdfPage {
         if (!objHandle) continue;
 
         const objType = mod.FPDFPageObj_GetType(objHandle);
-        // 1: Text, 2: Path, 3: Image, 4: Shading, 5: Form
+        // Object types: text, path, image, shading, form
 
         if (objType === 3 || objType === 2) {
           const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
@@ -410,7 +416,7 @@ export class PdfPage {
                                   imgData.data[dstIdx + 1] = rawBytes[srcIdx + 1]; // G
                                   imgData.data[dstIdx + 2] = rawBytes[srcIdx];     // B
                                   imgData.data[dstIdx + 3] = 255;
-                                } else if (format === 1) { // Grayscale
+                                } else if (format === 1) { // Greyscale
                                   imgData.data[dstIdx] = rawBytes[srcIdx];
                                   imgData.data[dstIdx + 1] = rawBytes[srcIdx];
                                   imgData.data[dstIdx + 2] = rawBytes[srcIdx];
@@ -467,11 +473,11 @@ export class PdfPage {
                   imgFlipY = true;
                 }
 
-                // Center of the image in PDF coordinates
+                // Centre of the image in PDF coordinates
                 const centerPdfX = matrix.e + (matrix.a + matrix.c) / 2;
                 const centerPdfY = matrix.f + (matrix.b + matrix.d) / 2;
 
-                // Convert center to DOM coordinates (origin top-left)
+                // Convert centre to DOM coordinates (origin top-left)
                 let centerDomX: number;
                 let centerDomY: number;
 
@@ -565,7 +571,7 @@ export class PdfPage {
     let maxRight = -Infinity;
     let maxBottom = -Infinity;
 
-    // 1. Fast character bounding scan
+    // Fast character bounding scan
     let textPageHandle = 0;
     try {
       textPageHandle = mod.FPDFText_LoadPage(this.pageHandle);
@@ -627,7 +633,7 @@ export class PdfPage {
       }
     }
 
-    // 2. Fast object bounding scan (paths, images)
+    // Fast object bounding scan (paths, images)
     const objectCount = mod.FPDFPage_CountObjects(this.pageHandle);
     if (objectCount > 0 && typeof mod.FPDFPageObj_GetBounds === 'function') {
       const leftPtr = this.engine.allocateMemory(4);
@@ -755,7 +761,7 @@ export class PdfPage {
    * @param options The path coordinates and styling.
    * @returns The current PdfPage instance for chaining.
    */
-  public drawPath(options: import('./operations/types').PathOptions): this {
+  public drawPath(options: PathOptions): this {
     this.assertNotDisposed();
     drawPath(this.engine, this.pageHandle, options);
     return this;
@@ -777,7 +783,7 @@ export class PdfPage {
    * @param options The path coordinates and styling for the ink.
    * @returns The current PdfPage instance for chaining.
    */
-  public addInkAnnotation(options: import('./operations/types').PathOptions): this {
+  public addInkAnnotation(options: PathOptions): this {
     this.assertNotDisposed();
     addInkAnnotation(this.engine, this.pageHandle, options);
     return this;
