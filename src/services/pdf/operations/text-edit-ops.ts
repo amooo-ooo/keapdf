@@ -1440,24 +1440,25 @@ export function removeTextInRects(
   if (modified) {
     mod.FPDFPage_GenerateContent(pageHandle);
   }
-  return didRemove;
+
+  return modified;
 }
 
 /**
  * Permanently redacts only the characters in the specified character range [startCharIndex, endCharIndex]
  * from the PDF page content stream.
  *
- * Uses center-containment span matching and character-level replacement to ensure that
- * only the selected characters are removed, leaving neighboring text and surrounding
+ * Uses centre-containment span matching and character-level replacement to ensure that
+ * only the selected characters are removed, leaving neighbouring text and surrounding
  * spans completely intact.
  *
  * @param engine The PDFium engine instance.
- * @param docHandle The active document handle.
+ * @param _docHandle The active document handle.
  * @param pageIndex Zero-based page index.
  * @param pageHandle The active page handle.
  * @param startCharIndex Starting character index (inclusive).
  * @param endCharIndex Ending character index (inclusive).
- * @return True if page content was modified.
+ * @returns True if page content was modified.
  */
 export function redactTextRange(
   engine: PdfiumEngine,
@@ -1468,13 +1469,21 @@ export function redactTextRange(
   endCharIndex: number
 ): boolean {
   const mod = engine.getModule();
+  const docHandle = _docHandle || engine.getDocumentHandle() || 0;
   const minIndex = Math.min(startCharIndex, endCharIndex);
   const maxIndex = Math.max(startCharIndex, endCharIndex);
+
+  const allCharacters = extractPageCharacters(engine, pageIndex, pageHandle);
+  const charMap = new Map<number, PageCharacter>();
+  for (const c of allCharacters) {
+    charMap.set(c.charIndex, c);
+  }
 
   const spans = extractEditableSpans(engine, pageIndex, pageHandle);
   let modified = false;
 
   const handledCharIndices = new Set<number>();
+  const isRedacted = (charIndex: number): boolean => charIndex >= minIndex && charIndex <= maxIndex;
 
   for (const span of spans) {
     const spanStart = span.charStartIndex;
@@ -1482,7 +1491,7 @@ export function redactTextRange(
 
     // Check if span has any overlap with the selected redaction range
     if (spanEnd < minIndex || spanStart > maxIndex) {
-      // No overlap: leave completely untouched to preserve neighbors
+      // No overlap: leave completely untouched to preserve neighbours
       continue;
     }
 
@@ -1516,87 +1525,60 @@ export function redactTextRange(
         handledCharIndices.add(c);
       }
     } else {
-      // Partial overlap: only some characters in this span are redacted
-      let pdfCharIdx = spanStart;
-      const targetLines = span.lines && span.lines.length > 0 ? span.lines : [{
+      // Partial overlap: partition lines into origin-anchored surviving segments
+      const targetLines: Array<Partial<TextLine> & {
+        left: number;
+        baselineY: number;
+        width: number;
+        fontSize: number;
+        text?: string;
+        charStartIndex?: number;
+        words?: TextWord[];
+        fontFamily?: string;
+        rawFontFamily?: string;
+        fontWeight?: string;
+        fontStyle?: string;
+        color?: ColorRgba;
+      }> = span.lines && span.lines.length > 0 ? span.lines : [{
         left: span.left,
         baselineY: span.baselineY,
         width: span.width,
         fontSize: span.fontSize,
-        text: span.text
+        text: span.text,
+        charStartIndex: span.charStartIndex,
+        color: span.color,
+        fontFamily: span.fontFamily,
+        rawFontFamily: span.rawFontFamily,
+        fontWeight: span.fontWeight,
+        fontStyle: span.fontStyle,
       }];
 
       for (const line of targetLines) {
-        if (!line.text) continue;
-        
-        const lineChars = Array.from(line.text);
-        let hasRedactedChars = false;
-        
-        const updatedChars = lineChars.map((ch) => {
-          if (ch === '\n' || ch === '\r') {
-            return ch;
-          }
-          const cIdx = pdfCharIdx++;
-          if (cIdx >= minIndex && cIdx <= maxIndex) {
-            hasRedactedChars = true;
-            handledCharIndices.add(cIdx);
-            return ' ';
-          }
-          return ch;
-        });
+        const tokens = extractLineCharTokens(line, charMap, allCharacters);
+        const { survivingSegments, lineHasRedacted } = partitionSurvivingSegments(
+          tokens,
+          isRedacted,
+          handledCharIndices
+        );
 
-        if (hasRedactedChars) {
-          const updatedText = updatedChars.join('');
-          const objectIndices = findTextObjectIndicesForSpan(
-            engine,
-            mod,
-            pageHandle,
-            line.left,
-            line.baselineY,
-            line.width,
-            line.fontSize
-          );
+        if (!lineHasRedacted) continue;
 
-          if (objectIndices.length > 0) {
-            setTextObjectByIndex(engine, mod, pageHandle, objectIndices[0], updatedText);
-            for (let k = 1; k < objectIndices.length; k++) {
-              setTextObjectByIndex(engine, mod, pageHandle, objectIndices[k], ' ');
-            }
-            modified = true;
-          } else {
-            // Spatial fallback
-            const didSet = setTextObjectInBounds(
-              engine,
-              mod,
-              pageHandle,
-              line.left,
-              line.baselineY,
-              line.width,
-              line.fontSize,
-              updatedText
-            );
-            if (didSet) {
-              modified = true;
-            }
-          }
-        } else {
-          // Still increment pdfCharIdx for untouched lines
-          for (const ch of lineChars) {
-            if (ch !== '\n' && ch !== '\r') pdfCharIdx++;
-          }
-        }
+        const lineModified = applySegmentPartitionToLine(
+          engine,
+          mod,
+          docHandle,
+          pageHandle,
+          line,
+          survivingSegments
+        );
+        if (lineModified) modified = true;
       }
     }
   }
 
-  if (modified) {
-    mod.FPDFPage_GenerateContent(pageHandle);
-  }
-
   // Handle any remaining standalone characters in the selection that were not in clustered spans
-  const allCharacters = extractPageCharacters(engine, pageIndex, pageHandle);
   const remainingChars = allCharacters.filter(
-    (c) => c.charIndex >= minIndex && c.charIndex <= maxIndex && !handledCharIndices.has(c.charIndex)
+    (c) => isRedacted(c.charIndex) && !handledCharIndices.has(c.charIndex)
   );
 
   for (const char of remainingChars) {
@@ -1610,10 +1592,7 @@ export function redactTextRange(
       char.fontSize
     );
     if (objectIndices.length > 0) {
-      setTextObjectByIndex(engine, mod, pageHandle, objectIndices[0], ' ');
-      for (let k = 1; k < objectIndices.length; k++) {
-        setTextObjectByIndex(engine, mod, pageHandle, objectIndices[k], ' ');
-      }
+      removeTextObjectsByIndex(mod, pageHandle, objectIndices);
       modified = true;
     }
   }
