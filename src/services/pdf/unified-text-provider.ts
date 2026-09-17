@@ -505,7 +505,8 @@ export function findClosestUnifiedCharacter(
     const c = candidates[i];
     const dx = x < c.domLeft ? c.domLeft - x : x > c.domRight ? x - c.domRight : 0;
     const dy = y < c.domTop ? c.domTop - y : y > c.domBottom ? y - c.domBottom : 0;
-    const distSq = dx * dx + dy * dy;
+    // Apply vertical dampening (dy * dy * 2.0) to prevent line jumping during horizontal drags
+    const distSq = dx * dx + dy * dy * 2.0;
 
     if (distSq < minDistanceSq) {
       minDistanceSq = distSq;
@@ -514,6 +515,54 @@ export function findClosestUnifiedCharacter(
   }
 
   return closestChar;
+}
+
+/**
+ * Line segment metrics for text-aware underline annotations.
+ */
+export interface UnderlineSegment {
+  startX: number;
+  endX: number;
+  lineY: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Calculates underline line segments for a character range across PDF and canvas text layers.
+ *
+ * @param characters Combined unified page characters.
+ * @param startIndex Starting character index.
+ * @param endIndex Ending character index.
+ * @param strokeWidth Line thickness in PDF points.
+ * @return Array of underline line segments positioned along the character baseline.
+ */
+export function calculateUnifiedUnderlines(
+  characters: PageCharacter[],
+  startIndex: number,
+  endIndex: number,
+  strokeWidth: number = 2
+): UnderlineSegment[] {
+  const rects = calculateUnifiedHighlightRects(characters, startIndex, endIndex);
+  const segments: UnderlineSegment[] = [];
+
+  for (const rect of rects) {
+    if (rect.width <= 0) continue;
+    // Calibrate underline baseline: if baselineY is available, place line 1.5pt below baseline
+    const lineY = rect.baselineY !== undefined
+      ? rect.baselineY + Math.max(1.5, strokeWidth * 0.5)
+      : rect.y + rect.height - strokeWidth * 0.5;
+
+    segments.push({
+      startX: rect.x,
+      endX: rect.x + rect.width,
+      lineY,
+      width: rect.width,
+      height: strokeWidth,
+    });
+  }
+
+  return segments;
 }
 
 /**
@@ -600,6 +649,7 @@ export function calculateUnifiedHighlightRects(
         y: top,
         width,
         height,
+        baselineY: avgBaseline,
       });
     }
   }
