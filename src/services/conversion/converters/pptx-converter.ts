@@ -23,10 +23,11 @@ import {
   getAttribute,
 } from '../xml-parser';
 import { layoutSlideDocument } from '../pdf-layout-engine';
+import { sanitizeTextForWinAnsi } from '../winansi-sanitizer';
 
 /**
  * Converts English Metric Units (EMUs) to PDF points.
- * 1 inch = 914,400 EMUs = 72 PDF points. (1 pt = 12,700 EMUs)
+ * 1 inch = 914,400 EMUs = 72 PDF points (1 pt = 12,700 EMUs).
  */
 function emuToPoints(emu?: string | number): number {
   if (!emu) return 0;
@@ -58,7 +59,8 @@ function parseSlideXml(xml: string, slideIndex: number): SlideData {
 
     for (const p of pNodes) {
       const tNodes = findDescendants(p, 't');
-      const text = tNodes.map((t) => t.text).join('').trim();
+      const rawText = tNodes.map((t) => t.text).join('').trim();
+      const text = sanitizeTextForWinAnsi(rawText);
       if (text.length === 0) continue;
 
       if (isTitlePh && !slideTitle) {
@@ -122,8 +124,9 @@ export async function parsePptxPackage(
   let slideNum = 1;
 
   while (true) {
-    const slideXml = getZipText(entries, `ppt/slides/slide${slideNum}.xml`)
-      ?? getZipText(entries, `ppt/slides/slide${slideNum}.XML`);
+    const slideXml =
+      getZipText(entries, `ppt/slides/slide${slideNum}.xml`) ??
+      getZipText(entries, `ppt/slides/slide${slideNum}.XML`);
     if (!slideXml) break;
 
     const slideData = parseSlideXml(slideXml, slideNum - 1);
@@ -131,10 +134,10 @@ export async function parsePptxPackage(
     slideNum++;
   }
 
-  // Fallback: If no slideN.xml found sequentially, scan all entries for slide*.xml
+  // Fallback: If no sequential slideN.xml found, scan all entries for slide*.xml
   if (slides.length === 0) {
-    const keys = Object.keys(entries).filter((k) =>
-      k.toLowerCase().startsWith('ppt/slides/slide') && k.toLowerCase().endsWith('.xml')
+    const keys = Object.keys(entries).filter(
+      (k) => k.toLowerCase().startsWith('ppt/slides/slide') && k.toLowerCase().endsWith('.xml')
     );
     for (let i = 0; i < keys.length; i++) {
       const xml = getZipText(entries, keys[i]);
@@ -145,7 +148,7 @@ export async function parsePptxPackage(
   }
 
   return {
-    title: baseTitle,
+    title: baseTitle ? sanitizeTextForWinAnsi(baseTitle) : undefined,
     width,
     height,
     slides: slides.length > 0 ? slides : [{ slideIndex: 0, elements: [] }],
@@ -178,7 +181,7 @@ export class PptxConverter implements FormatConverter {
     options?: DocumentConversionOptions
   ): Promise<ConvertedDocumentResult> {
     const startTime = Date.now();
-    const baseName = input.name.replace(/\.[^/.]+$/, '');
+    const baseName = input.name.replace(/\.[^/.]+$/, '') || 'presentation';
     const slideDoc = await parsePptxPackage(input.buffer, baseName);
 
     const doc = await PDFDocument.create();
