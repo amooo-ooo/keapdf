@@ -18,7 +18,7 @@ import type {
   TextOptions,
 } from './operations/types';
 import type { NoteAnnotationOptions } from './operations/add-annotations';
-import { degrees, PDFName, PDFHexString, PDFBool, type PDFAcroTerminal, type PDFRadioGroup, type PDFForm } from 'pdf-lib';
+import type { PDFAcroTerminal, PDFRadioGroup, PDFForm, PDFAcroField, PDFArray } from 'pdf-lib';
 import type { PdfiumEngine } from '../../core/pdfium-engine';
 import { PdfPage } from './pdf-page';
 import { FontCharsetIndex } from './font-charset-index';
@@ -35,14 +35,13 @@ import type {
   CompressionInspection,
   PageRasterizer,
 } from '../../core/types';
-import type { PDFAcroField } from 'pdf-lib';
 import * as docOps from './operations/document-ops';
 import * as metadataOps from './operations/metadata-ops';
-import * as outlineOps from './operations/outline-ops';
+import * as securityOps from './operations/security-ops';
+import type { SecurityOptions } from './operations/security-ops';
+import type { AddOrUpdateOutlineOptions, OutlineItemFlat } from './operations/outline-ops';
 import { exportAsBlob } from './operations/page-ops';
-import { inspectPdfForSanitization, sanitizePdf } from './operations/sanitize-ops';
-import { inspectPdfForCompression, compressPdf } from './operations/compress-ops';
-import { signPdfIso32000, verifyPdfSignatures, type SignPdfOptions, type SignatureValidationResult } from './operations/signature-ops';
+import type { SignPdfOptions, SignatureValidationResult } from './operations/signature-ops';
 import type { FormFieldPlaceholderOptions } from './operations/types';
 import type { PageTransform } from '../../stores/types';
 
@@ -293,10 +292,14 @@ export class PdfDocument {
   public invalidatePage(pageIndex: number): void {
     const existing = this.pages.get(pageIndex);
     if (existing) {
-      const mod = this.engine.getModule();
-      existing.generateContent();
-      existing.dispose();
-      mod.FPDF_ClosePage(existing.pageHandle);
+      if (this.engine.isReady) {
+        const mod = this.engine.getModule();
+        existing.generateContent();
+        existing.dispose();
+        mod.FPDF_ClosePage(existing.pageHandle);
+      } else {
+        existing.dispose();
+      }
       this.pages.delete(pageIndex);
     }
     this._fontCharsetIndex.invalidate();
@@ -308,6 +311,10 @@ export class PdfDocument {
    * Flushes pending mutations and closes all active WASM page handles.
    */
   public closeAllPages(): void {
+    if (!this.engine.isReady) {
+      this.pages.clear();
+      return;
+    }
     const mod = this.engine.getModule();
     for (const page of this.pages.values()) {
       page.generateContent();
@@ -429,7 +436,8 @@ export class PdfDocument {
    * @param options The outline item configuration.
    * @return A promise resolving to the modified PDF byte array.
    */
-  public async addOutlineItem(options: outlineOps.AddOrUpdateOutlineOptions): Promise<Uint8Array> {
+  public async addOutlineItem(options: AddOrUpdateOutlineOptions): Promise<Uint8Array> {
+    const outlineOps = await import('./operations/outline-ops');
     const rawBytes = await this.saveAsync();
     const updatedBytes = await outlineOps.addOrUpdateOutlineItem(rawBytes, options);
     this.setRawBuffer(updatedBytes);
@@ -442,7 +450,8 @@ export class PdfDocument {
    * @param items Flat list of outline items.
    * @return A promise resolving to the modified PDF byte array.
    */
-  public async setOutline(items: outlineOps.OutlineItemFlat[]): Promise<Uint8Array> {
+  public async setOutline(items: OutlineItemFlat[]): Promise<Uint8Array> {
+    const outlineOps = await import('./operations/outline-ops');
     const rawBytes = await this.saveAsync();
     const updatedBytes = await outlineOps.setOutlineItems(rawBytes, items);
     this.setRawBuffer(updatedBytes);
@@ -457,6 +466,7 @@ export class PdfDocument {
    * @return A promise resolving to the modified PDF byte array.
    */
   public async reorderOutline(fromIndices: number[], toIndex: number): Promise<Uint8Array> {
+    const outlineOps = await import('./operations/outline-ops');
     const rawBytes = await this.saveAsync();
     const currentNodes = this.getOutline();
     const flatItems = outlineOps.flattenOutlineTree(currentNodes);
@@ -472,6 +482,7 @@ export class PdfDocument {
    * @return A promise resolving to the modified PDF byte array.
    */
   public async sortOutlineTopToBottom(): Promise<Uint8Array> {
+    const outlineOps = await import('./operations/outline-ops');
     const rawBytes = await this.saveAsync();
     const currentNodes = this.getOutline();
     const flatItems = outlineOps.flattenOutlineTree(currentNodes);
@@ -489,6 +500,7 @@ export class PdfDocument {
    * @return A promise resolving to the modified PDF byte array.
    */
   public async updateOutlineItemLevel(index: number, newLevel: number): Promise<Uint8Array> {
+    const outlineOps = await import('./operations/outline-ops');
     const rawBytes = await this.saveAsync();
     const updatedBytes = await outlineOps.updateOutlineItemLevel(rawBytes, index, newLevel);
     this.setRawBuffer(updatedBytes);
@@ -503,6 +515,7 @@ export class PdfDocument {
    * @return A promise resolving to the modified PDF byte array.
    */
   public async removeOutlineItem(title: string, pageIndex?: number): Promise<Uint8Array> {
+    const outlineOps = await import('./operations/outline-ops');
     const rawBytes = await this.saveAsync();
     const updatedBytes = await outlineOps.removeOutlineItemFromPdf(rawBytes, title, pageIndex);
     this.setRawBuffer(updatedBytes);
@@ -517,6 +530,41 @@ export class PdfDocument {
    */
   public getInfo(fileName: string, sizeBytes: number): DocumentInfo {
     return metadataOps.getDocumentInfo(this.engine, this.getDocHandle(), fileName, sizeBytes);
+  }
+
+  /**
+   * Checks whether the current document is encrypted.
+   */
+  public isEncrypted(): boolean {
+    return securityOps.isPdfEncrypted(this.engine, this.getDocHandle());
+  }
+
+  /**
+   * Checks whether owner permissions are currently unlocked for the active document.
+   */
+  public isOwnerUnlocked(): boolean {
+    return securityOps.isPdfOwnerUnlocked(this.engine, this.getDocHandle());
+  }
+
+  /**
+   * Unlocks owner administrative permissions using the configured owner password.
+   */
+  public unlockOwnerPermissions(ownerPassword: string): boolean {
+    return securityOps.unlockPdfOwnerPermissions(this.engine, this.getDocHandle(), ownerPassword);
+  }
+
+  /**
+   * Applies ISO 32000 standard encryption and access permissions to the active document.
+   */
+  public applySecurity(options: SecurityOptions): { success: boolean; isEncrypted: boolean; permissions: number } {
+    return securityOps.applyPdfSecurity(this.engine, this.getDocHandle(), options);
+  }
+
+  /**
+   * Removes encryption and security restrictions from the active document.
+   */
+  public removeSecurity(ownerPassword?: string): { success: boolean } {
+    return securityOps.removePdfSecurity(this.engine, this.getDocHandle(), ownerPassword);
   }
 
   /**
@@ -724,6 +772,15 @@ export class PdfDocument {
       const {
         PDFDocument,
         TextAlignment,
+        degrees,
+        PDFName,
+        PDFHexString,
+        PDFBool,
+        PDFArray,
+        PDFNumber,
+        PDFString,
+        StandardFonts,
+        rgb,
       } = await import('pdf-lib');
 
       const pdfDoc = await PDFDocument.load(pdfiumBytes, { ignoreEncryption: true });
@@ -907,6 +964,9 @@ export class PdfDocument {
             if (field.fontSize) textField.setFontSize(field.fontSize);
             if (field.readOnly) textField.enableReadOnly();
             if (field.required) textField.enableRequired();
+            if (field.multiline) textField.enableMultiline();
+            if (field.password) textField.enablePassword();
+            if (field.maxLength) textField.setMaxLength(field.maxLength);
             if (field.textAlign === 'center') textField.setAlignment(TextAlignment.Center);
             else if (field.textAlign === 'right') textField.setAlignment(TextAlignment.Right);
             else textField.setAlignment(TextAlignment.Left);
@@ -918,11 +978,21 @@ export class PdfDocument {
             const baseName = resolveAcroFieldName(field);
             const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
             const checkbox = form.createCheckBox(fieldName);
+            const isComposite = vw > 28 && Boolean(field.label);
+            const widgetSize = isComposite ? Math.min(vh, 16) : Math.min(vw, vh);
+            const widgetW = isComposite ? widgetSize : vw;
+            const widgetH = isComposite ? widgetSize : vh;
+            let widgetX = targetX;
+            let widgetY = targetY;
+            if (isComposite && pageRot === 0) {
+              widgetY = targetY + (vh - widgetSize) / 2;
+            }
+
             checkbox.addToPage(page, {
-              x: targetX,
-              y: targetY,
-              width: vw,
-              height: vh,
+              x: widgetX,
+              y: widgetY,
+              width: widgetW,
+              height: widgetH,
               rotate: fieldRotationDegrees,
             });
             setTooltip(checkbox.acroField);
@@ -939,6 +1009,29 @@ export class PdfDocument {
               checkbox.uncheck();
             }
             applyWidgetStyling(checkbox.acroField, field);
+
+            if (isComposite && pageRot === 0 && field.label) {
+              const fontSize = field.fontSize && field.fontSize > 0 ? Math.min(field.fontSize, 13) : 11;
+              const textX = targetX + widgetSize + 6;
+              const textY = targetY + (vh - fontSize) / 2;
+              try {
+                const font = await pdfDoc.embedStandardFont(StandardFonts.Helvetica);
+                let col = rgb(0.067, 0.094, 0.153);
+                if (field.color) {
+                  const parsed = parseColor(field.color);
+                  if (parsed) col = rgb(parsed.r / 255, parsed.g / 255, parsed.b / 255);
+                }
+                page.drawText(field.label, {
+                  x: textX,
+                  y: textY,
+                  size: fontSize,
+                  font,
+                  color: col,
+                });
+              } catch (err) {
+                console.warn('Failed to draw checkbox label text:', err);
+              }
+            }
           } else if (field.variant === 'radio') {
             const groupName = resolveAcroFieldName(field);
             let radioGroup: PDFRadioGroup;
@@ -967,11 +1060,22 @@ export class PdfDocument {
               uniqueOpt = `${optName}_${optCounter}`;
               optCounter++;
             }
+
+            const isComposite = vw > 28 && Boolean(field.label);
+            const widgetSize = isComposite ? Math.min(vh, 16) : Math.min(vw, vh);
+            const widgetW = isComposite ? widgetSize : vw;
+            const widgetH = isComposite ? widgetSize : vh;
+            let widgetX = targetX;
+            let widgetY = targetY;
+            if (isComposite && pageRot === 0) {
+              widgetY = targetY + (vh - widgetSize) / 2;
+            }
+
             radioGroup.addOptionToPage(uniqueOpt, page, {
-              x: targetX,
-              y: targetY,
-              width: vw,
-              height: vh,
+              x: widgetX,
+              y: widgetY,
+              width: widgetW,
+              height: widgetH,
               rotate: fieldRotationDegrees,
             });
             setTooltip(radioGroup.acroField);
@@ -989,6 +1093,29 @@ export class PdfDocument {
               } catch {}
             }
             applyWidgetStyling(radioGroup.acroField, field);
+
+            if (isComposite && pageRot === 0 && field.label) {
+              const fontSize = field.fontSize && field.fontSize > 0 ? Math.min(field.fontSize, 13) : 11;
+              const textX = targetX + widgetSize + 6;
+              const textY = targetY + (vh - fontSize) / 2;
+              try {
+                const font = await pdfDoc.embedStandardFont(StandardFonts.Helvetica);
+                let col = rgb(0.067, 0.094, 0.153);
+                if (field.color) {
+                  const parsed = parseColor(field.color);
+                  if (parsed) col = rgb(parsed.r / 255, parsed.g / 255, parsed.b / 255);
+                }
+                page.drawText(field.label, {
+                  x: textX,
+                  y: textY,
+                  size: fontSize,
+                  font,
+                  color: col,
+                });
+              } catch (err) {
+                console.warn('Failed to draw radio button label text:', err);
+              }
+            }
           } else if (field.variant === 'dropdown') {
             const baseName = resolveAcroFieldName(field);
             const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
@@ -1016,7 +1143,92 @@ export class PdfDocument {
               dropdown.select(field.placeholder);
             }
             applyWidgetStyling(dropdown.acroField, field);
-          } else if (field.variant === 'signature' || field.variant === 'attachment') {
+          } else if (field.variant === 'button') {
+            const baseName = resolveAcroFieldName(field);
+            const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
+            const button = form.createButton(fieldName);
+            button.addToPage(field.label || 'Button', page, {
+              x: targetX,
+              y: targetY,
+              width: vw,
+              height: vh,
+              rotate: fieldRotationDegrees,
+            });
+            setTooltip(button.acroField);
+            if (field.readOnly) button.enableReadOnly();
+            if (field.required) button.enableRequired();
+            applyWidgetStyling(button.acroField, field);
+          } else if (field.variant === 'signature') {
+            const baseName = resolveAcroFieldName(field);
+            const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
+
+            const widgetDict = pdfDoc.context.obj({
+              Type: PDFName.of('Annot'),
+              Subtype: PDFName.of('Widget'),
+              FT: PDFName.of('Sig'),
+              Rect: [targetX, targetY, targetX + vw, targetY + vh],
+              T: PDFString.of(fieldName),
+              F: 4,
+              P: page.ref,
+            });
+
+            if (tooltipText) {
+              widgetDict.set(PDFName.of('TU'), PDFHexString.fromText(tooltipText));
+            }
+
+            const widgetRef = pdfDoc.context.register(widgetDict);
+            page.node.addAnnot(widgetRef);
+
+            const fieldsArray = form.acroForm.dict.lookup(PDFName.of('Fields'));
+            const targetFieldsArray: PDFArray = fieldsArray instanceof PDFArray ? fieldsArray : pdfDoc.context.obj([]);
+            if (targetFieldsArray !== fieldsArray) {
+              form.acroForm.dict.set(PDFName.of('Fields'), targetFieldsArray);
+            }
+            targetFieldsArray.push(widgetRef);
+
+            const existingSigFlags = form.acroForm.dict.lookup(PDFName.of('SigFlags'));
+            const currentFlags = existingSigFlags instanceof PDFNumber ? existingSigFlags.asNumber() : 0;
+            form.acroForm.dict.set(PDFName.of('SigFlags'), PDFNumber.of(currentFlags | 1));
+
+            if (field.value && typeof field.value === 'string' && field.value !== '') {
+              if (field.value.startsWith('data:image/')) {
+                try {
+                  const base64Data = field.value.split(',')[1];
+                  if (base64Data) {
+                    const imgBytes = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
+                    const embeddedImg = field.value.includes('image/jpeg') || field.value.includes('image/jpg')
+                      ? await pdfDoc.embedJpg(imgBytes)
+                      : await pdfDoc.embedPng(imgBytes);
+                    const scale = Math.min((vw - 8) / embeddedImg.width, (vh - 8) / embeddedImg.height);
+                    const drawW = embeddedImg.width * scale;
+                    const drawH = embeddedImg.height * scale;
+                    page.drawImage(embeddedImg, {
+                      x: targetX + (vw - drawW) / 2,
+                      y: targetY + (vh - drawH) / 2,
+                      width: drawW,
+                      height: drawH,
+                    });
+                  }
+                } catch (err) {
+                  console.warn('Failed to embed signature image:', err);
+                }
+              } else {
+                try {
+                  const font = await pdfDoc.embedStandardFont(StandardFonts.TimesRomanItalic);
+                  const fontSize = Math.max(10, Math.min(vh * 0.45, 18));
+                  page.drawText(field.value, {
+                    x: targetX + 8,
+                    y: targetY + (vh - fontSize) / 2,
+                    size: fontSize,
+                    font,
+                    color: rgb(0.1, 0.15, 0.3),
+                  });
+                } catch (err) {
+                  console.warn('Failed to draw text signature:', err);
+                }
+              }
+            }
+          } else if (field.variant === 'attachment') {
             const baseName = resolveAcroFieldName(field);
             const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
             const textField = form.createTextField(fieldName);
@@ -1034,7 +1246,7 @@ export class PdfDocument {
             if (field.value !== undefined && field.value !== '') {
               textField.setText(String(field.value));
             } else {
-              textField.setText(field.variant === 'signature' ? 'Signature' : 'Attachment');
+              textField.setText('Attachment');
             }
             applyWidgetStyling(textField.acroField, field);
           }
@@ -1044,6 +1256,8 @@ export class PdfDocument {
       pdfiumBytes = await pdfDoc.save({ useObjectStreams: false });
     }
 
+    this._cachedAcroFormFieldSpans = null;
+    this._acroFormInitPromise = null;
     this.pendingAcroFormFieldsByPage.clear();
     this.removedAcroFormFieldNames.clear();
     return pdfiumBytes;
@@ -1057,6 +1271,7 @@ export class PdfDocument {
    * @return A promise resolving to the sanitization inspection summary.
    */
   public async inspectForSanitization(pageTransforms?: Record<number, PageTransform>): Promise<SanitizationInspection> {
+    const { inspectPdfForSanitization } = await import('./operations/sanitize-ops');
     const bytes = await this.saveAsync(pageTransforms);
     return inspectPdfForSanitization(bytes);
   }
@@ -1072,6 +1287,7 @@ export class PdfDocument {
     options: SanitizeOptions,
     pageTransforms?: Record<number, PageTransform>
   ): Promise<{ bytes: Uint8Array; summary: SanitizeSummary }> {
+    const { sanitizePdf } = await import('./operations/sanitize-ops');
     const rawBytes = await this.saveAsync(pageTransforms);
     const { sanitizedBytes, summary } = await sanitizePdf(rawBytes, options);
     return { bytes: sanitizedBytes, summary };
@@ -1086,6 +1302,7 @@ export class PdfDocument {
   public async inspectCompression(
     pageTransforms?: Record<number, PageTransform>
   ): Promise<CompressionInspection> {
+    const { inspectPdfForCompression } = await import('./operations/compress-ops');
     const rawBytes = await this.saveAsync(pageTransforms);
     return await inspectPdfForCompression(rawBytes);
   }
@@ -1101,6 +1318,7 @@ export class PdfDocument {
     options: CompressOptions,
     pageTransforms?: Record<number, PageTransform>
   ): Promise<{ bytes: Uint8Array; summary: CompressSummary }> {
+    const { compressPdf } = await import('./operations/compress-ops');
     const rawBytes = await this.saveAsync(pageTransforms);
 
     let pageRasterizer: PageRasterizer | undefined = undefined;
@@ -1137,6 +1355,7 @@ export class PdfDocument {
     options: SignPdfOptions,
     pageTransforms?: Record<number, PageTransform>
   ): Promise<Uint8Array> {
+    const { signPdfIso32000 } = await import('./operations/signature-ops');
     const rawBytes = await this.saveAsync(pageTransforms);
     const signedBytes = await signPdfIso32000(rawBytes, options);
     this.setRawBuffer(signedBytes);
@@ -1154,6 +1373,7 @@ export class PdfDocument {
   public async validateSignatures(
     pageTransforms?: Record<number, PageTransform>
   ): Promise<SignatureValidationResult[]> {
+    const { verifyPdfSignatures } = await import('./operations/signature-ops');
     const rawBytes = await this.saveAsync(pageTransforms);
     return verifyPdfSignatures(rawBytes);
   }
@@ -1168,15 +1388,15 @@ export class PdfDocument {
   public async initAcroFormFieldSpans(
     rawBuffer?: ArrayBuffer | Uint8Array
   ): Promise<Map<number, EditableFormFieldSpan[]>> {
-    if (this._cachedAcroFormFieldSpans) {
+    if (!rawBuffer && this._cachedAcroFormFieldSpans) {
       return this._cachedAcroFormFieldSpans;
     }
-    if (this._acroFormInitPromise) {
+    if (!rawBuffer && this._acroFormInitPromise) {
       return this._acroFormInitPromise;
     }
 
     const buf = rawBuffer ?? this._rawBuffer;
-    if (!buf || buf.byteLength === 0) {
+    if (!buf) {
       const emptyMap = new Map<number, EditableFormFieldSpan[]>();
       this._cachedAcroFormFieldSpans = emptyMap;
       return emptyMap;
@@ -1192,6 +1412,7 @@ export class PdfDocument {
           PDFDropdown,
           PDFSignature,
           PDFButton,
+          PDFName,
         } = await import('pdf-lib');
 
         const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
@@ -1213,13 +1434,22 @@ export class PdfDocument {
           else if (field instanceof PDFRadioGroup) variant = 'radio';
           else if (field instanceof PDFDropdown) variant = 'dropdown';
           else if (field instanceof PDFSignature) variant = 'signature';
-          else if (field instanceof PDFButton) variant = 'text-input';
+          else if (field instanceof PDFButton) variant = 'button';
 
           let value: string | boolean | undefined;
           if (field instanceof PDFTextField) value = field.getText() || undefined;
           else if (field instanceof PDFCheckBox) value = field.isChecked();
           else if (field instanceof PDFRadioGroup) value = field.getSelected() || undefined;
           else if (field instanceof PDFDropdown) value = field.getSelected()?.[0] || undefined;
+          else if (field instanceof PDFButton) {
+            const mk = field.acroField.getWidgets()[0]?.getAppearanceCharacteristics();
+            const ca = mk?.dict.lookup(PDFName.of('CA'));
+            if (ca && 'decodeText' in ca && typeof (ca as { decodeText(): string }).decodeText === 'function') {
+              value = (ca as { decodeText(): string }).decodeText();
+            } else if (ca && 'asString' in ca && typeof (ca as { asString(): string }).asString === 'function') {
+              value = (ca as { asString(): string }).asString();
+            }
+          }
 
           let options: string[] | undefined;
           if (field instanceof PDFRadioGroup || field instanceof PDFDropdown) {
@@ -1367,6 +1597,8 @@ export class PdfDocument {
         const fallback = new Map<number, EditableFormFieldSpan[]>();
         this._cachedAcroFormFieldSpans = fallback;
         return fallback;
+      } finally {
+        this._acroFormInitPromise = null;
       }
     })();
 
