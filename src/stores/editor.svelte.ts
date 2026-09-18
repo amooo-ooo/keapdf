@@ -97,6 +97,12 @@ export class EditorStore {
   showConvertDialog = $state(false);
   convertInitialFile = $state<File | null>(null);
   showPageScaleDialog = $state(false);
+  showPasswordPromptDialog = $state(false);
+  pendingPasswordBuffer = $state<ArrayBuffer | null>(null);
+  pendingPasswordFileName = $state<string>('');
+  passwordPromptError = $state<string | null>(null);
+  showPermissionsDialog = $state(false);
+  isOwnerUnlocked = $state(true);
   loadError = $state<string | null>(null);
   isLoadingDocument = $state(false);
   loadingProgress = $state<string | null>(null);
@@ -213,6 +219,24 @@ export class EditorStore {
   /** Close the page scale and resizing dialog. */
   closePageScaleDialog(): void {
     this.showPageScaleDialog = false;
+  }
+
+  /** Open the granular permissions configuration dialog. */
+  openPermissionsDialog(): void {
+    this.showPermissionsDialog = true;
+  }
+
+  /** Close the granular permissions configuration dialog. */
+  closePermissionsDialog(): void {
+    this.showPermissionsDialog = false;
+  }
+
+  /** Close the password decryption prompt dialog and discard pending buffer. */
+  closePasswordPromptDialog(): void {
+    this.showPasswordPromptDialog = false;
+    this.pendingPasswordBuffer = null;
+    this.pendingPasswordFileName = '';
+    this.passwordPromptError = null;
   }
 
   /** Clears active document loading error banner. */
