@@ -33,12 +33,10 @@ import { downloadBytes } from '../utils/download-utils';
 import { safeClone } from '../utils/clone-utils';
 import { UNICODE_TRAILING_WS_REGEX, UNICODE_LEADING_WS_REGEX } from '../utils/text-range-utils';
 import { useSelection } from './selection.svelte';
-import { cropPages, resetCropPages, type PageCropMargins } from '../services/pdf/operations/crop-ops';
-import {
-  scalePages,
-  transformCanvasElementsForScale,
-  type ScalePageOptions,
-  type PageScaleScope,
+import type { PageCropMargins } from '../services/pdf/operations/crop-ops';
+import type {
+  ScalePageOptions,
+  PageScaleScope,
 } from '../services/pdf/operations/scale-ops';
 import type { ImpositionConfig } from '../services/pdf/operations/types';
 import type { SavedSignature } from '../services/signature-storage';
@@ -59,21 +57,25 @@ import {
   RotatePageCommand,
   MutateDocumentCommand,
   RemoveAcroFormFieldCommand,
+  UnlockFormsCommand,
 } from '../commands';
-import { OcrService } from '../services/ocr';
+import { PasswordRequiredError } from '../core/pdfium-engine';
+import {
+  computePermissionBitmask,
+  type PdfPermissionFlags,
+} from '../services/pdf/operations/security-ops';
 import type { OcrPageResult } from '../services/ocr';
 import type { ToolRegistry, ToolContext } from '../core/tool-registry';
 import type { ExportRegistry } from '../core/export-registry';
 import type { PluginManager } from '../core/plugin-manager';
 import { findClosestGoogleFont, loadGoogleFont } from '../services/font-loader';
-import { resolveDemoPreset } from '../services/demo-documents/registry';
 import {
   fetchPdfFromUrl,
   formatUrlLoadErrorMessage,
   syncUrlParameter,
 } from '../services/url-document-loader';
-import { mergeFilesToPdfBuffer, isImageFile, inferImageMimeType } from '../services/file-merger';
-import { documentConverter, type DocumentConversionOptions } from '../services/conversion';
+import { isImageFile, inferImageMimeType } from '../utils/file-type-utils';
+import type { DocumentConversionOptions } from '../services/conversion';
 import type { OutlineItemFlat } from '../services/pdf/operations/outline-ops';
 
 const EDITOR_ACTIONS_KEY = Symbol('editor-actions');
@@ -362,6 +364,7 @@ export class EditorActions {
       return;
     }
 
+    const { resolveDemoPreset } = await import('../services/demo-documents/registry');
     const preset = resolveDemoPreset(trimmed);
     if (!preset) {
       this.store.loadError = `Unknown compliance test document identifier: "${trimmed}".`;
@@ -513,22 +516,28 @@ export class EditorActions {
     addToWorkspace?: boolean,
   ): Promise<void> {
     if (!this.store.isInitialized) {
-      return;
+      await this.initializeEngine();
+      if (!this.store.isInitialized) {
+        return;
+      }
     }
 
     let finalBuffer = buffer;
     let finalFileName = fileName;
 
-    if (documentConverter.isConvertible(fileName, buffer)) {
-      try {
-        const converted = await documentConverter.convertDocument({
-          name: fileName,
-          buffer,
-        });
-        finalBuffer = converted.buffer;
-        finalFileName = converted.fileName;
-      } catch (err) {
-        console.error('Failed to convert document buffer:', err);
+    if (!fileName.toLowerCase().endsWith('.pdf')) {
+      const { documentConverter } = await import('../services/conversion');
+      if (documentConverter.isConvertible(fileName, buffer)) {
+        try {
+          const converted = await documentConverter.convertDocument({
+            name: fileName,
+            buffer,
+          });
+          finalBuffer = converted.buffer;
+          finalFileName = converted.fileName;
+        } catch (err) {
+          console.error('Failed to convert document buffer:', err);
+        }
       }
     }
 
@@ -594,28 +603,44 @@ export class EditorActions {
         });
       }
     } catch (err) {
+      if (err instanceof PasswordRequiredError) {
+        this.store.pendingPasswordBuffer = finalBuffer;
+        this.store.pendingPasswordFileName = finalFileName;
+        this.store.passwordPromptError = null;
+        this.store.showPasswordPromptDialog = true;
+        return;
+      }
+      this.store.loadError = err instanceof Error ? err.message : 'Failed to load PDF document.';
       console.error('Failed to load PDF buffer:', err);
     }
   }
 
   async loadDocumentFromFile(file: File, addToWorkspace?: boolean): Promise<void> {
+    if (!this.store.isInitialized) {
+      await this.initializeEngine();
+      if (!this.store.isInitialized) return;
+    }
     try {
       let buffer = await file.arrayBuffer();
       let fileName = file.name;
       if (isImageFile(buffer, file.name) || file.type.startsWith('image/')) {
+        const { mergeFilesToPdfBuffer } = await import('../services/file-merger');
         const converted = await mergeFilesToPdfBuffer([
           { name: file.name, buffer, mimeType: file.type || inferImageMimeType(file.name) },
         ], this.service.engine);
         buffer = converted.buffer;
         fileName = converted.fileName;
-      } else if (documentConverter.isConvertible(file.name, buffer, file.type)) {
-        const converted = await documentConverter.convertDocument({
-          name: file.name,
-          buffer,
-          mimeType: file.type,
-        });
-        buffer = converted.buffer;
-        fileName = converted.fileName;
+      } else if (!file.name.toLowerCase().endsWith('.pdf')) {
+        const { documentConverter } = await import('../services/conversion');
+        if (documentConverter.isConvertible(file.name, buffer, file.type)) {
+          const converted = await documentConverter.convertDocument({
+            name: file.name,
+            buffer,
+            mimeType: file.type,
+          });
+          buffer = converted.buffer;
+          fileName = converted.fileName;
+        }
       }
       await this.loadDocumentFromBuffer(buffer, fileName, addToWorkspace);
     } catch (err) {
@@ -625,7 +650,12 @@ export class EditorActions {
 
   async loadDocumentsFromFiles(files: File[]): Promise<void> {
     if (files.length === 0) return;
-    
+
+    if (!this.store.isInitialized) {
+      await this.initializeEngine();
+      if (!this.store.isInitialized) return;
+    }
+
     // Clear workspace if we are completely replacing it, only ONCE
     if (!this.isAddingToWorkspace) {
       this.clearWorkspaceState();
@@ -641,19 +671,23 @@ export class EditorActions {
           let buffer = await file.arrayBuffer();
           let fileName = file.name;
           if (isImageFile(buffer, file.name) || file.type.startsWith('image/')) {
+            const { mergeFilesToPdfBuffer } = await import('../services/file-merger');
             const converted = await mergeFilesToPdfBuffer([
               { name: file.name, buffer, mimeType: file.type || inferImageMimeType(file.name) },
             ], this.service.engine);
             buffer = converted.buffer;
             fileName = converted.fileName;
-          } else if (documentConverter.isConvertible(file.name, buffer, file.type)) {
-            const converted = await documentConverter.convertDocument({
-              name: file.name,
-              buffer,
-              mimeType: file.type,
-            });
-            buffer = converted.buffer;
-            fileName = converted.fileName;
+          } else if (!file.name.toLowerCase().endsWith('.pdf')) {
+            const { documentConverter } = await import('../services/conversion');
+            if (documentConverter.isConvertible(file.name, buffer, file.type)) {
+              const converted = await documentConverter.convertDocument({
+                name: file.name,
+                buffer,
+                mimeType: file.type,
+              });
+              buffer = converted.buffer;
+              fileName = converted.fileName;
+            }
           }
           await this.loadDocumentFromBuffer(buffer, fileName);
         } catch (err) {
@@ -675,10 +709,15 @@ export class EditorActions {
   }
 
   async convertAndLoadDocument(file: File, options?: DocumentConversionOptions): Promise<void> {
+    if (!this.store.isInitialized) {
+      await this.initializeEngine();
+      if (!this.store.isInitialized) return;
+    }
     this.store.isLoadingDocument = true;
     this.store.loadingProgress = `Converting ${file.name} to PDF...`;
     this.store.loadError = null;
     try {
+      const { documentConverter } = await import('../services/conversion');
       const buffer = await file.arrayBuffer();
       const converted = await documentConverter.convertDocument(
         { name: file.name, buffer, mimeType: file.type },
@@ -698,10 +737,16 @@ export class EditorActions {
 
   triggerFileOpen(addToWorkspace: boolean = false): void {
     this.isAddingToWorkspace = addToWorkspace;
+    if (!this.store.isInitialized) {
+      void this.initializeEngine();
+    }
     this.fileInputEl?.click();
   }
 
   triggerMergeFiles(): void {
+    if (!this.store.isInitialized) {
+      void this.initializeEngine();
+    }
     this.mergeFilesInputEl?.click();
   }
 
@@ -714,11 +759,17 @@ export class EditorActions {
   async mergeAndLoadFiles(files: File[]): Promise<void> {
     if (!files || files.length === 0) return;
 
+    if (!this.store.isInitialized) {
+      await this.initializeEngine();
+      if (!this.store.isInitialized) return;
+    }
+
     this.store.isLoadingDocument = true;
     this.store.loadingProgress = `Merging ${files.length} files...`;
     this.store.loadError = null;
 
     try {
+      const { mergeFilesToPdfBuffer } = await import('../services/file-merger');
       const result = await mergeFilesToPdfBuffer(files, this.service.engine);
       await this.loadDocumentFromBuffer(result.buffer, result.fileName);
     } catch (err) {
@@ -1837,7 +1888,7 @@ export class EditorActions {
 
   /**
    * Redacts a specific text character range on a page, permanently deleting only
-   * the selected text characters from the PDF content stream (preserving neighbors)
+   * the selected text characters from the PDF content stream (preserving neighbours)
    * and adding blackout shape elements.
    *
    * @param pageIndex Zero-based page index.
@@ -2210,6 +2261,7 @@ export class EditorActions {
     const targetSet = new Set(targetIndices);
 
     await this.executeDocumentMutation('Crop Page', pageIndex, async () => {
+      const { cropPages } = await import('../services/pdf/operations/crop-ops');
       const activeBuffer = getFileBuffer(fileId);
       const buffer = activeBuffer ?? this.service.document.save();
       const croppedBytes = await cropPages(buffer, {
@@ -2288,6 +2340,7 @@ export class EditorActions {
     }
 
     await this.executeDocumentMutation('Reset Page Crop', pageIndex, async () => {
+      const { resetCropPages } = await import('../services/pdf/operations/crop-ops');
       const activeBuffer = getFileBuffer(fileId);
       const buffer = activeBuffer ?? this.service.document.save();
       const resetBytes = await resetCropPages(buffer, targetIndices);
@@ -2361,6 +2414,7 @@ export class EditorActions {
     };
 
     await this.executeDocumentMutation('Scale Page', pageIndex, async () => {
+      const { scalePages, transformCanvasElementsForScale } = await import('../services/pdf/operations/scale-ops');
       const activeBuffer = getFileBuffer(fileId);
       const buffer = activeBuffer ?? this.service.document.save();
       const scaledBytes = await scalePages(buffer, fullScaleOptions);
@@ -2876,8 +2930,9 @@ export class EditorActions {
         locked: false,
         visible: true,
         flipX: false,
-        flipY: false,
-        label: formSpan.fieldName || formSpan.fieldId,
+        label: (formSpan.variant === 'button' && typeof formSpan.value === 'string' && formSpan.value)
+          ? formSpan.value
+          : (formSpan.fieldName || formSpan.fieldId),
         placeholder: formSpan.placeholder || (typeof formSpan.value === 'string' ? formSpan.value : ''),
         value: typeof formSpan.value === 'string' ? formSpan.value : (formSpan.value ? 'true' : ''),
         options: formSpan.options ? [...formSpan.options] : undefined,
@@ -3145,17 +3200,20 @@ export class EditorActions {
    */
   detectScannedPages(): void {
     if (!this.store.isDocumentLoaded) return;
-    try {
-      const ocrService = OcrService.getInstance();
-      const detected = ocrService.detectDocumentScannedPages(this.service.document);
-      const scannedSet = new Set<number>();
-      for (const [idx] of detected) {
-        scannedSet.add(idx);
+    void (async () => {
+      try {
+        const { OcrService } = await import('../services/ocr');
+        const ocrService = OcrService.getInstance();
+        const detected = ocrService.detectDocumentScannedPages(this.service.document);
+        const scannedSet = new Set<number>();
+        for (const [idx] of detected) {
+          scannedSet.add(idx);
+        }
+        this.store.scannedPages = scannedSet;
+      } catch (err) {
+        console.error('Failed to detect scanned pages:', err);
       }
-      this.store.scannedPages = scannedSet;
-    } catch (err) {
-      console.error('Failed to detect scanned pages:', err);
-    }
+    })();
   }
 
   /**
@@ -3196,6 +3254,7 @@ export class EditorActions {
     };
 
     try {
+      const { OcrService } = await import('../services/ocr');
       const ocrService = OcrService.getInstance();
       const page = this.service.document.getPage(pageIndex);
       const result = await ocrService.recognizePage(page, {
@@ -3410,7 +3469,6 @@ export class EditorActions {
 
     let resolvedLevel = options?.level;
     if (!resolvedLevel || resolvedLevel < 1 || resolvedLevel > 6) {
-      const { inferOutlineLevel } = await import('../services/pdf/operations/outline-ops');
       const rawLower = (
         selectedSpan?.rawFontFamily ||
         selectedSpan?.fontFamily ||
@@ -3431,6 +3489,7 @@ export class EditorActions {
       const rawFontSize = selectedSpan?.fontSize ?? canvasElement?.fontSize ?? 12;
       const fontSize = Math.round(rawFontSize * 10) / 10;
 
+      const { inferOutlineLevel } = await import('../services/pdf/operations/outline-ops');
       resolvedLevel = inferOutlineLevel({
         text: resolvedText,
         fontSize,
@@ -3571,7 +3630,6 @@ export class EditorActions {
   async generateAutomaticOutline(options?: { maxLevel?: number }): Promise<void> {
     if (!this.store.isDocumentLoaded) return;
 
-    const { extractAutomaticOutlineItems } = await import('../services/pdf/operations/outline-ops');
     const pageCount = this.service.document.getPageCount();
     const allPageSpans: EditableTextSpan[][] = [];
     const pageHeights: number[] = [];
@@ -3588,6 +3646,7 @@ export class EditorActions {
       }
     }
 
+    const { extractAutomaticOutlineItems } = await import('../services/pdf/operations/outline-ops');
     const items = extractAutomaticOutlineItems(allPageSpans, pageHeights, options);
     if (items.length === 0) return;
 
@@ -3767,8 +3826,215 @@ export class EditorActions {
    *
    * @return A promise resolving to an array of signature validation reports.
    */
+  /**
+   * Inspects and validates all ISO 32000 digital signatures present in the active document.
+   *
+   * @return A promise resolving to an array of signature validation reports.
+   */
   async validateActiveDocumentSignatures(): Promise<SignatureValidationResult[]> {
     return this.service.validateActiveDocumentSignatures(this.store.pageTransforms);
+  }
+
+  /**
+   * Submits a password to decrypt and open a password-protected document.
+   */
+  async submitDocumentPassword(password: string): Promise<boolean> {
+    const buffer = this.store.pendingPasswordBuffer;
+    const fileName = this.store.pendingPasswordFileName || 'document.pdf';
+    if (!buffer) return false;
+
+    try {
+      this.service.loadDocumentFromBuffer(buffer, password);
+      this.store.fileName = fileName;
+      this.store.currentPageIndex = 0;
+      this.store.isDocumentLoaded = true;
+      this.clearSelection(false);
+      useSelection().clear();
+      this.store.pageTransforms = {};
+      this.store.hiddenSpanIds.clear();
+      this.store.pageVersions = {};
+      if (this.canvasStore) {
+        this.canvasStore.elements = [];
+        this.canvasStore.selectElement(null);
+        this.canvasStore.clearDragState();
+      }
+      this.store.pageCount = this.service.document.getPageCount();
+      this.store.scannedPages = new Set();
+      this.store.pageOcrResults = new Map();
+      this.detectScannedPages();
+      this.store.isOwnerUnlocked = this.service.document.isOwnerUnlocked();
+      this.store.incrementRenderVersion();
+
+      let thumbnailDataUri: string | undefined;
+      if (this.store.pageCount > 0) {
+        try {
+          const { canvas } = this.service.document.getPage(0).render(0.2, { applyDpr: false });
+          thumbnailDataUri = canvas.toDataURL('image/jpeg', 0.6);
+        } catch (e) {
+          console.error('Failed to generate thumbnail', e);
+        }
+      }
+
+      const newFileId = crypto.randomUUID();
+      setFileBuffer(newFileId, buffer);
+      this.service.addFile({
+        id: newFileId,
+        fileName,
+        thumbnail: thumbnailDataUri,
+        sizeBytes: buffer.byteLength,
+        canvasElements: [],
+        pageTransforms: {},
+        hiddenSpanIds: [],
+        currentPageIndex: 0,
+        pageVersions: {},
+      });
+      this.store.activeWorkspaceFileId = newFileId;
+      this.historyStore?.initFile(newFileId);
+
+      this.store.closePasswordPromptDialog();
+      return true;
+    } catch (err) {
+      if (err instanceof PasswordRequiredError) {
+        this.store.passwordPromptError = 'Incorrect password. Please try again.';
+      } else {
+        this.store.passwordPromptError =
+          err instanceof Error ? err.message : 'Failed to decrypt document.';
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Cancels the pending password prompt dialog and clears pending buffers.
+   */
+  cancelPasswordPrompt(): void {
+    this.store.closePasswordPromptDialog();
+  }
+
+  /**
+   * Applies ISO 32000 standard encryption, passwords, and permissions to the active document.
+   */
+  async applyPasswordSecurity(
+    userPassword?: string,
+    ownerPassword?: string,
+    permissions?: number
+  ): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    const fileId = this.store.activeWorkspaceFileId;
+    if (!fileId) return;
+
+    this.service.applyPasswordSecurity({
+      userPassword,
+      ownerPassword,
+      permissions,
+    });
+
+    const encryptedBytes = await this.service.document.saveAsync(this.store.pageTransforms);
+    const newBuffer = encryptedBytes.buffer.slice(
+      encryptedBytes.byteOffset,
+      encryptedBytes.byteOffset + encryptedBytes.byteLength
+    ) as ArrayBuffer;
+
+    const authPwd = ownerPassword || userPassword || '';
+    setFileBuffer(fileId, newBuffer);
+    this.service.loadDocumentFromBuffer(newBuffer, authPwd);
+    this.store.isOwnerUnlocked = this.service.document.isOwnerUnlocked();
+    this.store.incrementRenderVersion();
+  }
+
+  /**
+   * Removes password security and permissions restrictions from the active document.
+   */
+  async removePasswordSecurity(ownerPassword?: string): Promise<boolean> {
+    if (!this.store.isDocumentLoaded) return false;
+    const fileId = this.store.activeWorkspaceFileId;
+    if (!fileId) return false;
+
+    try {
+      this.service.removePasswordSecurity(ownerPassword);
+      const decryptedBytes = await this.service.document.saveAsync(this.store.pageTransforms);
+      const newBuffer = decryptedBytes.buffer.slice(
+        decryptedBytes.byteOffset,
+        decryptedBytes.byteOffset + decryptedBytes.byteLength
+      ) as ArrayBuffer;
+
+      setFileBuffer(fileId, newBuffer);
+      this.service.loadDocumentFromBuffer(newBuffer);
+      this.store.isOwnerUnlocked = true;
+      this.store.incrementRenderVersion();
+      return true;
+    } catch (err) {
+      console.error('Failed to remove password security:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Authenticates with owner password to unlock administrative permissions.
+   */
+  unlockOwnerPermissions(password: string): boolean {
+    if (!this.store.isDocumentLoaded) return false;
+    const ok = this.service.unlockOwnerPermissions(password);
+    this.store.isOwnerUnlocked = ok;
+    return ok;
+  }
+
+  /**
+   * Unlocks all interactive AcroForm fields and annotations with full undo/redo parity.
+   */
+  async unlockForms(): Promise<{ fieldsUnlockedCount: number; annotationsUnlockedCount: number }> {
+    if (!this.store.isDocumentLoaded) {
+      return { fieldsUnlockedCount: 0, annotationsUnlockedCount: 0 };
+    }
+    const fileId = this.store.activeWorkspaceFileId;
+    if (!fileId) {
+      return { fieldsUnlockedCount: 0, annotationsUnlockedCount: 0 };
+    }
+
+    const currentBytes = await this.service.document.saveAsync(this.store.pageTransforms);
+    const prevBuffer =
+      getFileBuffer(fileId) ??
+      (currentBytes.buffer.slice(
+        currentBytes.byteOffset,
+        currentBytes.byteOffset + currentBytes.byteLength
+      ) as ArrayBuffer);
+
+    const result = await this.service.unlockAcroFormFields(currentBytes);
+    const newBuffer = result.unlockedBytes.buffer.slice(
+      result.unlockedBytes.byteOffset,
+      result.unlockedBytes.byteOffset + result.unlockedBytes.byteLength
+    ) as ArrayBuffer;
+
+    const cmd = new UnlockFormsCommand(
+      `Unlock ${result.fieldsUnlockedCount} Form Fields`,
+      fileId,
+      prevBuffer,
+      newBuffer,
+      result.fieldsUnlockedCount,
+      result.annotationsUnlockedCount
+    );
+
+    this.executeCommand(cmd);
+    return {
+      fieldsUnlockedCount: result.fieldsUnlockedCount,
+      annotationsUnlockedCount: result.annotationsUnlockedCount,
+    };
+  }
+
+  /**
+   * Opens the granular permissions manager dialog.
+   */
+  openPermissionsDialog(): void {
+    this.store.openPermissionsDialog();
+  }
+
+  /**
+   * Applies granular permission flags to the active document.
+   */
+  async applyPermissions(permissions: PdfPermissionFlags, ownerPassword?: string): Promise<void> {
+    const mask = computePermissionBitmask(permissions);
+    await this.applyPasswordSecurity(undefined, ownerPassword, mask);
+    this.store.closePermissionsDialog();
   }
 }
 
