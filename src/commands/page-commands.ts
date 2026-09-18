@@ -254,3 +254,40 @@ export class MutateDocumentCommand implements Command<'mutate-document'> {
     mutableThis.newBuffer = null;
   }
 }
+
+/**
+ * Command for unlocking AcroForm fields and widget annotations with full undo/redo parity.
+ */
+export class UnlockFormsCommand implements Command<'unlock-forms'> {
+  readonly type = 'unlock-forms' as const;
+
+  constructor(
+    readonly description: string,
+    readonly fileId: string,
+    readonly prevBuffer: ArrayBuffer,
+    readonly newBuffer: ArrayBuffer,
+    readonly fieldsUnlockedCount: number,
+    readonly annotationsUnlockedCount: number,
+  ) {}
+
+  execute(ctx: CommandContext): void {
+    setFileBuffer(this.fileId, this.newBuffer);
+    ctx.service.loadDocumentFromBuffer(this.newBuffer);
+    ctx.editorStore.pageCount = ctx.service.document.getPageCount();
+    ctx.editorStore.incrementRenderVersion();
+  }
+
+  undo(ctx: CommandContext): void {
+    setFileBuffer(this.fileId, this.prevBuffer);
+    ctx.service.loadDocumentFromBuffer(this.prevBuffer);
+    ctx.editorStore.pageCount = ctx.service.document.getPageCount();
+    ctx.editorStore.incrementRenderVersion();
+  }
+
+  dispose(): void {
+    const mutableThis = this as { prevBuffer: ArrayBuffer | null; newBuffer: ArrayBuffer | null };
+    mutableThis.prevBuffer = null;
+    mutableThis.newBuffer = null;
+  }
+}
+
