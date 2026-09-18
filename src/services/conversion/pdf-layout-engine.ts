@@ -31,6 +31,7 @@ import type {
   PageDimensions,
   PageSizePreset,
 } from './types';
+import { sanitizeTextForWinAnsi, safeWidthOfText } from './winansi-sanitizer';
 
 export const STANDARD_PAGE_SIZES: Record<PageSizePreset, PageDimensions> = {
   a4: { width: 595.28, height: 841.89 },
@@ -49,11 +50,14 @@ const DEFAULT_MARGINS: DocumentMargins = {
 };
 
 /**
- * Parses a hex color string (#RRGGBB, #RGB) into a pdf-lib RGB color.
+ * Parses a hex colour string (#RRGGBB, #RGB, #RRGGBBAA) into a pdf-lib RGB colour.
  */
 export function parseColor(hex?: string, fallback: RGB = rgb(0.1, 0.1, 0.1)): RGB {
   if (!hex) return fallback;
-  const clean = hex.replace('#', '').trim();
+  let clean = hex.replace('#', '').trim();
+  if (clean.length === 8) {
+    clean = clean.slice(0, 6);
+  }
   if (clean.length === 3) {
     const r = parseInt(clean[0] + clean[0], 16) / 255;
     const g = parseInt(clean[1] + clean[1], 16) / 255;
@@ -69,6 +73,8 @@ export function parseColor(hex?: string, fallback: RGB = rgb(0.1, 0.1, 0.1)): RG
   return fallback;
 }
 
+export const parseColour = parseColor;
+
 interface FontSet {
   readonly regular: PDFFont;
   readonly bold: PDFFont;
@@ -81,7 +87,10 @@ interface FontSet {
 /**
  * Font manager that embeds standard PDF fonts into a PDFDocument.
  */
-async function loadFontSet(doc: PDFDocument, family: 'helvetica' | 'times' | 'courier' = 'helvetica'): Promise<FontSet> {
+async function loadFontSet(
+  doc: PDFDocument,
+  family: 'helvetica' | 'times' | 'courier' = 'helvetica'
+): Promise<FontSet> {
   const mono = await doc.embedFont(StandardFonts.Courier);
   const monoBold = await doc.embedFont(StandardFonts.CourierBold);
 
@@ -91,6 +100,17 @@ async function loadFontSet(doc: PDFDocument, family: 'helvetica' | 'times' | 'co
       bold: await doc.embedFont(StandardFonts.TimesRomanBold),
       italic: await doc.embedFont(StandardFonts.TimesRomanItalic),
       boldItalic: await doc.embedFont(StandardFonts.TimesRomanBoldItalic),
+      mono,
+      monoBold,
+    };
+  }
+
+  if (family === 'courier') {
+    return {
+      regular: mono,
+      bold: monoBold,
+      italic: await doc.embedFont(StandardFonts.CourierOblique),
+      boldItalic: await doc.embedFont(StandardFonts.CourierBoldOblique),
       mono,
       monoBold,
     };
@@ -201,18 +221,24 @@ function breakPage(ctx: LayoutContext): void {
 
 /**
  * Ensures enough vertical room exists on the current page, breaking if needed.
+ * Prevents redundant breaks if cursor is already at top of page.
  */
 function ensureVerticalSpace(ctx: LayoutContext, requiredHeight: number): void {
-  if (ctx.cursorY + requiredHeight > ctx.pageHeight - ctx.margins.bottom) {
+  if (
+    ctx.cursorY > ctx.margins.top &&
+    ctx.cursorY + requiredHeight > ctx.pageHeight - ctx.margins.bottom
+  ) {
     breakPage(ctx);
   }
 }
 
 /**
- * Tokenizes text into words and whitespace.
+ * Tokenises text into words, whitespace, and single newlines.
+ * Sanitises input against WinAnsi limitations and normalises line breaks.
  */
 function splitIntoWords(text: string): string[] {
-  return text.match(/\S+|\s+/g) ?? [];
+  const clean = sanitizeTextForWinAnsi(text).replace(/\r\n|\r/g, '\n');
+  return clean.match(/\n|\S+|\t|[ ]+/g) ?? [];
 }
 
 interface WrappedTextLine {
@@ -222,9 +248,39 @@ interface WrappedTextLine {
     readonly size: number;
     readonly color: RGB;
     readonly width: number;
+    readonly isWhitespace?: boolean;
   }>;
   readonly width: number;
   readonly height: number;
+}
+
+/**
+ * Splits a single oversized word into smaller chunks fitting maxWidth.
+ */
+function breakOversizedWord(
+  word: string,
+  font: PDFFont,
+  size: number,
+  maxWidth: number
+): string[] {
+  const chunks: string[] = [];
+  let currentChunk = '';
+
+  for (let i = 0; i < word.length; i++) {
+    const candidate = currentChunk + word[i];
+    if (safeWidthOfText(font, candidate, size) <= maxWidth || currentChunk.length === 0) {
+      currentChunk = candidate;
+    } else {
+      chunks.push(currentChunk);
+      currentChunk = word[i];
+    }
+  }
+
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks;
 }
 
 /**
@@ -242,6 +298,17 @@ function wrapRunsToLines(
   let currentLineWidth = 0;
   let currentMaxHeight = defaultSize * 1.3;
 
+  function flushCurrentLine(): void {
+    lines.push({
+      segments: currentSegments,
+      width: currentLineWidth,
+      height: currentMaxHeight,
+    });
+    currentSegments = [];
+    currentLineWidth = 0;
+    currentMaxHeight = defaultSize * 1.3;
+  }
+
   for (const run of runs) {
     const font = resolveFontForStyle(fonts, run.style);
     const size = run.style?.fontSize ?? defaultSize;
@@ -250,19 +317,34 @@ function wrapRunsToLines(
 
     for (const word of words) {
       if (word === '\n') {
-        lines.push({
-          segments: currentSegments,
-          width: currentLineWidth,
-          height: currentMaxHeight,
-        });
-        currentSegments = [];
-        currentLineWidth = 0;
-        currentMaxHeight = defaultSize * 1.3;
+        flushCurrentLine();
         continue;
       }
 
-      const wordWidth = font.widthOfTextAtSize(word, size);
+      const isSpace = /^\s+$/.test(word);
+      const wordWidth = safeWidthOfText(font, word, size);
       const wordHeight = size * 1.3;
+
+      // Check if word alone exceeds maxWidth and needs character-level splitting
+      if (!isSpace && wordWidth > maxWidth && currentSegments.length === 0) {
+        const subChunks = breakOversizedWord(word, font, size, maxWidth);
+        for (let cIdx = 0; cIdx < subChunks.length; cIdx++) {
+          const chunk = subChunks[cIdx];
+          const chunkWidth = safeWidthOfText(font, chunk, size);
+          if (cIdx < subChunks.length - 1) {
+            lines.push({
+              segments: [{ text: chunk, font, size, color, width: chunkWidth }],
+              width: chunkWidth,
+              height: wordHeight,
+            });
+          } else {
+            currentSegments.push({ text: chunk, font, size, color, width: chunkWidth });
+            currentLineWidth = chunkWidth;
+            currentMaxHeight = wordHeight;
+          }
+        }
+        continue;
+      }
 
       if (currentLineWidth + wordWidth <= maxWidth || currentSegments.length === 0) {
         currentSegments.push({
@@ -271,28 +353,23 @@ function wrapRunsToLines(
           size,
           color,
           width: wordWidth,
+          isWhitespace: isSpace,
         });
         currentLineWidth += wordWidth;
         if (wordHeight > currentMaxHeight) currentMaxHeight = wordHeight;
       } else {
-        // Line full: flush and wrap
-        lines.push({
-          segments: currentSegments,
-          width: currentLineWidth,
-          height: currentMaxHeight,
-        });
-        currentSegments = [];
-        currentLineWidth = 0;
-        currentMaxHeight = defaultSize * 1.3;
+        // Line full: flush and start new line
+        flushCurrentLine();
 
         // Skip leading whitespace on wrapped new line
-        if (!/^\s+$/.test(word)) {
+        if (!isSpace) {
           currentSegments.push({
             text: word,
             font,
             size,
             color,
             width: wordWidth,
+            isWhitespace: false,
           });
           currentLineWidth = wordWidth;
           if (wordHeight > currentMaxHeight) currentMaxHeight = wordHeight;
@@ -302,11 +379,7 @@ function wrapRunsToLines(
   }
 
   if (currentSegments.length > 0) {
-    lines.push({
-      segments: currentSegments,
-      width: currentLineWidth,
-      height: currentMaxHeight,
-    });
+    flushCurrentLine();
   }
 
   return lines;
@@ -314,6 +387,7 @@ function wrapRunsToLines(
 
 /**
  * Renders a wrapped line at the given top-down cursor position.
+ * Trims trailing whitespace width for exact horizontal alignment.
  */
 function drawWrappedLine(
   page: PDFPage,
@@ -324,24 +398,37 @@ function drawWrappedLine(
   align: 'left' | 'center' | 'right' | 'justify' = 'left',
   containerWidth: number = line.width
 ): void {
+  // Compute line width excluding trailing whitespace
+  let contentWidth = line.width;
+  for (let i = line.segments.length - 1; i >= 0; i--) {
+    if (line.segments[i].isWhitespace) {
+      contentWidth -= line.segments[i].width;
+    } else {
+      break;
+    }
+  }
+
   let xOffset = 0;
   if (align === 'center') {
-    xOffset = Math.max(0, (containerWidth - line.width) / 2);
+    xOffset = Math.max(0, (containerWidth - contentWidth) / 2);
   } else if (align === 'right') {
-    xOffset = Math.max(0, containerWidth - line.width);
+    xOffset = Math.max(0, containerWidth - contentWidth);
   }
 
   let curX = startX + xOffset;
   const baselineY = pageHeight - cursorY - line.height * 0.8;
 
   for (const seg of line.segments) {
-    page.drawText(seg.text, {
-      x: curX,
-      y: baselineY,
-      size: seg.size,
-      font: seg.font,
-      color: seg.color,
-    });
+    const textToDraw = sanitizeTextForWinAnsi(seg.text);
+    if (textToDraw.length > 0) {
+      page.drawText(textToDraw, {
+        x: curX,
+        y: baselineY,
+        size: seg.size,
+        font: seg.font,
+        color: seg.color,
+      });
+    }
     curX += seg.width;
   }
 }
@@ -383,20 +470,22 @@ function renderParagraph(ctx: LayoutContext, block: ParagraphBlock): void {
 }
 
 /**
- * Renders a heading block into the layout context.
+ * Renders a heading block into the layout context supporting levels 1 to 6.
  */
 function renderHeading(ctx: LayoutContext, block: HeadingBlock): void {
-  const levelConfigs: Record<1 | 2 | 3 | 4, { size: number; before: number; after: number; color: RGB }> = {
+  const levelConfigs: Record<number, { size: number; before: number; after: number; color: RGB }> = {
     1: { size: 22, before: 18, after: 8, color: rgb(0.1, 0.15, 0.28) },
     2: { size: 16, before: 14, after: 6, color: rgb(0.15, 0.2, 0.32) },
     3: { size: 13, before: 10, after: 4, color: rgb(0.2, 0.25, 0.38) },
     4: { size: 11, before: 8, after: 4, color: rgb(0.25, 0.3, 0.42) },
+    5: { size: 10, before: 6, after: 3, color: rgb(0.3, 0.35, 0.45) },
+    6: { size: 9, before: 4, after: 2, color: rgb(0.35, 0.4, 0.5) },
   };
 
   const config = levelConfigs[block.level] ?? levelConfigs[1];
   const runs: StyledRun[] = [
     {
-      text: block.text,
+      text: sanitizeTextForWinAnsi(block.text),
       style: {
         bold: true,
         fontSize: config.size,
@@ -438,11 +527,11 @@ function renderList(ctx: LayoutContext, block: ListBlock): void {
   const defaultSize = ctx.options.fontSize ?? 10.5;
   const indentOffset = (block.indentLevel ?? 0) * 16;
   const bulletWidth = 16;
-  const contentWidth = ctx.printableWidth - indentOffset - bulletWidth;
+  const contentWidth = Math.max(100, ctx.printableWidth - indentOffset - bulletWidth);
 
   for (let i = 0; i < block.items.length; i++) {
     const itemRuns = block.items[i];
-    const bulletText = block.ordered ? `${i + 1}.` : '•';
+    const bulletText = block.ordered ? `${i + 1}.` : '\u2022';
     const lines = wrapRunsToLines(
       itemRuns,
       ctx.fonts,
@@ -478,7 +567,7 @@ function renderList(ctx: LayoutContext, block: ListBlock): void {
       ctx.cursorY += line.height;
     }
 
-    ctx.cursorY += 3; // Space between list items
+    ctx.cursorY += 3;
   }
 
   ctx.cursorY += 6;
@@ -486,48 +575,55 @@ function renderList(ctx: LayoutContext, block: ListBlock): void {
 
 /**
  * Renders a code block into the layout context with syntax background card.
+ * Draws cohesive background rectangles rather than per-line bordered boxes.
  */
 function renderCodeBlock(ctx: LayoutContext, block: CodeBlock): void {
   const codeLines = block.code.split('\n');
   const fontSize = 8.5;
   const lineHeight = fontSize * 1.35;
   const padding = 10;
-  const lineNumberWidth = block.showLineNumbers !== false ? 28 : 0;
+  const digits = Math.max(3, String(codeLines.length).length);
+  const lineNumberWidth = block.showLineNumbers !== false ? digits * 7 + 8 : 0;
   const textStartX = ctx.margins.left + padding + lineNumberWidth;
-  const contentWidth = ctx.printableWidth - padding * 2 - lineNumberWidth;
+  const contentWidth = Math.max(100, ctx.printableWidth - padding * 2 - lineNumberWidth);
 
   const totalHeight = codeLines.length * lineHeight + padding * 2;
 
-  // If entire code block fits on current page, keep together; otherwise break per line
   if (totalHeight <= ctx.printableHeight && ctx.cursorY + totalHeight > ctx.pageHeight - ctx.margins.bottom) {
     breakPage(ctx);
   }
 
   ctx.cursorY += 6;
 
+  let currentBlockTop = ctx.cursorY;
+  let currentBlockLineCount = 0;
+
   for (let idx = 0; idx < codeLines.length; idx++) {
-    ensureVerticalSpace(ctx, lineHeight + (idx === 0 ? padding : 0) + (idx === codeLines.length - 1 ? padding : 0));
-
-    // Draw background slice
-    const cardTop = ctx.cursorY;
-    const sliceHeight = lineHeight + (idx === 0 ? padding : 0) + (idx === codeLines.length - 1 ? padding : 0);
-    const pdfY = ctx.pageHeight - cardTop - sliceHeight;
-
-    ctx.activePage.drawRectangle({
-      x: ctx.margins.left,
-      y: pdfY,
-      width: ctx.printableWidth,
-      height: sliceHeight,
-      color: rgb(0.96, 0.97, 0.98),
-      borderColor: rgb(0.88, 0.9, 0.93),
-      borderWidth: 0.5,
-    });
+    if (ctx.cursorY > ctx.margins.top && ctx.cursorY + lineHeight + padding > ctx.pageHeight - ctx.margins.bottom) {
+      // Draw background for accumulated lines on current page
+      if (currentBlockLineCount > 0) {
+        const sliceHeight = currentBlockLineCount * lineHeight + padding;
+        const pdfY = ctx.pageHeight - currentBlockTop - sliceHeight;
+        ctx.activePage.drawRectangle({
+          x: ctx.margins.left,
+          y: pdfY,
+          width: ctx.printableWidth,
+          height: sliceHeight,
+          color: rgb(0.96, 0.97, 0.98),
+          borderColor: rgb(0.88, 0.9, 0.93),
+          borderWidth: 0.5,
+        });
+      }
+      breakPage(ctx);
+      currentBlockTop = ctx.cursorY;
+      currentBlockLineCount = 0;
+    }
 
     if (idx === 0) ctx.cursorY += padding;
 
     // Draw line number if enabled
     if (block.showLineNumbers !== false) {
-      const lineNumStr = `${idx + 1}`.padStart(3, ' ');
+      const lineNumStr = `${idx + 1}`.padStart(digits, ' ');
       ctx.activePage.drawText(lineNumStr, {
         x: ctx.margins.left + padding,
         y: ctx.pageHeight - ctx.cursorY - lineHeight * 0.8,
@@ -538,7 +634,8 @@ function renderCodeBlock(ctx: LayoutContext, block: CodeBlock): void {
     }
 
     // Draw code text
-    const text = codeLines[idx];
+    const rawCode = codeLines[idx];
+    const text = sanitizeTextForWinAnsi(rawCode);
     const maxChars = Math.floor(contentWidth / (fontSize * 0.6));
     const truncated = text.length > maxChars ? text.slice(0, maxChars) : text;
 
@@ -551,8 +648,22 @@ function renderCodeBlock(ctx: LayoutContext, block: CodeBlock): void {
     });
 
     ctx.cursorY += lineHeight;
+    currentBlockLineCount++;
 
-    if (idx === codeLines.length - 1) ctx.cursorY += padding;
+    if (idx === codeLines.length - 1) {
+      ctx.cursorY += padding;
+      const sliceHeight = currentBlockLineCount * lineHeight + padding * 2;
+      const pdfY = ctx.pageHeight - currentBlockTop - sliceHeight;
+      ctx.activePage.drawRectangle({
+        x: ctx.margins.left,
+        y: pdfY,
+        width: ctx.printableWidth,
+        height: sliceHeight,
+        color: rgb(0.96, 0.97, 0.98),
+        borderColor: rgb(0.88, 0.9, 0.93),
+        borderWidth: 0.5,
+      });
+    }
   }
 
   ctx.cursorY += 8;
@@ -560,6 +671,7 @@ function renderCodeBlock(ctx: LayoutContext, block: CodeBlock): void {
 
 /**
  * Renders a blockquote into the layout context with an accent left border.
+ * Supports multi-page pagination.
  */
 function renderQuote(ctx: LayoutContext, block: QuoteBlock): void {
   const fontSize = (ctx.options.fontSize ?? 10.5) * 1.05;
@@ -568,7 +680,7 @@ function renderQuote(ctx: LayoutContext, block: QuoteBlock): void {
 
   const runs: StyledRun[] = [
     {
-      text: block.text,
+      text: sanitizeTextForWinAnsi(block.text),
       style: {
         italic: true,
         fontSize,
@@ -577,26 +689,21 @@ function renderQuote(ctx: LayoutContext, block: QuoteBlock): void {
   ];
 
   const lines = wrapRunsToLines(runs, ctx.fonts, contentWidth, fontSize, rgb(0.25, 0.3, 0.4));
-  const totalHeight = lines.reduce((acc, l) => acc + l.height, 0) + 8;
-
-  ensureVerticalSpace(ctx, totalHeight);
-
-  const startY = ctx.cursorY;
-  const borderHeight = totalHeight - 4;
-  const pdfBorderY = ctx.pageHeight - startY - borderHeight;
-
-  // Left accent line
-  ctx.activePage.drawRectangle({
-    x: ctx.margins.left,
-    y: pdfBorderY,
-    width: 3.5,
-    height: borderHeight,
-    color: rgb(0.2, 0.45, 0.85),
-  });
-
   ctx.cursorY += 4;
 
   for (const line of lines) {
+    ensureVerticalSpace(ctx, line.height);
+
+    // Accent line alongside current line
+    const pdfBorderY = ctx.pageHeight - ctx.cursorY - line.height;
+    ctx.activePage.drawRectangle({
+      x: ctx.margins.left,
+      y: pdfBorderY,
+      width: 3.5,
+      height: line.height,
+      color: rgb(0.2, 0.45, 0.85),
+    });
+
     drawWrappedLine(
       ctx.activePage,
       ctx.pageHeight,
@@ -640,12 +747,11 @@ async function renderImage(ctx: LayoutContext, block: ImageBlock): Promise<void>
       ? await ctx.doc.embedPng(block.data)
       : await ctx.doc.embedJpg(block.data);
   } catch {
-    // If embedding fails, gracefully skip image
     return;
   }
 
-  const naturalWidth = block.width ?? embeddedImage.width;
-  const naturalHeight = block.height ?? embeddedImage.height;
+  const naturalWidth = Math.max(1, block.width ?? embeddedImage.width);
+  const naturalHeight = Math.max(1, block.height ?? embeddedImage.height);
   const aspect = naturalWidth / naturalHeight;
 
   let renderWidth = Math.min(ctx.printableWidth, naturalWidth);
@@ -653,7 +759,7 @@ async function renderImage(ctx: LayoutContext, block: ImageBlock): Promise<void>
 
   if (renderHeight > ctx.printableHeight * 0.6) {
     renderHeight = ctx.printableHeight * 0.6;
-    renderWidth = renderHeight * aspect;
+    renderWidth = Math.min(ctx.printableWidth, renderHeight * aspect);
   }
 
   ensureVerticalSpace(ctx, renderHeight + 10);
@@ -684,13 +790,13 @@ function resolveColumnWidths(
   );
 
   if (table.columnWidths && table.columnWidths.length === colCount) {
-    const sum = table.columnWidths.reduce((a, b) => a + b, 0);
+    const sanitised = table.columnWidths.map((w) => Math.max(1, w));
+    const sum = sanitised.reduce((a, b) => a + b, 0);
     if (sum > 0) {
-      return table.columnWidths.map((w) => (w / sum) * printableWidth);
+      return sanitised.map((w) => (w / sum) * printableWidth);
     }
   }
 
-  // Equal division fallback
   const equalWidth = printableWidth / colCount;
   return Array(colCount).fill(equalWidth);
 }
@@ -707,14 +813,15 @@ function drawTableRow(
   hasBorders: boolean,
   hasZebra: boolean
 ): number {
-  const paddingX = 6;
-  const paddingY = 5;
-  const fontSize = isHeader ? 9.5 : (ctx.options.fontSize ?? 9);
+  const isWide = colWidths.length > 10;
+  const paddingX = isWide ? 3 : 6;
+  const paddingY = isWide ? 3 : 5;
+  const fontSize = isHeader ? (isWide ? 7.5 : 9.5) : (ctx.options.fontSize ?? (isWide ? 7 : 9));
 
   // Measure cell line wraps to determine maximum row height
   const cellWrappedLines = rowCells.map((cell, colIdx) => {
-    const colW = colWidths[colIdx] ?? colWidths[colWidths.length - 1];
-    const cellInnerW = Math.max(20, colW - paddingX * 2);
+    const colW = colWidths[colIdx] ?? colWidths[colWidths.length - 1] ?? 50;
+    const cellInnerW = Math.max(15, colW - paddingX * 2);
     return wrapRunsToLines(
       cell.runs,
       ctx.fonts,
@@ -756,7 +863,7 @@ function drawTableRow(
   // Draw cells
   let currentX = ctx.margins.left;
   for (let c = 0; c < rowCells.length; c++) {
-    const colW = colWidths[c] ?? colWidths[colWidths.length - 1];
+    const colW = colWidths[c] ?? colWidths[colWidths.length - 1] ?? 50;
     const lines = cellWrappedLines[c];
     let textCursorY = ctx.cursorY + paddingY;
 
@@ -767,7 +874,7 @@ function drawTableRow(
         line,
         currentX + paddingX,
         textCursorY,
-        rowCells[c]?.align ?? (isHeader ? 'left' : 'left'),
+        rowCells[c]?.align ?? 'left',
         colW - paddingX * 2
       );
       textCursorY += line.height;
@@ -821,8 +928,8 @@ function renderTable(ctx: LayoutContext, table: TableBlock): void {
   // Render body rows
   for (let rIdx = 0; rIdx < bodyRows.length; rIdx++) {
     const row = bodyRows[rIdx];
-    // Check if row fits; if not, break page and re-render header!
-    if (ctx.cursorY + 30 > ctx.pageHeight - ctx.margins.bottom) {
+    // Check if row fits; if not, break page and re-render header
+    if (ctx.cursorY + 25 > ctx.pageHeight - ctx.margins.bottom) {
       breakPage(ctx);
       const reHeaderH = drawTableRow(ctx, headerRow.cells, colWidths, true, 0, hasBorders, false);
       ctx.cursorY += reHeaderH;
@@ -840,15 +947,22 @@ function renderTable(ctx: LayoutContext, table: TableBlock): void {
  */
 function decorateDocumentPages(ctx: LayoutContext, title?: string): void {
   const totalPages = ctx.pages.length;
-  const docTitle = title ?? ctx.options.title;
+  const rawTitle = title ?? ctx.options.title;
+  const docTitle = rawTitle ? sanitizeTextForWinAnsi(rawTitle) : undefined;
 
   for (let i = 0; i < totalPages; i++) {
     const page = ctx.pages[i];
 
     // Running header on pages > 0 if title is available
     if (i > 0 && docTitle) {
-      const headerY = ctx.pageHeight - ctx.margins.top + 20;
-      page.drawText(docTitle, {
+      const headerY = Math.min(ctx.pageHeight - 15, ctx.pageHeight - ctx.margins.top + 15);
+      const maxTitleWidth = ctx.printableWidth - 20;
+      let displayTitle = docTitle;
+      if (safeWidthOfText(ctx.fonts.regular, displayTitle, 8.5) > maxTitleWidth) {
+        displayTitle = `${displayTitle.slice(0, 40)}...`;
+      }
+
+      page.drawText(displayTitle, {
         x: ctx.margins.left,
         y: headerY,
         size: 8.5,
@@ -866,9 +980,9 @@ function decorateDocumentPages(ctx: LayoutContext, title?: string): void {
 
     // Running footer with page counter if enabled
     if (ctx.options.includePageNumbers !== false) {
-      const footerY = Math.max(20, ctx.margins.bottom - 24);
+      const footerY = Math.max(12, Math.min(ctx.margins.bottom - 20, 24));
       const pageText = `Page ${i + 1} of ${totalPages}`;
-      const pageTextWidth = ctx.fonts.regular.widthOfTextAtSize(pageText, 8.5);
+      const pageTextWidth = safeWidthOfText(ctx.fonts.regular, pageText, 8.5);
 
       page.drawLine({
         start: { x: ctx.margins.left, y: footerY + 12 },
@@ -942,11 +1056,10 @@ export async function layoutGridDocument(
   gridDoc: GridDocument,
   options?: DocumentConversionOptions
 ): Promise<{ pageCount: number }> {
-  // Auto-detect landscape if maximum columns > 5
-  const maxCols = Math.max(
-    ...gridDoc.sheets.flatMap((s) => s.rows.map((r) => r.length)),
-    1
-  );
+  const maxCols = gridDoc.sheets.reduce((max, s) => {
+    const sheetMax = s.rows.reduce((m, r) => Math.max(m, r.length), 0);
+    return Math.max(max, sheetMax);
+  }, 1);
 
   const effectiveOrientation = options?.orientation ?? (maxCols > 5 ? 'landscape' : 'portrait');
   const effectiveOptions: DocumentConversionOptions = {
@@ -1005,10 +1118,13 @@ export async function layoutSlideDocument(
     height: slideDoc.height || 540,
   };
 
+  const slidesToRender =
+    slideDoc.slides.length > 0 ? slideDoc.slides : [{ slideIndex: 0, elements: [] }];
+
   const fonts = await loadFontSet(doc, options?.fontFamily ?? 'helvetica');
 
-  for (let sIdx = 0; sIdx < slideDoc.slides.length; sIdx++) {
-    const slide = slideDoc.slides[sIdx];
+  for (let sIdx = 0; sIdx < slidesToRender.length; sIdx++) {
+    const slide = slidesToRender[sIdx];
     const page = doc.addPage([slideDims.width, slideDims.height]);
 
     // Slide background
@@ -1033,8 +1149,9 @@ export async function layoutSlideDocument(
 
     // Slide Title
     if (slide.title) {
+      const cleanTitle = sanitizeTextForWinAnsi(slide.title);
       const titleLines = wrapRunsToLines(
-        [{ text: slide.title, style: { bold: true, fontSize: 24 } }],
+        [{ text: cleanTitle, style: { bold: true, fontSize: 24 } }],
         fonts,
         slideDims.width - 96,
         24,
@@ -1046,7 +1163,6 @@ export async function layoutSlideDocument(
         cursorY += line.height;
       }
 
-      // Divider below title
       cursorY += 8;
       const pdfDividerY = slideDims.height - cursorY;
       page.drawLine({
@@ -1063,7 +1179,7 @@ export async function layoutSlideDocument(
       if (el.kind === 'bullet_list' && el.items && el.items.length > 0) {
         for (const item of el.items) {
           const lines = wrapRunsToLines(
-            [{ text: item, style: { fontSize: 14 } }],
+            [{ text: sanitizeTextForWinAnsi(item), style: { fontSize: 14 } }],
             fonts,
             slideDims.width - 130,
             14,
@@ -1072,7 +1188,7 @@ export async function layoutSlideDocument(
 
           if (lines.length > 0) {
             const bulletY = slideDims.height - cursorY - lines[0].height * 0.8;
-            page.drawText('•', {
+            page.drawText('\u2022', {
               x: 56,
               y: bulletY,
               size: 16,
@@ -1087,6 +1203,19 @@ export async function layoutSlideDocument(
             cursorY += 6;
           }
         }
+      } else if (el.kind === 'subtitle' && el.runs) {
+        const lines = wrapRunsToLines(
+          el.runs,
+          fonts,
+          slideDims.width - 96,
+          16,
+          rgb(0.3, 0.35, 0.45)
+        );
+        for (const line of lines) {
+          drawWrappedLine(page, slideDims.height, line, 48, cursorY, 'left');
+          cursorY += line.height;
+        }
+        cursorY += 10;
       } else if (el.kind === 'body' && el.runs) {
         const lines = wrapRunsToLines(
           el.runs,
@@ -1101,7 +1230,7 @@ export async function layoutSlideDocument(
         }
         cursorY += 12;
       } else if (el.kind === 'card' && el.title) {
-        // Draw presentation card container
+        const cardTitle = sanitizeTextForWinAnsi(el.title);
         const cardH = 80;
         const cardPdfY = slideDims.height - cursorY - cardH;
 
@@ -1115,7 +1244,7 @@ export async function layoutSlideDocument(
           borderWidth: 1,
         });
 
-        page.drawText(el.title, {
+        page.drawText(cardTitle, {
           x: 64,
           y: cardPdfY + cardH - 26,
           size: 14,
@@ -1138,8 +1267,8 @@ export async function layoutSlideDocument(
 
     // Slide footer numbering
     if (options?.showSlideNumbers !== false) {
-      const footerText = `Slide ${sIdx + 1} of ${slideDoc.slides.length}`;
-      const footerW = fonts.regular.widthOfTextAtSize(footerText, 9);
+      const footerText = `Slide ${sIdx + 1} of ${slidesToRender.length}`;
+      const footerW = safeWidthOfText(fonts.regular, footerText, 9);
       page.drawText(footerText, {
         x: slideDims.width - 48 - footerW,
         y: 20,
@@ -1149,7 +1278,7 @@ export async function layoutSlideDocument(
       });
 
       if (slideDoc.title) {
-        page.drawText(slideDoc.title, {
+        page.drawText(sanitizeTextForWinAnsi(slideDoc.title), {
           x: 48,
           y: 20,
           size: 9,
@@ -1160,5 +1289,5 @@ export async function layoutSlideDocument(
     }
   }
 
-  return { pageCount: slideDoc.slides.length };
+  return { pageCount: slidesToRender.length };
 }
