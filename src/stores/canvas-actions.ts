@@ -24,6 +24,8 @@ import {
 } from '../commands';
 import { screenToPageCoords } from '../utils/geometry';
 import { safeClone } from '../utils/clone-utils';
+import { computeDragSnap, computeResizeSnap, extractSnapCandidates } from '../utils/snapping-engine';
+import type { SnapCandidate } from '../types/snapping-types';
 
 const CANVAS_ACTIONS_KEY = Symbol('canvas-actions');
 
@@ -143,6 +145,42 @@ export class CanvasActions {
         this.canvasStore.selectElement(elementId);
     }
 
+    private getPageDimensions(
+        pageIndex: number,
+        pageEl?: HTMLElement,
+        zoom: number = 1,
+    ): { width: number; height: number } {
+        const fromDoc = this.editorActions?.service?.document?.getPageDimensions(pageIndex);
+        if (fromDoc && fromDoc.widthPts > 0 && fromDoc.heightPts > 0) {
+            return { width: fromDoc.widthPts, height: fromDoc.heightPts };
+        }
+        if (pageEl && pageEl.offsetWidth > 0 && pageEl.offsetHeight > 0) {
+            return {
+                width: pageEl.offsetWidth / (zoom || 1),
+                height: pageEl.offsetHeight / (zoom || 1),
+            };
+        }
+        return { width: 612, height: 792 };
+    }
+
+    /**
+     * Extracts snap candidates for a page combining canvas elements and cached PDF layout objects.
+     *
+     * @param pageIndex Target page index.
+     * @param excludeElementId Optional canvas element ID to exclude from candidates.
+     */
+    private getSnapCandidates(pageIndex: number, excludeElementId?: string): SnapCandidate[] {
+        const cachedSpans = this.editorActions?.service?.document?.getCachedPageSpans(pageIndex);
+        const hiddenSpanIds = this.editorActions?.store?.hiddenSpanIds;
+        return extractSnapCandidates(
+            pageIndex,
+            this.canvasStore.getElementsByPage(pageIndex),
+            excludeElementId,
+            cachedSpans,
+            hiddenSpanIds,
+        );
+    }
+
     updateDrag(
         pointerX: number,
         pointerY: number,
@@ -150,6 +188,7 @@ export class CanvasActions {
         zoom: number,
         pageTransform?: PageTransform,
         targetPageIndex?: number,
+        options?: { disabledSnap?: boolean; screenThresholdPx?: number },
     ): void {
         const state = this.canvasStore.dragState;
         if (!state || state.mode !== 'move') return;
@@ -161,9 +200,34 @@ export class CanvasActions {
         const grabOffsetX = state.grabOffsetX ?? (state.startX - state.originX);
         const grabOffsetY = state.grabOffsetY ?? (state.startY - state.originY);
 
-        const newX = x - grabOffsetX;
-        const newY = y - grabOffsetY;
+        let newX = x - grabOffsetX;
+        let newY = y - grabOffsetY;
         const resolvedTargetPage = targetPageIndex !== undefined ? targetPageIndex : element.pageIndex;
+
+        if (!options?.disabledSnap) {
+            const pageDims = this.getPageDimensions(resolvedTargetPage, pageEl, zoom);
+            const candidates = this.getSnapCandidates(resolvedTargetPage, element.id);
+
+            const cropMargins = this.editorActions?.store?.activeCrop?.pageIndex === resolvedTargetPage
+                ? this.editorActions?.store?.activeCrop?.margins
+                : undefined;
+
+            const snapResult = computeDragSnap(
+                { x: newX, y: newY, width: element.width, height: element.height },
+                candidates,
+                pageDims,
+                resolvedTargetPage,
+                zoom,
+                cropMargins,
+                { screenThresholdPx: options?.screenThresholdPx, disabled: options?.disabledSnap },
+            );
+
+            newX = snapResult.x;
+            newY = snapResult.y;
+            this.canvasStore.activeSnapGuides = snapResult.guides;
+        } else {
+            this.canvasStore.clearSnapGuides();
+        }
 
         const updates: Partial<CanvasElement> = {
             x: newX,
@@ -253,7 +317,15 @@ export class CanvasActions {
         this.canvasStore.selectElement(elementId);
     }
 
-    updateResize(pointerX: number, pointerY: number, pageEl: HTMLElement, zoom: number, shiftKey: boolean = false, pageTransform?: PageTransform): void {
+    updateResize(
+        pointerX: number,
+        pointerY: number,
+        pageEl: HTMLElement,
+        zoom: number,
+        shiftKey: boolean = false,
+        pageTransform?: PageTransform,
+        options?: { disabledSnap?: boolean; screenThresholdPx?: number },
+    ): void {
         const state = this.canvasStore.dragState;
         if (!state || state.mode !== 'resize' || !state.handle) return;
         
@@ -335,6 +407,32 @@ export class CanvasActions {
             } else if (state.handle.includes('bottom')) {
                 newHeight = Math.max(10, state.originHeight + dy);
             }
+        }
+
+        if (!options?.disabledSnap && (!element.rotation || element.rotation % 90 === 0)) {
+            const pageDims = this.getPageDimensions(element.pageIndex, pageEl, zoom);
+            const candidates = this.getSnapCandidates(element.pageIndex, element.id);
+
+            const cropMargins = this.editorActions?.store?.activeCrop?.pageIndex === element.pageIndex
+                ? this.editorActions?.store?.activeCrop?.margins
+                : undefined;
+
+            const snapResult = computeResizeSnap(
+                state.handle,
+                { x: newX, y: newY, width: newWidth, height: newHeight },
+                candidates,
+                pageDims,
+                element.pageIndex,
+                zoom,
+                cropMargins,
+                { screenThresholdPx: options?.screenThresholdPx, disabled: options?.disabledSnap },
+            );
+
+            newX = snapResult.x;
+            newY = snapResult.y;
+            this.canvasStore.activeSnapGuides = snapResult.guides;
+        } else {
+            this.canvasStore.clearSnapGuides();
         }
 
         const oldCenterX = state.originX + state.originWidth / 2;
