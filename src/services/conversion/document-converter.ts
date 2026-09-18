@@ -138,7 +138,12 @@ export class DocumentConverter {
       throw new Error(`Unsupported document format for conversion: "${input.name}".`);
     }
 
-    return converter.convert(input, options);
+    try {
+      return await converter.convert(input, options);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to convert "${input.name}": ${message}`);
+    }
   }
 
   /**

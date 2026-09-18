@@ -12,3 +12,4 @@ export * from './converters/docx-converter';
 export * from './converters/spreadsheet-converter';
 export * from './converters/pptx-converter';
 export * from './converters/text-converter';
+export * from './winansi-sanitizer';
