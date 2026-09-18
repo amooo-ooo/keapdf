@@ -1,5 +1,11 @@
 import { getContext, setContext } from 'svelte';
-import type { CanvasElement, DragState, ElementDropPayload, DropPreviewState } from './canvas-types';
+import type {
+    CanvasElement,
+    DragState,
+    ElementDropPayload,
+    DropPreviewState,
+    SnapGuide,
+} from './canvas-types';
 
 const CANVAS_STORE_KEY = Symbol('canvas-store');
 const EMPTY_ELEMENTS: CanvasElement[] = Object.freeze([]) as unknown as CanvasElement[];
@@ -13,6 +19,7 @@ export class CanvasStore {
     activeDropPayload = $state<ElementDropPayload | null>(null);
     dropPreview = $state<DropPreviewState | null>(null);
     activeDropPageIndex = $state<number | null>(null);
+    activeSnapGuides = $state<SnapGuide[]>([]);
 
     selectedElement = $derived(this.elements.find((e) => e.id === this.selectedElementId) ?? null);
 
@@ -103,6 +110,13 @@ export class CanvasStore {
 
     clearDragState(): void {
         this.dragState = null;
+        this.clearSnapGuides();
+    }
+
+    clearSnapGuides(): void {
+        if (this.activeSnapGuides.length > 0) {
+            this.activeSnapGuides = [];
+        }
     }
 
     setDropPreview(preview: DropPreviewState | null): void {
@@ -129,6 +143,7 @@ export class CanvasStore {
         this.activeDropPayload = null;
         this.dropPreview = null;
         this.activeDropPageIndex = null;
+        this.clearSnapGuides();
     }
 
     generateId(): string {
