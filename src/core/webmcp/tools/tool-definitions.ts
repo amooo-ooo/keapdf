@@ -21,12 +21,11 @@ import type { CanvasElement, ShapeVariant, FormFieldVariant, FormFieldElement, S
 import type { DocumentMetadataUpdate, SanitizeOptions, CompressOptions, CompressSummary, CompressionLevel, HighlightRect, EditableSpan } from '../../types';
 import type { ImpositionConfig } from '../../../services/pdf/operations/types';
 import { verifyAnchorMatch, normalizeText } from '../sdg/sdg-normalizer';
-import { ReplaceTextCommand, PositionTextCommand } from '../../../commands';
+import { ReplaceTextCommand, PositionTextCommand } from '../../../commands/text-commands';
 import { getUnifiedPageCharacters, calculateUnifiedHighlightRects } from '../../../services/pdf/unified-text-provider';
 import { applyStyleToCanvasElement } from '../../../utils/text-range-utils';
 import { getSavedSignatures, saveSignature, getDefaultSignature, type SavedSignature } from '../../../services/signature-storage';
-import { documentConverter, type DocumentConversionOptions } from '../../../services/conversion';
-import { OcrService } from '../../../services/ocr';
+import type { DocumentConversionOptions } from '../../../services/conversion';
 
 const SPEC_VERSION = '1.0.0';
 
@@ -1973,6 +1972,7 @@ export function createWebMcpTools(ctx: WebMcpContext): Array<ModelContextTool<Re
           options.includeGridlines = input.includeGridlines;
         }
 
+        const { documentConverter } = await import('../../../services/conversion');
         const converted = await documentConverter.convertDocument(
           {
             name: fileName,
@@ -4144,6 +4144,7 @@ export function createWebMcpTools(ctx: WebMcpContext): Array<ModelContextTool<Re
       totalPages: number;
       detections: Array<{ pageIndex: number; isScanned: boolean; confidence: number; reason: string }>;
     }>> => {
+      const { OcrService } = await import('../../../services/ocr');
       const ocrService = OcrService.getInstance();
       const detectedMap = ocrService.detectDocumentScannedPages(ctx.pdfDoc);
       const totalPages = ctx.pdfDoc.getPageCount();
