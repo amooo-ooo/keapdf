@@ -12,24 +12,27 @@
   import {
     screenToPageCoordsWithMetrics,
     capturePageMetrics,
-    type CachedPageMetrics,
     calculatePageCenteringScroll,
     resolveTargetPageIndex,
     calculateOutOfBoundsScrollSpeeds,
     calculatePageLayoutDimensions,
-    type PageLayoutBound,
-    type PageLayoutDimensions,
     computePageVerticalOffsets,
     resolvePageIndexFromOffsets,
-    type PageVerticalOffset,
   } from '../../utils/geometry';
+  import type {
+    CachedPageMetrics,
+    PageLayoutBound,
+    PageLayoutDimensions,
+    PageVerticalOffset,
+  } from '../../utils/geometry';
+  import { computeDragSnap, extractSnapCandidates } from '../../utils/snapping-engine';
   import PdfPageView from './PdfPageView.svelte';
   import PageOrganizerPanel from '../panels/PageOrganizerPanel.svelte';
 
   import { Button } from '$lib/components/ui/button/index.js';
   import { FileText, Globe, AlertCircle, Files, FileType } from 'lucide-svelte';
-  import { documentConverter } from '../../services/conversion';
   import { useFeatureFlagStore } from '../../core/feature-flags';
+  import { isPdfFile, isConvertibleDocumentFile } from '../../utils/file-type-utils';
 
   const store = useEditorStore();
   const actions = useEditorActions();
@@ -153,7 +156,7 @@
     cachedPageLayouts = layouts;
   }
 
-  function performDragMove(clientX: number, clientY: number): void {
+  function performDragMove(clientX: number, clientY: number, disabledSnap: boolean = false): void {
     if (!canvasStore.dragState || canvasStore.dragState.mode !== 'move' || !viewportEl) return;
     const draggedElement = canvasStore.elements.find(el => el.id === canvasStore.dragState?.elementId);
     if (!draggedElement) return;
@@ -187,7 +190,7 @@
 
     if (cachedTargetLayerEl) {
       const targetPt = store.getPageTransform(targetPageIndex);
-      canvasActions.updateDrag(clientX, clientY, cachedTargetLayerEl, store.zoom, targetPt, targetPageIndex);
+      canvasActions.updateDrag(clientX, clientY, cachedTargetLayerEl, store.zoom, targetPt, targetPageIndex, { disabledSnap });
     }
   }
 
@@ -257,8 +260,9 @@
       if (canvasStore.dragState.mode === 'move') {
         lastDragClientX = e.clientX;
         lastDragClientY = e.clientY;
+        const disabledSnap = e.ctrlKey || e.metaKey;
         updateAutoScroll(e.clientX, e.clientY);
-        performDragMove(e.clientX, e.clientY);
+        performDragMove(e.clientX, e.clientY, disabledSnap);
       } else {
         const pageSelector = `[data-page-index="${draggedElement.pageIndex}"]`;
         const layerEl = (
@@ -269,7 +273,8 @@
 
         const pt = store.getPageTransform(draggedElement.pageIndex);
         if (canvasStore.dragState.mode === 'resize') {
-          canvasActions.updateResize(e.clientX, e.clientY, layerEl, store.zoom, e.shiftKey, pt);
+          const disabledSnap = e.ctrlKey || e.metaKey;
+          canvasActions.updateResize(e.clientX, e.clientY, layerEl, store.zoom, e.shiftKey, pt, { disabledSnap });
         } else if (canvasStore.dragState.mode === 'rotate') {
           canvasActions.updateRotate(e.clientX, e.clientY, layerEl, store.zoom, pt);
         }
@@ -375,8 +380,9 @@
       layouts.push(getPageLayout(i));
     }
 
-    cachedVerticalOffsets = computePageVerticalOffsets(layouts, currentY);
-    return cachedVerticalOffsets;
+    const offsets = computePageVerticalOffsets(layouts, currentY);
+    cachedVerticalOffsets = offsets;
+    return offsets;
   }
 
   function resolvePageIndexAtScrollY(targetScrollY: number): number {
@@ -730,8 +736,32 @@
     let previewX = coords.x - w / 2;
     let previewY = coords.y - h / 2;
 
-    previewX = Math.max(0, Math.min(maxW - w, previewX));
-    previewY = Math.max(0, Math.min(maxH - h, previewY));
+    const pageDims = { width: maxW, height: maxH };
+    const pdfSpans = actions.service.document?.getCachedPageSpans(pageIndex);
+    const candidates = extractSnapCandidates(
+      pageIndex,
+      canvasStore.getElementsByPage(pageIndex),
+      undefined,
+      pdfSpans,
+      store.hiddenSpanIds,
+    );
+
+    const cropMargins = store.activeCrop?.pageIndex === pageIndex
+      ? store.activeCrop?.margins
+      : undefined;
+
+    const snapResult = computeDragSnap(
+      { x: previewX, y: previewY, width: w, height: h },
+      candidates,
+      pageDims,
+      pageIndex,
+      store.zoom,
+      cropMargins,
+    );
+
+    previewX = Math.max(0, Math.min(maxW - w, snapResult.x));
+    previewY = Math.max(0, Math.min(maxH - h, snapResult.y));
+    canvasStore.activeSnapGuides = snapResult.guides;
 
     const roundedX = Math.round(previewX);
     const roundedY = Math.round(previewY);
@@ -867,18 +897,14 @@
       if (!store.isDocumentLoaded) {
         if (
           files.length === 1 &&
-          (files[0].type === 'application/pdf' ||
-            files[0].name.toLowerCase().endsWith('.pdf') ||
-            documentConverter.isConvertible(files[0].name, undefined, files[0].type))
+          (isPdfFile(files[0], files[0].name) || isConvertibleDocumentFile(files[0], files[0].name))
         ) {
           actions.loadDocumentFromFile(files[0]);
         } else {
           actions.mergeAndLoadFiles(files);
         }
       } else if (
-        files[0].type === 'application/pdf' ||
-        files[0].name.toLowerCase().endsWith('.pdf') ||
-        documentConverter.isConvertible(files[0].name, undefined, files[0].type)
+        isPdfFile(files[0], files[0].name) || isConvertibleDocumentFile(files[0], files[0].name)
       ) {
         actions.loadDocumentFromFile(files[0]);
       }
