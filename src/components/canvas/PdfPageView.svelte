@@ -3,7 +3,7 @@
   import type { EditableSpan, EditableTextSpan, EditableImageSpan, EditableShapeSpan, EditableFormFieldSpan, PageCharacter, HighlightRect, TextLine, TextWord, AnnotationItem, PageCropInfo } from '../../core/types';
   import { CheckSquare, Circle, ChevronDown, PenTool, ScanText, Loader2 } from 'lucide-svelte';
   import { getUnifiedPageCharacters, findUnifiedCharacterAt, findClosestUnifiedCharacter, calculateUnifiedHighlightRects } from '../../services/pdf/unified-text-provider';
-  import { OcrService } from '../../services/ocr';
+  import { ocrResultToSpans } from '../../services/ocr/ocr-span-converter';
   import { useEditorStore, getFileBuffer } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useSelection } from '../../stores/selection.svelte';
@@ -146,7 +146,7 @@
   const showOverlays = $derived(!store.showOrganizerView && (store.activeTool === 'select' || store.activeTool === 'text' || store.activeTool === 'highlight' || store.activeTool === 'pen' || store.activeTool === 'redact' || store.activeTool === 'note' || store.activeTool === 'eraser') && isVisible);
 
   const unifiedCharacters = $derived(
-    (store.activeTool === 'highlight' || store.activeTool === 'redact') && isVisible
+    (store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'pen') && isVisible
       ? getUnifiedPageCharacters(pageIndex, pageCharacters, canvasStore.getElementsByPage(pageIndex))
       : []
   );
@@ -833,10 +833,12 @@
     }
     const currentVer = store.renderVersion;
     const currentPgVer = store.pageVersions[pageIndex] || 0;
+    const isTextAwareAnnotation = store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'pen';
     if (
       hasExtracted &&
       cachedVersion === currentVer &&
-      cachedPageVersion === currentPgVer
+      cachedPageVersion === currentPgVer &&
+      (!isTextAwareAnnotation || pageCharacters.length > 0)
     ) {
       return;
     }
@@ -849,7 +851,7 @@
         editableFormFieldSpans = cached.formFields;
         if (cached.pageCharacters) {
           pageCharacters = cached.pageCharacters;
-        } else if (store.activeTool === 'highlight' || store.activeTool === 'redact') {
+        } else if (isTextAwareAnnotation) {
           pageCharacters = actions.service.document.getPage(pageIndex).extractCharacters();
           cached.pageCharacters = pageCharacters;
         }
@@ -857,7 +859,7 @@
           const hasOcrMerged = editableSpans.some((s) => s.isOcr || s.id.startsWith(`ocr-span-${pageIndex}`));
           if (!hasOcrMerged) {
             const ocrResult = store.pageOcrResults.get(pageIndex)!;
-            const ocrData = OcrService.getInstance().ocrResultToSpans(ocrResult);
+            const ocrData = ocrResultToSpans(ocrResult);
             editableSpans = sortByAreaDescending([...editableSpans, ...ocrData.textSpans]);
             pageCharacters = [...pageCharacters, ...ocrData.characters];
           }
@@ -870,13 +872,13 @@
 
       const rawTextSpans = actions.service.document.getPage(pageIndex).extractTextSpans();
       let combinedTextSpans = [...rawTextSpans];
-      let combinedCharacters = (store.activeTool === 'highlight' || store.activeTool === 'redact')
+      let combinedCharacters = isTextAwareAnnotation
         ? actions.service.document.getPage(pageIndex).extractCharacters()
         : [];
 
       if (store.pageOcrResults.has(pageIndex)) {
         const ocrResult = store.pageOcrResults.get(pageIndex)!;
-        const ocrData = OcrService.getInstance().ocrResultToSpans(ocrResult);
+        const ocrData = ocrResultToSpans(ocrResult);
         const filteredOcrSpans = ocrData.textSpans.filter((ocrSpan) => {
           return !rawTextSpans.some(
             (raw) => Math.hypot(raw.left - ocrSpan.left, raw.top - ocrSpan.top) < 4.0 && raw.text.trim() === ocrSpan.text.trim()
@@ -965,8 +967,13 @@
   });
 
   $effect(() => {
+    const isTextAwareAnnotation = store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'pen';
     if (showOverlays && isVisible) {
-      extractOverlaySpansIfNeeded();
+      if (isTextAwareAnnotation && pageCharacters.length === 0) {
+        extractOverlaySpansIfNeeded();
+      } else {
+        extractOverlaySpansIfNeeded();
+      }
     }
   });
 
@@ -1269,7 +1276,7 @@
   }
 
   function updateHover(e: PointerEvent): void {
-    if ((store.activeTool !== 'highlight' && store.activeTool !== 'redact') || isDrawing || !containerWrapperEl) {
+    if ((store.activeTool !== 'highlight' && store.activeTool !== 'redact' && store.activeTool !== 'pen') || isDrawing || !containerWrapperEl) {
       hoveringChar = null;
       return;
     }
@@ -1391,6 +1398,43 @@
           strokeWidth: 14,
           opacity: 0.4,
           isHighlight: true,
+        };
+
+        canvasStore.addElement(newPath);
+      }
+    } else if (store.activeTool === 'pen') {
+      isAreaRedactMode = false;
+      const hitChar = findUnifiedCharacterAt(unifiedCharacters, x, y, 10, 8);
+      if (hitChar) {
+        isTextHighlightMode = true;
+        startCharIndex = hitChar.charIndex;
+        currentCharIndex = hitChar.charIndex;
+        previewHighlightRects = calculateUnifiedHighlightRects(unifiedCharacters, hitChar.charIndex, hitChar.charIndex);
+      } else {
+        isTextHighlightMode = false;
+        startCharIndex = null;
+        currentCharIndex = null;
+        previewHighlightRects = [];
+        currentPathId = canvasStore.generateId();
+
+        const newPath: PathElement = {
+          id: currentPathId,
+          kind: 'path',
+          pageIndex,
+          x,
+          y,
+          width: 0,
+          height: 0,
+          rotation: 0,
+          locked: false,
+          visible: true,
+          flipX: false,
+          flipY: false,
+          points: [{ x, y }],
+          stroke: store.annotateColor,
+          strokeWidth: store.annotateStrokeWidth,
+          opacity: 1,
+          isHighlight: false,
         };
 
         canvasStore.addElement(newPath);
@@ -1544,7 +1588,49 @@
           }
         }
       } else if (store.activeTool === 'pen') {
-        if (currentPathId) {
+        if (isTextHighlightMode && previewHighlightRects.length > 0) {
+          if (hasDragged || (startCharIndex !== null && currentCharIndex !== null && startCharIndex !== currentCharIndex)) {
+            const addedCommands: AddElementCommand[] = [];
+            for (const rect of previewHighlightRects) {
+              if (rect.width > 0) {
+                const strokeW = store.annotateStrokeWidth || 2;
+                const lineY = rect.baselineY !== undefined
+                  ? rect.baselineY + Math.max(1.5, strokeW * 0.5)
+                  : rect.y + rect.height - strokeW * 0.5;
+                const pathId = canvasStore.generateId();
+                const pathEl: PathElement = {
+                  id: pathId,
+                  kind: 'path',
+                  pageIndex,
+                  x: rect.x,
+                  y: lineY - strokeW * 0.5,
+                  width: rect.width,
+                  height: strokeW,
+                  rotation: 0,
+                  locked: false,
+                  visible: true,
+                  flipX: false,
+                  flipY: false,
+                  points: [
+                    { x: rect.x, y: lineY },
+                    { x: rect.x + rect.width, y: lineY },
+                  ],
+                  stroke: store.annotateColor,
+                  strokeWidth: strokeW,
+                  opacity: 1,
+                  isHighlight: false,
+                };
+                canvasStore.addElement(pathEl);
+                addedCommands.push(new AddElementCommand('Draw Underline', pathEl, false));
+              }
+            }
+            if (addedCommands.length === 1) {
+              actions.pushCommand(addedCommands[0]);
+            } else if (addedCommands.length > 1) {
+              actions.pushCommand(new CompoundCommand('Draw Underline', addedCommands));
+            }
+          }
+        } else if (currentPathId) {
           const element = canvasStore.elements.find((el) => el.id === currentPathId) as PathElement | undefined;
           if (element && element.kind === 'path' && element.points.length <= 1 && element.width === 0 && element.height === 0) {
             canvasStore.removeElement(currentPathId);
@@ -2041,7 +2127,7 @@
     <!-- Annotation & Drawing Tool Interactive Overlay (Topmost) -->
     {#if store.activeTool === 'pen' || store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'note' || store.activeTool === 'eraser'}
       <div 
-        class="absolute inset-0 z-[60] touch-none {store.activeTool === 'note' ? 'cursor-cell' : (store.activeTool === 'eraser' ? 'cursor-crosshair' : ((store.activeTool === 'highlight' || store.activeTool === 'redact') ? (hoveringChar || isTextHighlightMode ? 'cursor-text' : 'cursor-crosshair') : (activeToolDef?.cursor || 'cursor-crosshair')))}"
+        class="absolute inset-0 z-[60] touch-none {store.activeTool === 'note' ? 'cursor-cell' : (store.activeTool === 'eraser' ? 'cursor-crosshair' : ((store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'pen') ? (hoveringChar || isTextHighlightMode ? 'cursor-text' : 'cursor-crosshair') : (activeToolDef?.cursor || 'cursor-crosshair')))}"
         onpointerdown={handlePointerDownDrawing}
         onpointermove={handlePointerMoveDrawing}
         onpointerup={handlePointerUpDrawing}
@@ -2078,6 +2164,17 @@
                 background-color: {store.annotateColor};
                 opacity: 0.4;
                 mix-blend-mode: multiply;
+              "
+            ></div>
+          {:else if store.activeTool === 'pen'}
+            <div
+              class="absolute pointer-events-none rounded-[1px]"
+              style="
+                left: {(rect.x * visualScale).toFixed(2)}px;
+                top: {((rect.baselineY !== undefined ? rect.baselineY + 1 : rect.y + rect.height - store.annotateStrokeWidth) * visualScale).toFixed(2)}px;
+                width: {(rect.width * visualScale).toFixed(2)}px;
+                height: {Math.max(1.5, store.annotateStrokeWidth * visualScale).toFixed(2)}px;
+                background-color: {store.annotateColor};
               "
             ></div>
           {/if}
