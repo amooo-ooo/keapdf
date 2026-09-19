@@ -16,7 +16,7 @@ import { SdgBuilder } from './sdg/sdg-builder';
 import { SdgLock } from './safety/sdg-lock';
 import { RateLimiter } from './safety/rate-limiter';
 import { ProposalStore } from './safety/proposal-store';
-import { createWebMcpTools, type WebMcpContext } from './tools/tool-definitions';
+import type { WebMcpContext } from './tools/tool-definitions';
 
 export class WebMcpManager {
   private modelContext: WebMcpModelContext;
@@ -96,6 +96,7 @@ export class WebMcpManager {
       },
     };
 
+    const { createWebMcpTools } = await import('./tools/tool-definitions');
     const tools = createWebMcpTools(mcpContext);
 
     for (const tool of tools) {
