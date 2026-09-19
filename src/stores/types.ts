@@ -9,7 +9,7 @@ import type { EditableTextSpan, TextLine } from '../core/types';
 export type EditorTool = 'select' | 'hand' | 'text' | 'place' | 'highlight' | 'pen' | 'signature' | 'note' | 'redact' | 'eraser';
 
 /** Content mode for the left panel. */
-export type LeftPanelMode = 'workspace' | 'components' | 'annotate' | 'imposition' | 'tools' | 'settings';
+export type LeftPanelMode = 'workspace' | 'components' | 'annotate' | 'tools' | 'settings';
 
 /** State for an active inline text edit on the canvas. */
 export interface InlineEditState {

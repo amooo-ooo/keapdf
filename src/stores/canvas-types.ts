@@ -1,8 +1,22 @@
-/**
- * Type definitions for canvas-overlaid elements.
- * These represent user-added objects (text boxes, shapes, images, form fields)
- * that render on top of PDF pages and can be dragged, resized, and edited.
- */
+import type {
+  SnapGuide,
+  SnapOptions,
+  SnapResult,
+  SnapOrientation,
+  SnapTargetKind,
+  SnapCandidate,
+  SnapMargins,
+} from '../types/snapping-types';
+
+export type {
+  SnapGuide,
+  SnapOptions,
+  SnapResult,
+  SnapOrientation,
+  SnapTargetKind,
+  SnapCandidate,
+  SnapMargins,
+};
 
 /** Built-in canvas element kinds. */
 export type BuiltinCanvasElementKind = 'text' | 'image' | 'shape' | 'form-field' | 'path' | 'note';
@@ -168,6 +182,12 @@ export interface FormFieldElement extends CanvasElementBase {
   readOnly?: boolean;
   value?: string;
   options?: string[];
+  /** Whether multi-line text input is enabled. */
+  multiline?: boolean;
+  /** Whether characters are masked as a password field. */
+  password?: boolean;
+  /** Maximum character limit. */
+  maxLength?: number;
   /** Original native AcroForm field name if extracted or promoted from the document. */
   sourceFieldName?: string;
   /** Original native AcroForm field span if extracted or promoted from the document. */
@@ -218,6 +238,7 @@ export interface DragState {
   originFontSize?: number; // font size at drag start (used for scaling text)
   originLines?: TextElementLine[]; // lines snapshot at drag start
   originSegments?: TextSegment[]; // segments snapshot at drag start
+  activeGuides?: SnapGuide[]; // active visual snapping guidelines
 }
 
 /** Active drag-and-drop ghost preview indicator on the canvas. */
