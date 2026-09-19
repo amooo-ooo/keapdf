@@ -2,6 +2,7 @@
     import { useCanvasStore } from '../../stores/canvas.svelte';
     import CanvasElementComponent from './CanvasElement.svelte';
     import SelectionOverlay from './SelectionOverlay.svelte';
+    import SnappingGuidesOverlay from './SnappingGuidesOverlay.svelte';
 
     interface Props {
         pageIndex: number;
@@ -33,7 +34,7 @@
     {#if canvasStore.dropPreview && canvasStore.dropPreview.pageIndex === pageIndex}
         {@const preview = canvasStore.dropPreview}
         <div
-            class="drop-preview-indicator absolute pointer-events-none z-50 border-2 border-dashed border-primary/80 bg-primary/10 transition-none {preview.kind === 'shape' && preview.label?.toLowerCase() === 'circle' ? 'rounded-full' : 'rounded-xs'}"
+            class="drop-preview-indicator absolute pointer-events-none z-50 border-2 border-dashed border-snap-guide bg-snap-guide-subtle transition-none {preview.kind === 'shape' && preview.label?.toLowerCase() === 'circle' ? 'rounded-full' : 'rounded-xs'}"
             style="
                 left: {preview.x * zoom}px;
                 top: {preview.y * zoom}px;
@@ -42,4 +43,6 @@
             "
         ></div>
     {/if}
+
+    <SnappingGuidesOverlay {pageIndex} {zoom} />
 </div>
