@@ -4,7 +4,7 @@
   import { useFeatureFlagStore } from '../../core/feature-flags';
   import { getSavedSignatures } from '../../services/signature-storage';
   import SidebarSection from '../common/SidebarSection.svelte';
-  import { Button } from '$lib/components/ui/button/index.js';
+  import { Button, ButtonGroup } from '$lib/components/ui/button/index.js';
   import { ColorPicker } from '$lib/components/ui/color-picker/index.js';
   import {
     Highlighter,
@@ -14,7 +14,7 @@
     StickyNote,
     ShieldCheck,
     Clock,
-    Sliders,
+    SlidersHorizontal,
     BookOpen,
     CheckCircle2,
     Users,
@@ -50,41 +50,41 @@
 <div class="flex flex-col min-h-0 divide-y divide-border">
   {#if featureFlags.isEnabled('annotations')}
   <SidebarSection title="Annotate" borderBottom={true}>
-    <p class="text-xs text-muted-foreground mb-2">Draw or highlight passages on the page.</p>
+    <p class="text-xs text-muted-foreground mb-2">Draw or highlight passages on the page. Hover over text to snap to lines.</p>
     
     <div class="flex flex-col gap-2">
-      <div class="grid grid-cols-2 gap-2">
+      <div class="flex flex-col gap-2">
         {#if featureFlags.isEnabled('annotations.highlighter')}
         <Button
           variant={store.activeTool === 'highlight' ? 'default' : 'outline'}
           size="sm"
-          class="justify-start text-xs h-8 px-2.5"
+          class="w-full justify-start text-xs h-8 px-2.5"
           onclick={() => selectTool('highlight')}
           disabled={!store.isDocumentLoaded}
         >
-          <Highlighter class="h-3.5 w-3.5 mr-1.5 text-warning" /> Highlighter
+          <Highlighter class="h-3.5 w-3.5 mr-2 text-warning" /> Highlighter
         </Button>
         {/if}
         {#if featureFlags.isEnabled('annotations.pen')}
         <Button
           variant={store.activeTool === 'pen' ? 'default' : 'outline'}
           size="sm"
-          class="justify-start text-xs h-8 px-2.5"
+          class="w-full justify-start text-xs h-8 px-2.5"
           onclick={() => selectTool('pen')}
           disabled={!store.isDocumentLoaded}
         >
-          <Pencil class="h-3.5 w-3.5 mr-1.5 text-primary" /> Pen
+          <Pencil class="h-3.5 w-3.5 mr-2 text-primary" /> Pen
         </Button>
         {/if}
         {#if featureFlags.isEnabled('annotations.eraser')}
         <Button
           variant={store.activeTool === 'eraser' ? 'default' : 'outline'}
           size="sm"
-          class="col-span-2 justify-start text-xs h-8 px-2.5"
+          class="w-full justify-start text-xs h-8 px-2.5"
           onclick={() => selectTool('eraser')}
           disabled={!store.isDocumentLoaded}
         >
-          <Eraser class="h-3.5 w-3.5 mr-1.5 text-destructive" /> Eraser
+          <Eraser class="h-3.5 w-3.5 mr-2 text-destructive" /> Eraser
         </Button>
         {/if}
       </div>
@@ -146,6 +146,36 @@
           />
         </div>
       </div>
+
+      <div class="flex items-center justify-between pt-1 w-full">
+        <span class="text-[11px] text-muted-foreground">Stroke:</span>
+        <ButtonGroup variant="outline" size="sm" class="h-7">
+          <Button
+            variant={store.annotateStrokeWidth === 1 ? 'default' : 'outline'}
+            class="px-2 text-[11px] h-7"
+            onclick={() => { store.annotateStrokeWidth = 1; }}
+            disabled={!store.isDocumentLoaded}
+          >1pt</Button>
+          <Button
+            variant={store.annotateStrokeWidth === 2 ? 'default' : 'outline'}
+            class="px-2 text-[11px] h-7"
+            onclick={() => { store.annotateStrokeWidth = 2; }}
+            disabled={!store.isDocumentLoaded}
+          >2pt</Button>
+          <Button
+            variant={store.annotateStrokeWidth === 4 ? 'default' : 'outline'}
+            class="px-2 text-[11px] h-7"
+            onclick={() => { store.annotateStrokeWidth = 4; }}
+            disabled={!store.isDocumentLoaded}
+          >4pt</Button>
+          <Button
+            variant={store.annotateStrokeWidth === 6 ? 'default' : 'outline'}
+            class="px-2 text-[11px] h-7"
+            onclick={() => { store.annotateStrokeWidth = 6; }}
+            disabled={!store.isDocumentLoaded}
+          >6pt</Button>
+        </ButtonGroup>
+      </div>
       {/if}
     </div>
   </SidebarSection>
@@ -153,7 +183,7 @@
 
   {#if featureFlags.isEnabled('redaction')}
   <SidebarSection title="Redaction & Privacy" borderBottom={true}>
-    <p class="text-xs text-muted-foreground mb-2">Permanently obscure sensitive content or PII.</p>
+    <p class="text-xs text-muted-foreground mb-2">Permanently obscure sensitive content. Drag over text or blackout an area.</p>
     
     <div class="flex flex-col gap-2">
       {#if featureFlags.isEnabled('redaction.area')}
@@ -164,7 +194,7 @@
         onclick={() => selectTool('redact')}
         disabled={!store.isDocumentLoaded}
       >
-        <EyeOff class="h-3.5 w-3.5 mr-2 text-destructive" /> Redact Area (Blackout)
+        <EyeOff class="h-3.5 w-3.5 mr-2 text-destructive" /> Redact (Text & Area)
       </Button>
       {/if}
 
@@ -188,7 +218,7 @@
         onclick={() => triggerTool('Adjust Colors / Contrast / Invert')}
         disabled={!store.isDocumentLoaded}
       >
-        <Sliders class="h-3.5 w-3.5 mr-2 text-muted-foreground" /> Adjust Colors / Contrast
+        <SlidersHorizontal class="h-3.5 w-3.5 mr-2 text-muted-foreground" /> Adjust Colors / Contrast
       </Button>
       {/if}
     </div>
@@ -199,16 +229,16 @@
   <SidebarSection title="Signatures & Verification" borderBottom={true}>
     <p class="text-xs text-muted-foreground mb-2">Digital PKCS#12 certificates & signature validation.</p>
     
-    <div class="grid grid-cols-2 gap-2">
+    <div class="flex flex-col gap-2">
       {#if featureFlags.isEnabled('signatures.esign')}
       <Button
         variant="outline"
         size="sm"
-        class="justify-start text-xs h-8 px-2.5 relative"
+        class="w-full justify-start text-xs h-8 px-2.5 relative"
         onclick={() => actions.openEsignDialog('signatures')}
         disabled={!store.isDocumentLoaded}
       >
-        <PenTool class="h-3.5 w-3.5 mr-1.5 text-primary" /> Add E-Sign
+        <PenTool class="h-3.5 w-3.5 mr-2 text-primary" /> Add E-Sign
         {#if savedCount > 0}
           <span class="ml-auto bg-primary/10 text-primary text-[10px] font-semibold px-1 rounded">
             {savedCount}
@@ -221,11 +251,11 @@
       <Button
         variant="outline"
         size="sm"
-        class="justify-start text-xs h-8 px-2.5"
+        class="w-full justify-start text-xs h-8 px-2.5"
         onclick={() => actions.openCertSignDialog()}
         disabled={!store.isDocumentLoaded}
       >
-        <ShieldCheck class="h-3.5 w-3.5 mr-1.5 text-primary" /> Cert Sign
+        <ShieldCheck class="h-3.5 w-3.5 mr-2 text-primary" /> Cert Sign
       </Button>
       {/if}
 
@@ -233,11 +263,11 @@
       <Button
         variant="outline"
         size="sm"
-        class="justify-start text-xs h-8 px-2.5"
+        class="w-full justify-start text-xs h-8 px-2.5"
         onclick={() => actions.openValidateSignaturesDialog()}
         disabled={!store.isDocumentLoaded}
       >
-        <CheckCircle2 class="h-3.5 w-3.5 mr-1.5 text-success" /> Validate
+        <CheckCircle2 class="h-3.5 w-3.5 mr-2 text-success" /> Validate
       </Button>
       {/if}
 
@@ -245,11 +275,11 @@
       <Button
         variant="outline"
         size="sm"
-        class="justify-start text-xs h-8 px-2.5"
+        class="w-full justify-start text-xs h-8 px-2.5"
         onclick={() => triggerTool('Timestamp PDF')}
         disabled={!store.isDocumentLoaded}
       >
-        <Clock class="h-3.5 w-3.5 mr-1.5 text-muted-foreground" /> Timestamp
+        <Clock class="h-3.5 w-3.5 mr-2 text-muted-foreground" /> Timestamp
       </Button>
       {/if}
 
@@ -257,7 +287,7 @@
       <Button
         variant="outline"
         size="sm"
-        class="col-span-2 justify-start text-xs h-8 px-2.5"
+        class="w-full justify-start text-xs h-8 px-2.5"
         onclick={() => triggerTool('Shared Signing')}
         disabled={!store.isDocumentLoaded}
       >
