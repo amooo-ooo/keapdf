@@ -330,6 +330,7 @@
                 disabled={index === 0}
                 onclick={(e) => { e.stopPropagation(); handleMovePage(index, 'up'); }}
                 title="Move Up"
+                aria-label="Move page up"
               >
                 <ArrowUp class="h-3 w-3" />
               </Button>
@@ -340,6 +341,7 @@
                 disabled={index === pageCount - 1}
                 onclick={(e) => { e.stopPropagation(); handleMovePage(index, 'down'); }}
                 title="Move Down"
+                aria-label="Move page down"
               >
                 <ArrowDown class="h-3 w-3" />
               </Button>
