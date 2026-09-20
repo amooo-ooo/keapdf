@@ -2,6 +2,7 @@
   import { useCanvasStore } from '../../../stores/canvas.svelte';
   import { useCanvasActions } from '../../../stores/canvas-actions';
   import type { FormFieldElement, FormFieldVariant } from '../../../stores/canvas-types';
+  import type { ElementPanelProps } from '../../../core/element-registry';
   import SidebarSection from '../../common/SidebarSection.svelte';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
@@ -15,8 +16,14 @@
   import { getDisplayFontName } from '../../../services/font-loader';
   import { setInspectorInteracting } from '../../../utils/text-range-utils';
 
+  let { element }: ElementPanelProps<FormFieldElement> = $props();
+
   const canvasStore = useCanvasStore();
   const canvasActions = useCanvasActions();
+
+  const formEl = $derived(
+    element ?? (canvasStore.selectedElement?.kind === 'form-field' ? (canvasStore.selectedElement as FormFieldElement) : null)
+  );
 
   const STANDARD_FONTS = [
     { value: 'Helvetica', label: 'Inter (Sans-Serif)' },
@@ -42,6 +49,7 @@
     { value: 'radio', label: 'Radio Button' },
     { value: 'dropdown', label: 'Dropdown' },
     { value: 'signature', label: 'Signature Field' },
+    { value: 'button', label: 'Pushbutton' },
     { value: 'attachment', label: 'Attachment Field' },
   ];
 
@@ -54,22 +62,22 @@
 
   const BG_COLOR_SWATCHES = [
     { label: 'White', color: '#ffffff', bg: 'bg-white', border: 'border-slate-300' },
-    { label: 'Gray', color: '#f3f4f6', bg: 'bg-slate-100', border: 'border-slate-300' },
+    { label: 'Grey', color: '#f3f4f6', bg: 'bg-slate-100', border: 'border-slate-300' },
     { label: 'Light Blue', color: '#eff6ff', bg: 'bg-blue-50', border: 'border-blue-200' },
     { label: 'Yellow', color: '#fefce8', bg: 'bg-yellow-50', border: 'border-yellow-200' },
   ];
 
   const BORDER_COLOR_SWATCHES = [
-    { label: 'Light Gray', color: '#d1d5db', bg: 'bg-slate-300', border: 'border-slate-400' },
-    { label: 'Dark Gray', color: '#4b5563', bg: 'bg-slate-600', border: 'border-slate-700' },
+    { label: 'Light Grey', color: '#d1d5db', bg: 'bg-slate-300', border: 'border-slate-400' },
+    { label: 'Dark Grey', color: '#4b5563', bg: 'bg-slate-600', border: 'border-slate-700' },
     { label: 'Blue', color: '#3b82f6', bg: 'bg-blue-500', border: 'border-blue-600' },
     { label: 'Red', color: '#ef4444', bg: 'bg-red-500', border: 'border-red-600' },
   ];
 
   function updateProp(propName: keyof FormFieldElement, value: unknown): void {
-    const selected = canvasStore.selectedElementId;
-    if (selected) {
-      canvasActions.updateElementProperties(selected, { [propName]: value });
+    const targetId = formEl?.id ?? canvasStore.selectedElementId;
+    if (targetId) {
+      canvasActions.updateElementProperties(targetId, { [propName]: value });
     }
   }
 
@@ -88,8 +96,7 @@
   let currentOptionsFormId = $state<string | null>(null);
 
   $effect(() => {
-    if (canvasStore.selectedElement?.kind === 'form-field') {
-      const formEl = canvasStore.selectedElement as FormFieldElement;
+    if (formEl) {
       if (currentOptionsFormId !== formEl.id) {
          currentOptionsFormId = formEl.id;
          optionsText = formEl.options ? formEl.options.join(', ') : '';
@@ -103,8 +110,7 @@
   }
 </script>
 
-{#if canvasStore.selectedElement?.kind === 'form-field'}
-  {@const formEl = canvasStore.selectedElement as FormFieldElement}
+{#if formEl}
   <SidebarSection title="Field Properties" borderBottom={true} collapsible={true} defaultExpanded={true}>
     <div class="flex flex-col gap-2">
       <!-- Variant -->
@@ -130,44 +136,108 @@
         </Select.Root>
       </div>
 
-      <!-- Label / Field Name -->
-      <div class="flex flex-col gap-1">
-        <Label class="field-label">Field Name / Label</Label>
-        <Input 
-          type="text" 
-          value={formEl.label} 
-          oninput={(e) => handleStringChange(e, 'label')}
-          class="h-8 text-xs w-full" 
-        />
-      </div>
-
-      <!-- Value -->
-      <div class="flex flex-col gap-1">
-        <Label class="field-label">Field Value</Label>
-        <Input 
-          type="text" 
-          value={formEl.value ?? ''} 
-          oninput={(e) => handleStringChange(e, 'value')}
-          placeholder="Initial or current value..."
-          class="h-8 text-xs w-full" 
-        />
-      </div>
-
-      <!-- Placeholder (for text-input and dropdown) -->
-      {#if formEl.variant === 'text-input' || formEl.variant === 'dropdown'}
+      {#if formEl.variant === 'radio'}
+        <!-- Radio Group Name -->
         <div class="flex flex-col gap-1">
-          <Label class="field-label">Placeholder</Label>
+          <Label class="field-label">Group Name</Label>
           <Input 
             type="text" 
-            value={formEl.placeholder ?? ''} 
-            oninput={(e) => handleStringChange(e, 'placeholder')}
+            value={formEl.sourceFieldName ?? ''} 
+            oninput={(e) => handleStringChange(e, 'sourceFieldName')}
+            placeholder="e.g. radio_group_1"
+            class="h-8 text-xs w-full" 
+          />
+          <span class="text-[10px] text-muted-foreground">Radio buttons sharing this group name are mutually exclusive.</span>
+        </div>
+
+        <!-- Option Label -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Option Label</Label>
+          <Input 
+            type="text" 
+            value={formEl.label} 
+            oninput={(e) => handleStringChange(e, 'label')}
+            placeholder="e.g. Option 1"
             class="h-8 text-xs w-full" 
           />
         </div>
-      {/if}
 
-      <!-- Options (for dropdown and radio) -->
-      {#if formEl.variant === 'dropdown' || formEl.variant === 'radio'}
+        <!-- Export Value -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Export Value</Label>
+          <Input 
+            type="text" 
+            value={formEl.options?.[0] ?? ''} 
+            oninput={(e) => {
+              const val = (e.target as HTMLInputElement).value;
+              updateProp('options', val ? [val] : []);
+            }}
+            placeholder="e.g. option_1"
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+        <!-- Selected by Default -->
+        <div class="pt-0.5">
+          <ControlRow label="Selected by Default" size="sm">
+            <Switch
+              checked={formEl.value === 'true' || (Boolean(formEl.options?.[0]) && formEl.value === formEl.options?.[0])}
+              onCheckedChange={(checked) => {
+                const activeVal = formEl.options?.[0] || 'true';
+                updateProp('value', checked ? activeVal : 'false');
+                if (checked && (formEl.sourceFieldName || formEl.label)) {
+                  const groupName = formEl.sourceFieldName || formEl.label;
+                  for (const other of canvasStore.elements) {
+                    if (other.id !== formEl.id && other.kind === 'form-field' && (other as FormFieldElement).variant === 'radio') {
+                      const otherRadio = other as FormFieldElement;
+                      if ((otherRadio.sourceFieldName || otherRadio.label) === groupName && otherRadio.pageIndex === formEl.pageIndex) {
+                        canvasActions.updateElementProperties(otherRadio.id, { value: 'false' });
+                      }
+                    }
+                  }
+                }
+              }}
+              aria-label="Selected by Default"
+            />
+          </ControlRow>
+        </div>
+
+      {:else if formEl.variant === 'checkbox'}
+        <!-- Checkbox Label -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Field Name / Label</Label>
+          <Input 
+            type="text" 
+            value={formEl.label} 
+            oninput={(e) => handleStringChange(e, 'label')}
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+        <!-- Checked by Default -->
+        <div class="pt-0.5">
+          <ControlRow label="Checked by Default" size="sm">
+            <Switch
+              checked={formEl.value === 'true' || (formEl.value as unknown) === true || formEl.value === 'checked' || formEl.value === '1' || formEl.value === 'yes'}
+              onCheckedChange={(checked) => updateProp('value', checked ? 'true' : 'false')}
+              aria-label="Checked by Default"
+            />
+          </ControlRow>
+        </div>
+
+      {:else if formEl.variant === 'dropdown'}
+        <!-- Dropdown Label -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Field Name / Label</Label>
+          <Input 
+            type="text" 
+            value={formEl.label} 
+            oninput={(e) => handleStringChange(e, 'label')}
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+        <!-- Dropdown Options -->
         <div class="flex flex-col gap-1">
           <Label class="field-label">Options (comma separated)</Label>
           <Input 
@@ -177,6 +247,151 @@
             onblur={commitOptions}
             onkeydown={(e) => { if (e.key === 'Enter') commitOptions(); }}
             placeholder="Option 1, Option 2, Option 3..."
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+        <!-- Default Selected Value -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Default Selected Value</Label>
+          <Input 
+            type="text" 
+            value={formEl.value ?? ''} 
+            oninput={(e) => handleStringChange(e, 'value')}
+            placeholder="Initial selected value..."
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+        <!-- Placeholder -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Placeholder</Label>
+          <Input 
+            type="text" 
+            value={formEl.placeholder ?? ''} 
+            oninput={(e) => handleStringChange(e, 'placeholder')}
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+      {:else if formEl.variant === 'text-input'}
+        <!-- Text Input Label -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Field Name / Label</Label>
+          <Input 
+            type="text" 
+            value={formEl.label} 
+            oninput={(e) => handleStringChange(e, 'label')}
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+        <!-- Initial Value -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Field Value</Label>
+          <Input 
+            type="text" 
+            value={formEl.value ?? ''} 
+            oninput={(e) => handleStringChange(e, 'value')}
+            placeholder="Initial or current value..."
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+        <!-- Placeholder -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Placeholder</Label>
+          <Input 
+            type="text" 
+            value={formEl.placeholder ?? ''} 
+            oninput={(e) => handleStringChange(e, 'placeholder')}
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+        <!-- Multiline Text -->
+        <div class="pt-0.5">
+          <ControlRow label="Multiline Text" size="sm">
+            <Switch
+              checked={Boolean(formEl.multiline)}
+              onCheckedChange={(checked) => updateProp('multiline', checked)}
+              aria-label="Multiline Text"
+            />
+          </ControlRow>
+        </div>
+
+        <!-- Password Field -->
+        <div class="pt-0.5">
+          <ControlRow label="Password Field" size="sm">
+            <Switch
+              checked={Boolean(formEl.password)}
+              onCheckedChange={(checked) => updateProp('password', checked)}
+              aria-label="Password Field"
+            />
+          </ControlRow>
+        </div>
+
+      {:else if formEl.variant === 'signature'}
+        <!-- Signature Field Name -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Field Name</Label>
+          <Input 
+            type="text" 
+            value={formEl.sourceFieldName || formEl.label} 
+            oninput={(e) => handleStringChange(e, 'sourceFieldName')}
+            placeholder="e.g. Signature1"
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+        <!-- Signer Prompt -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Signer Prompt</Label>
+          <Input 
+            type="text" 
+            value={formEl.placeholder || formEl.label || ''} 
+            oninput={(e) => {
+              handleStringChange(e, 'placeholder');
+              handleStringChange(e, 'label');
+            }}
+            placeholder="e.g. Sign here"
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+      {:else if formEl.variant === 'button'}
+        <!-- Button Label -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Button Label</Label>
+          <Input 
+            type="text" 
+            value={formEl.label} 
+            oninput={(e) => handleStringChange(e, 'label')}
+            placeholder="e.g. Submit"
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+        <!-- Button Field Name -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Field Name</Label>
+          <Input 
+            type="text" 
+            value={formEl.sourceFieldName ?? ''} 
+            oninput={(e) => handleStringChange(e, 'sourceFieldName')}
+            placeholder="e.g. btn_submit"
+            class="h-8 text-xs w-full" 
+          />
+        </div>
+
+      {:else}
+        <!-- Attachment Field -->
+        <div class="flex flex-col gap-1">
+          <Label class="field-label">Field Name / Label</Label>
+          <Input 
+            type="text" 
+            value={formEl.label} 
+            oninput={(e) => handleStringChange(e, 'label')}
             class="h-8 text-xs w-full" 
           />
         </div>
@@ -210,7 +425,7 @@
         </Select.Root>
       </div>
 
-      <!-- Font Size & Text Color -->
+      <!-- Font Size & Text Colour -->
       <div class="flex items-end gap-2 mt-0.5 w-full">
         <div class="flex flex-col gap-1 w-[80px] shrink-0">
           <Label class="field-label">Size (pt)</Label>
@@ -225,7 +440,7 @@
         </div>
 
         <div class="flex flex-col gap-1 flex-1 min-w-0">
-          <Label class="field-label">Color</Label>
+          <Label class="field-label">Colour</Label>
           <ColorPicker
             value={formEl.color || '#111827'}
             presets={TEXT_COLOR_SWATCHES}
@@ -280,7 +495,7 @@
   <!-- Appearance Styling -->
   <SidebarSection title="Appearance" borderBottom={true} collapsible={true} defaultExpanded={true}>
     <div class="flex flex-col gap-2">
-      <!-- Background Color & Presets -->
+      <!-- Background Colour & Presets -->
       <div class="flex flex-col gap-1 mt-0.5 w-full">
         <Label class="field-label">Background</Label>
         <ColorPicker
@@ -293,9 +508,9 @@
         />
       </div>
 
-      <!-- Border Color & Presets -->
+      <!-- Border Colour & Presets -->
       <div class="flex flex-col gap-1 mt-0.5 w-full">
-        <Label class="field-label">Border Color</Label>
+        <Label class="field-label">Border Colour</Label>
         <ColorPicker
           value={formEl.borderColor || '#d1d5db'}
           presets={BORDER_COLOR_SWATCHES}
