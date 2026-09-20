@@ -480,6 +480,6 @@
       </div>
     </div>
   {:else}
-    <div class="text-xs text-muted-foreground italic">No document loaded</div>
+    <div class="text-xs text-muted-foreground">No document loaded</div>
   {/if}
 </SidebarSection>
