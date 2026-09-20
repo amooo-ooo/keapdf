@@ -31,6 +31,7 @@
     Layers,
     Paperclip,
     StickyNote,
+    RectangleHorizontal,
   } from 'lucide-svelte';
 
   const store = useEditorStore();
@@ -103,6 +104,8 @@
       author?: string;
       color?: string;
       src?: string;
+      placeholder?: string;
+      value?: string;
     }
   ): void {
     let centerX = 200;
@@ -264,7 +267,7 @@
           placeAtCenter('form-field', {
             variant: 'text-input',
             width: 160,
-            height: 28,
+            height: 26,
             label: 'Text Input',
           })}
         draggable={store.isDocumentLoaded}
@@ -273,7 +276,7 @@
             kind: 'form-field',
             variant: 'text-input',
             width: 160,
-            height: 28,
+            height: 26,
             label: 'Text Input',
           })}
         ondragend={handleDragEnd}
@@ -293,7 +296,7 @@
           placeAtCenter('form-field', {
             variant: 'checkbox',
             width: 140,
-            height: 28,
+            height: 24,
             label: 'Checkbox',
           })}
         draggable={store.isDocumentLoaded}
@@ -302,7 +305,7 @@
             kind: 'form-field',
             variant: 'checkbox',
             width: 140,
-            height: 28,
+            height: 24,
             label: 'Checkbox',
           })}
         ondragend={handleDragEnd}
@@ -322,8 +325,8 @@
           placeAtCenter('form-field', {
             variant: 'radio',
             width: 140,
-            height: 28,
-            label: 'Radio Button',
+            height: 24,
+            label: 'Option 1',
           })}
         draggable={store.isDocumentLoaded}
         ondragstart={(e) =>
@@ -331,8 +334,8 @@
             kind: 'form-field',
             variant: 'radio',
             width: 140,
-            height: 28,
-            label: 'Radio Button',
+            height: 24,
+            label: 'Option 1',
           })}
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
@@ -351,7 +354,7 @@
           placeAtCenter('form-field', {
             variant: 'dropdown',
             width: 160,
-            height: 28,
+            height: 26,
             label: 'Dropdown',
           })}
         draggable={store.isDocumentLoaded}
@@ -360,7 +363,7 @@
             kind: 'form-field',
             variant: 'dropdown',
             width: 160,
-            height: 28,
+            height: 26,
             label: 'Dropdown',
           })}
         ondragend={handleDragEnd}
@@ -379,24 +382,55 @@
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'signature',
-            width: 160,
-            height: 36,
-            label: 'Sign Field',
+            width: 180,
+            height: 48,
+            label: 'Signature',
+            placeholder: 'Sign here',
           })}
         draggable={store.isDocumentLoaded}
         ondragstart={(e) =>
           handleDragStart(e, {
             kind: 'form-field',
             variant: 'signature',
-            width: 160,
-            height: 36,
-            label: 'Sign Field',
+            width: 180,
+            height: 48,
+            label: 'Signature',
+            placeholder: 'Sign here',
           })}
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
       >
         <PenTool class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
         <span class="truncate">Sign Field</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.forms.button')}
+      <Button
+        variant="outline"
+        size="sm"
+        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        onclick={() =>
+          placeAtCenter('form-field', {
+            variant: 'button',
+            width: 120,
+            height: 30,
+            label: 'Button',
+          })}
+        draggable={store.isDocumentLoaded}
+        ondragstart={(e) =>
+          handleDragStart(e, {
+            kind: 'form-field',
+            variant: 'button',
+            width: 120,
+            height: 30,
+            label: 'Button',
+          })}
+        ondragend={handleDragEnd}
+        disabled={!store.isDocumentLoaded}
+      >
+        <RectangleHorizontal class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
+        <span class="truncate">Pushbutton</span>
       </Button>
       {/if}
 
@@ -409,7 +443,7 @@
           placeAtCenter('form-field', {
             variant: 'attachment',
             width: 160,
-            height: 36,
+            height: 32,
             label: 'Attachment',
           })}
         draggable={store.isDocumentLoaded}
@@ -418,7 +452,7 @@
             kind: 'form-field',
             variant: 'attachment',
             width: 160,
-            height: 36,
+            height: 32,
             label: 'Attachment',
           })}
         ondragend={handleDragEnd}
