@@ -13,9 +13,11 @@
   import { Checkbox } from '$lib/components/ui/checkbox/index.js';
   import { Switch } from '$lib/components/ui/switch/index.js';
   import { downloadBytes } from '../../utils/download-utils';
-  import type {
-    DigitalIdentity,
-    SignPdfOptions,
+  import {
+    createSelfSignedCertificate,
+    parsePkcs12,
+    type DigitalIdentity,
+    type SignPdfOptions,
   } from '../../services/pdf/operations/signature-ops';
   import { getSavedSignatures, type SavedSignature } from '../../services/signature-storage';
   import {
@@ -111,7 +113,6 @@
     if (!commonName.trim()) return;
     isGenerating = true;
     try {
-      const { createSelfSignedCertificate } = await import('../../services/pdf/operations/signature-ops');
       const id = await createSelfSignedCertificate({
         commonName: commonName.trim(),
         organization: organization.trim() || undefined,
@@ -136,7 +137,6 @@
     if (!importedP12File) return;
     importError = null;
     try {
-      const { parsePkcs12 } = await import('../../services/pdf/operations/signature-ops');
       const buffer = await importedP12File.arrayBuffer();
       const id = parsePkcs12(buffer, importPassword);
       activeIdentity = id;
