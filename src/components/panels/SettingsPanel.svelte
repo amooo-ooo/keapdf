@@ -20,6 +20,9 @@
     ListTree,
     ChevronDown,
     ChevronRight,
+    AlertCircle,
+    Check,
+    Loader2,
   } from 'lucide-svelte';
 
   const store = useEditorStore();
@@ -29,8 +32,15 @@
   let metadata = $state<DocumentMetadata | null>(null);
   let userPassword = $state('');
   let ownerPassword = $state('');
-  let isEncrypted = $state(false);
   let showAllFields = $state(false);
+
+  let isApplyingSecurity = $state(false);
+  let isRemovingSecurity = $state(false);
+  let isUnlockingForms = $state(false);
+  let securityMessage = $state<string | null>(null);
+  let securityError = $state<string | null>(null);
+
+  const isDocumentEncrypted = $derived(metadata?.isEncrypted ?? false);
 
   $effect(() => {
     if (store.isDocumentLoaded) {
@@ -53,11 +63,56 @@
     }
   });
 
-  function handleApplySecurity(): void {
+  async function handleApplySecurity(): Promise<void> {
     if (!userPassword && !ownerPassword) return;
-    isEncrypted = true;
-    userPassword = '';
-    ownerPassword = '';
+    isApplyingSecurity = true;
+    securityMessage = null;
+    securityError = null;
+    try {
+      await actions.applyPasswordSecurity(userPassword, ownerPassword);
+      userPassword = '';
+      ownerPassword = '';
+      securityMessage = 'Password protection successfully applied.';
+      metadata = actions.service.document.getMetadata();
+    } catch (err) {
+      securityError = err instanceof Error ? err.message : 'Failed to apply password security.';
+    } finally {
+      isApplyingSecurity = false;
+    }
+  }
+
+  async function handleRemoveSecurity(): Promise<void> {
+    isRemovingSecurity = true;
+    securityMessage = null;
+    securityError = null;
+    try {
+      await actions.removePasswordSecurity(ownerPassword || undefined);
+      ownerPassword = '';
+      securityMessage = 'Document security removed successfully.';
+      metadata = actions.service.document.getMetadata();
+    } catch (err) {
+      securityError = err instanceof Error ? err.message : 'Failed to remove security.';
+    } finally {
+      isRemovingSecurity = false;
+    }
+  }
+
+  async function handleUnlockForms(): Promise<void> {
+    isUnlockingForms = true;
+    securityMessage = null;
+    securityError = null;
+    try {
+      const res = await actions.unlockForms();
+      if (res.fieldsUnlockedCount > 0 || res.annotationsUnlockedCount > 0) {
+        securityMessage = `Unlocked ${res.fieldsUnlockedCount} form fields (${res.annotationsUnlockedCount} widgets).`;
+      } else {
+        securityMessage = 'All form fields are already editable.';
+      }
+    } catch (err) {
+      securityError = err instanceof Error ? err.message : 'Failed to unlock form fields.';
+    } finally {
+      isUnlockingForms = false;
+    }
   }
 
   function triggerTool(toolName: string): void {
@@ -153,7 +208,7 @@
         {/if}
       </div>
     {:else}
-      <div class="text-xs text-muted-foreground italic flex items-center gap-1.5 mb-2">
+      <div class="text-xs text-muted-foreground flex items-center gap-1.5 mb-2">
         <Info class="h-3.5 w-3.5" /> No document loaded
       </div>
     {/if}
@@ -163,11 +218,11 @@
       <Button
         variant="outline"
         size="sm"
-        class="w-full justify-start text-xs h-7 px-2"
+        class="w-full justify-start text-xs h-8 px-2.5"
         onclick={() => actions.openDocumentInfoDialog()}
         disabled={!store.isDocumentLoaded}
       >
-        <FileText class="h-3 w-3 mr-1.5 text-primary" /> Get ALL Info on PDF
+        <FileText class="h-3.5 w-3.5 mr-2 text-primary" /> Get ALL Info on PDF
       </Button>
       {/if}
 
@@ -175,11 +230,11 @@
       <Button
         variant="outline"
         size="sm"
-        class="w-full justify-start text-xs h-7 px-2"
+        class="w-full justify-start text-xs h-8 px-2.5"
         onclick={() => triggerTool('Edit Table of Contents')}
         disabled={!store.isDocumentLoaded}
       >
-        <ListTree class="h-3 w-3 mr-1.5 text-muted-foreground" /> Edit Table of Contents
+        <ListTree class="h-3.5 w-3.5 mr-2 text-muted-foreground" /> Edit Table of Contents
       </Button>
       {/if}
 
@@ -187,11 +242,11 @@
       <Button
         variant="default"
         size="sm"
-        class="w-full justify-start text-xs h-7 px-2 font-medium"
+        class="w-full justify-start text-xs h-8 px-2.5 font-medium"
         onclick={() => actions.openSanitizeDialog()}
         disabled={!store.isDocumentLoaded}
       >
-        <ShieldCheck class="h-3 w-3 mr-1.5 text-primary-foreground" /> Sanitise Document
+        <ShieldCheck class="h-3.5 w-3.5 mr-2 text-primary-foreground" /> Sanitise Document
       </Button>
       {/if}
     </div>
@@ -202,51 +257,116 @@
   <SidebarSection title="Password Security & Access" borderBottom={true}>
     <p class="text-xs text-muted-foreground mb-2">Set or remove document passwords and permissions.</p>
 
+    {#if securityMessage}
+      <div class="mb-2 rounded-md bg-primary/10 px-2.5 py-1.5 text-[11px] text-primary flex items-center gap-1.5">
+        <Check class="h-3 w-3 shrink-0" />
+        <span>{securityMessage}</span>
+      </div>
+    {/if}
+
+    {#if securityError}
+      <div class="mb-2 rounded-md bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive flex items-center gap-1.5">
+        <AlertCircle class="h-3 w-3 shrink-0" />
+        <span>{securityError}</span>
+      </div>
+    {/if}
+
     <div class="flex flex-col gap-2.5">
       {#if featureFlags.isEnabled('security.password')}
-      <div class="flex flex-col gap-1">
-        <Label for="user-password" class="text-xs text-muted-foreground">Document Open Password</Label>
-        <Input
-          id="user-password"
-          type="password"
-          placeholder="Enter user password..."
-          bind:value={userPassword}
-          class="h-8 text-xs"
-        />
-      </div>
+        {#if isDocumentEncrypted}
+          <div class="flex flex-col gap-2 rounded-lg border p-2.5 bg-muted/20">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                <Lock class="h-3.5 w-3.5 text-primary" /> Document Protected
+              </div>
+              <Badge variant="default" class="text-[10px]">Encrypted</Badge>
+            </div>
+            <p class="text-[11px] text-muted-foreground">
+              This document has active password protection and access controls.
+            </p>
 
-      <div class="flex flex-col gap-1">
-        <Label for="owner-password" class="text-xs text-muted-foreground">Permissions / Owner Password</Label>
-        <Input
-          id="owner-password"
-          type="password"
-          placeholder="Enter owner password..."
-          bind:value={ownerPassword}
-          class="h-8 text-xs"
-        />
-      </div>
+            {#if !store.isOwnerUnlocked}
+              <div class="flex flex-col gap-1 pt-1">
+                <Label for="owner-unlock-pwd" class="text-[11px] text-muted-foreground">Owner Password (to remove)</Label>
+                <Input
+                  id="owner-unlock-pwd"
+                  type="password"
+                  placeholder="Enter owner password..."
+                  bind:value={ownerPassword}
+                  class="h-7 text-xs"
+                />
+              </div>
+            {/if}
 
-      <Button
-        variant="secondary"
-        size="sm"
-        class="w-full text-xs h-8"
-        onclick={handleApplySecurity}
-        disabled={!store.isDocumentLoaded || (!userPassword && !ownerPassword)}
-      >
-        <Lock class="h-3.5 w-3.5 mr-2 text-primary" /> Apply Password Security
-      </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              class="w-full text-xs h-7 justify-center text-destructive hover:text-destructive mt-1"
+              onclick={handleRemoveSecurity}
+              disabled={!store.isDocumentLoaded || isRemovingSecurity}
+            >
+              {#if isRemovingSecurity}
+                <Loader2 class="h-3 w-3 mr-1.5 animate-spin" /> Removing Security...
+              {:else}
+                <Unlock class="h-3 w-3 mr-1.5" /> Remove Password Security
+              {/if}
+            </Button>
+          </div>
+        {:else}
+          <div class="flex flex-col gap-1">
+            <Label for="user-password" class="text-xs text-muted-foreground">Document Open Password</Label>
+            <Input
+              id="user-password"
+              type="password"
+              placeholder="Enter user password..."
+              bind:value={userPassword}
+              class="h-8 text-xs"
+              disabled={isApplyingSecurity}
+            />
+          </div>
+
+          <div class="flex flex-col gap-1">
+            <Label for="owner-password" class="text-xs text-muted-foreground">Permissions / Owner Password</Label>
+            <Input
+              id="owner-password"
+              type="password"
+              placeholder="Enter owner password..."
+              bind:value={ownerPassword}
+              class="h-8 text-xs"
+              disabled={isApplyingSecurity}
+            />
+          </div>
+
+          <Button
+            variant="secondary"
+            size="sm"
+            class="w-full text-xs h-8"
+            onclick={handleApplySecurity}
+            disabled={!store.isDocumentLoaded || (!userPassword && !ownerPassword) || isApplyingSecurity}
+          >
+            {#if isApplyingSecurity}
+              <Loader2 class="h-3.5 w-3.5 mr-2 animate-spin" /> Encrypting...
+            {:else}
+              <Lock class="h-3.5 w-3.5 mr-2 text-primary" /> Apply Password Security
+            {/if}
+          </Button>
+        {/if}
       {/if}
 
-      <div class="grid grid-cols-2 gap-2 mt-1">
+      <div class="flex flex-col gap-2 mt-1">
         {#if featureFlags.isEnabled('security.unlock-forms')}
         <Button
           variant="outline"
           size="sm"
-          class="justify-start text-xs h-7 px-2"
-          onclick={() => triggerTool('Unlock PDF Forms')}
-          disabled={!store.isDocumentLoaded}
+          class="w-full justify-start text-xs h-8 px-2.5"
+          onclick={handleUnlockForms}
+          disabled={!store.isDocumentLoaded || isUnlockingForms}
         >
-          <Unlock class="h-3 w-3 mr-1.5 text-warning" /> Unlock Forms
+          {#if isUnlockingForms}
+            <Loader2 class="h-3.5 w-3.5 mr-2 animate-spin text-warning" /> Unlocking...
+          {:else}
+            <Unlock class="h-3.5 w-3.5 mr-2 text-warning" /> Unlock Forms
+          {/if}
         </Button>
         {/if}
 
@@ -254,11 +374,11 @@
         <Button
           variant="outline"
           size="sm"
-          class="justify-start text-xs h-7 px-2"
-          onclick={() => triggerTool('Change Permissions')}
+          class="w-full justify-start text-xs h-8 px-2.5"
+          onclick={() => actions.openPermissionsDialog()}
           disabled={!store.isDocumentLoaded}
         >
-          <FileKey class="h-3 w-3 mr-1.5 text-muted-foreground" /> Permissions
+          <FileKey class="h-3.5 w-3.5 mr-2 text-muted-foreground" /> Permissions
         </Button>
         {/if}
       </div>
@@ -298,8 +418,8 @@
 
       <div class="flex items-center justify-between pt-1">
         <span class="text-xs text-muted-foreground">Encryption Standard</span>
-        {#if isEncrypted}
-          <Badge variant="success" class="text-[10px]">
+        {#if isDocumentEncrypted}
+          <Badge variant="default" class="text-[10px]">
             <ShieldCheck class="h-3 w-3 mr-1" /> Encrypted
           </Badge>
         {:else}
