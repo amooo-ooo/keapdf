@@ -357,6 +357,7 @@
                             size="icon"
                             class="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
                             onclick={() => removeCustomField(idx)}
+                            aria-label="Remove metadata tag"
                           >
                             <Trash2 class="h-3.5 w-3.5" />
                           </Button>
@@ -465,6 +466,7 @@
                         class="h-6 w-6 text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
                         onclick={() => copyToClipboard(entry.value, entry.key)}
                         title={`Copy ${entry.key}`}
+                        aria-label={`Copy ${entry.key}`}
                       >
                         {#if copiedKey === entry.key}
                           <Check class="h-3 w-3 text-success" />
