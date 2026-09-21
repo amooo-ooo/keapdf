@@ -16,7 +16,8 @@
     ShieldCheck,
     LayoutGrid,
     BookOpenCheck,
-    ArrowRight,
+    Grid,
+    Scissors,
     FileDown,
     FileType,
   } from 'lucide-svelte';
@@ -82,81 +83,77 @@
     <p class="text-xs text-muted-foreground mb-2">Clean sensitive metadata, extract assets, and purge artifacts.</p>
 
     <div class="flex flex-col gap-2">
-      <div class="grid grid-cols-2 gap-2">
-        {#if featureFlags.isEnabled('compression')}
-        <Button
-          variant="default"
-          size="sm"
-          class="justify-start text-xs h-8 font-medium px-2.5"
-          onclick={() => actions.openCompressDialog('recommended')}
-          disabled={!store.isDocumentLoaded}
-        >
-          <FileDown class="h-3.5 w-3.5 mr-1.5 text-primary-foreground" /> Compress PDF
-        </Button>
-        {/if}
+      {#if featureFlags.isEnabled('compression')}
+      <Button
+        variant="default"
+        size="sm"
+        class="w-full justify-start text-xs h-8 font-medium px-2.5"
+        onclick={() => actions.openCompressDialog('recommended')}
+        disabled={!store.isDocumentLoaded}
+      >
+        <FileDown class="h-3.5 w-3.5 mr-2 text-primary-foreground" /> Compress PDF
+      </Button>
+      {/if}
 
-        {#if featureFlags.isEnabled('sanitization')}
-        <Button
-          variant="outline"
-          size="sm"
-          class="justify-start text-xs h-8 font-medium px-2.5"
-          onclick={() => actions.openSanitizeDialog()}
-          disabled={!store.isDocumentLoaded}
-        >
-          <ShieldCheck class="h-3.5 w-3.5 mr-1.5 text-primary" /> Sanitise
-        </Button>
-        {/if}
-      </div>
+      {#if featureFlags.isEnabled('sanitization')}
+      <Button
+        variant="outline"
+        size="sm"
+        class="w-full justify-start text-xs h-8 font-medium px-2.5"
+        onclick={() => actions.openSanitizeDialog()}
+        disabled={!store.isDocumentLoaded}
+      >
+        <ShieldCheck class="h-3.5 w-3.5 mr-2 text-primary" /> Sanitise
+      </Button>
+      {/if}
 
-      <div class="grid grid-cols-2 gap-2">
-        {#if featureFlags.isEnabled('extraction.pages')}
-        <Button
-          variant="outline"
-          size="sm"
-          class="justify-start text-xs h-8 px-2.5"
-          onclick={() => store.splitDialogMode = 'extract'}
-          disabled={!store.isDocumentLoaded}
-        >
-          <FileOutput class="h-3.5 w-3.5 mr-1.5 text-muted-foreground" /> Extract Pages
-        </Button>
-        {/if}
+      {#if featureFlags.isEnabled('extraction.pages')}
+      <Button
+        variant="outline"
+        size="sm"
+        class="w-full justify-start text-xs h-8 px-2.5"
+        onclick={() => store.splitDialogMode = 'extract'}
+        disabled={!store.isDocumentLoaded}
+      >
+        <FileOutput class="h-3.5 w-3.5 mr-2 text-muted-foreground" /> Extract Pages
+      </Button>
+      {/if}
 
-        {#if featureFlags.isEnabled('export-images') || featureFlags.isEnabled('extraction.images')}
-        <Button
-          variant="outline"
-          size="sm"
-          class="justify-start text-xs h-8 px-2.5"
-          onclick={() => store.showExportImagesDialog = true}
-          disabled={!store.isDocumentLoaded}
-        >
-          <Image class="h-3.5 w-3.5 mr-1.5 text-muted-foreground" /> Extract Images
-        </Button>
-        {/if}
+      {#if featureFlags.isEnabled('export-images') || featureFlags.isEnabled('extraction.images')}
+      <Button
+        variant="outline"
+        size="sm"
+        class="w-full justify-start text-xs h-8 px-2.5"
+        onclick={() => store.showExportImagesDialog = true}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Image class="h-3.5 w-3.5 mr-2 text-muted-foreground" /> Extract Images
+      </Button>
+      {/if}
 
-        {#if featureFlags.isEnabled('extraction.remove-blanks')}
-        <Button
-          variant="outline"
-          size="sm"
-          class="justify-start text-xs h-8 px-2.5"
-          onclick={() => triggerTool('Remove Blank Pages')}
-          disabled={!store.isDocumentLoaded}
-        >
-          <FileX class="h-3.5 w-3.5 mr-1.5 text-destructive" /> Remove Blanks
-        </Button>
-        {/if}
+      {#if featureFlags.isEnabled('extraction.remove-blanks')}
+      <Button
+        variant="outline"
+        size="sm"
+        class="w-full justify-start text-xs h-8 px-2.5"
+        onclick={() => triggerTool('Remove Blank Pages')}
+        disabled={!store.isDocumentLoaded}
+      >
+        <FileX class="h-3.5 w-3.5 mr-2 text-destructive" /> Remove Blanks
+      </Button>
+      {/if}
 
-        {#if featureFlags.isEnabled('sanitization')}
-        <Button
-          variant="outline"
-          size="sm"
-          class="justify-start text-xs h-8 px-2.5"
-          onclick={() => actions.openSanitizeDialog()}
-          disabled={!store.isDocumentLoaded}
-        >
-          <Trash2 class="h-3.5 w-3.5 mr-1.5 text-destructive" /> Clear Annotations
-        </Button>
-        {/if}
-      </div>
+      {#if featureFlags.isEnabled('sanitization')}
+      <Button
+        variant="outline"
+        size="sm"
+        class="w-full justify-start text-xs h-8 px-2.5"
+        onclick={() => actions.openSanitizeDialog()}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Trash2 class="h-3.5 w-3.5 mr-2 text-destructive" /> Clear Annotations
+      </Button>
+      {/if}
     </div>
   </SidebarSection>
   {/if}
@@ -222,15 +219,39 @@
       </Button>
       {/if}
 
-      {#if featureFlags.isEnabled('imposition.panel')}
+      {#if featureFlags.isEnabled('imposition.continuous')}
       <Button
-        variant="ghost"
+        variant="outline"
         size="sm"
-        class="w-full justify-between text-xs h-7 px-2 text-muted-foreground hover:text-foreground"
-        onclick={() => { store.leftPanelMode = 'imposition'; }}
+        class="w-full justify-start text-xs h-8"
+        onclick={() => store.openImpositionDialog('single-page')}
+        disabled={!store.isDocumentLoaded}
       >
-        <span>Open full Imposition panel</span>
-        <ArrowRight class="h-3 w-3 ml-1" />
+        <Layers class="h-3.5 w-3.5 mr-2 text-warning" /> Continuous / Single Page
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('imposition.posterize')}
+      <Button
+        variant="outline"
+        size="sm"
+        class="w-full justify-start text-xs h-8"
+        onclick={() => store.openImpositionDialog('posterize')}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Grid class="h-3.5 w-3.5 mr-2 text-primary" /> Posterize (Multi-Sheet Tile)
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('imposition.cut-stack')}
+      <Button
+        variant="outline"
+        size="sm"
+        class="w-full justify-start text-xs h-8"
+        onclick={() => store.openImpositionDialog('cut-stack')}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Scissors class="h-3.5 w-3.5 mr-2 text-destructive" /> Cut & Stack Imposition
       </Button>
       {/if}
     </div>
