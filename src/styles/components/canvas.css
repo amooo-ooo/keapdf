@@ -1,0 +1,206 @@
+/* Canvas overlays, bounding box handles, selection outlines, and element kinds */
+
+@layer components {
+	/* PDF text layer selection styling for browser-native blue highlight */
+	.pdf-text-layer {
+		user-select: text;
+	}
+
+	.pdf-text-layer ::selection {
+		background-color: color-mix(in srgb, var(--selection) 30%, transparent);
+		color: transparent;
+	}
+
+	.pdf-text-layer ::-moz-selection {
+		background-color: color-mix(in srgb, var(--selection) 30%, transparent);
+		color: transparent;
+	}
+
+	.editable-overlay-layer {
+		position: absolute;
+		top: 0;
+		left: 0;
+		width: 100%;
+		height: 100%;
+		pointer-events: none;
+	}
+
+	.figma-text-box {
+		position: absolute;
+		pointer-events: auto;
+		box-sizing: border-box;
+		border: 1px solid transparent;
+		background-color: transparent;
+		cursor: pointer;
+	}
+
+	.figma-text-box:hover {
+		border: 1px solid var(--selection);
+	}
+
+	.figma-text-box.selected {
+		border: 1.5px solid var(--selection);
+		z-index: 10;
+	}
+
+	.figma-handle {
+		position: absolute;
+		width: 6px;
+		height: 6px;
+		background: #ffffff;
+		border: 1px solid var(--selection);
+		border-radius: 1px;
+		z-index: 11;
+		pointer-events: none;
+	}
+
+	.figma-handle.top-left {
+		top: -3.5px;
+		left: -3.5px;
+	}
+
+	.figma-handle.top-right {
+		top: -3.5px;
+		right: -3.5px;
+	}
+
+	.figma-handle.bottom-left {
+		bottom: -3.5px;
+		left: -3.5px;
+	}
+
+	.figma-handle.bottom-right {
+		bottom: -3.5px;
+		right: -3.5px;
+	}
+
+	.inline-editor-input {
+		position: absolute;
+		pointer-events: auto;
+		border: none;
+		background: transparent;
+		color: var(--color-foreground, #000000);
+		padding: 0;
+		outline: none;
+		box-shadow: none;
+		border-radius: 0;
+		box-sizing: border-box;
+		z-index: 100;
+	}
+
+	.canvas-element-layer {
+		position: absolute;
+		inset: 0;
+		pointer-events: none;
+		z-index: 20;
+	}
+
+	.canvas-element {
+		position: absolute;
+		pointer-events: auto;
+		box-sizing: border-box;
+		cursor: move;
+		user-select: none;
+	}
+
+	.canvas-element.locked {
+		cursor: default;
+	}
+
+	.canvas-element-selected {
+		outline: none;
+	}
+
+	.canvas-selection-box {
+		position: absolute;
+		pointer-events: none;
+		border: 1.5px solid var(--selection);
+		box-sizing: border-box;
+		z-index: 25;
+	}
+
+	.canvas-resize-handle {
+		position: absolute;
+		width: 8px;
+		height: 8px;
+		background: #ffffff;
+		border: 1.5px solid var(--selection);
+		border-radius: 1px;
+		pointer-events: auto;
+		z-index: 26;
+		box-sizing: border-box;
+	}
+
+	.canvas-resize-handle:hover {
+		background: color-mix(in srgb, var(--selection) 15%, #ffffff);
+	}
+
+	.canvas-drop-indicator {
+		position: absolute;
+		inset: 0;
+		border: 2px dashed var(--selection);
+		background: var(--selection-subtle);
+		pointer-events: none;
+		z-index: 15;
+		border-radius: 2px;
+	}
+
+	.canvas-element-text {
+		overflow: hidden;
+		white-space: pre-wrap;
+		word-break: break-word;
+		line-height: 1.3;
+	}
+
+	.canvas-element-shape {
+		overflow: visible;
+	}
+
+	.canvas-element-shape svg {
+		display: block;
+		width: 100%;
+		height: 100%;
+	}
+
+	.canvas-element-image {
+		overflow: hidden;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: rgba(0, 0, 0, 0.03);
+		border: 1px dashed var(--border);
+	}
+
+	.canvas-element-image img {
+		display: block;
+		max-width: 100%;
+		max-height: 100%;
+	}
+
+	.canvas-element-form {
+		display: flex;
+		align-items: center;
+		border: 1px solid var(--border);
+		border-radius: 3px;
+		background: var(--color-card, #ffffff);
+		padding: 2px 6px;
+		font-size: 11px;
+		color: var(--muted-foreground);
+		overflow: hidden;
+	}
+
+	.color-swatch-fill {
+		@apply h-8 w-14 cursor-pointer rounded-2xl p-0 border-0 bg-transparent overflow-hidden;
+	}
+	.color-swatch-fill::-webkit-color-swatch-wrapper {
+		padding: 0;
+	}
+	.color-swatch-fill::-webkit-color-swatch {
+		border: 0;
+		border-radius: 1rem;
+	}
+	.color-swatch-fill::-moz-color-swatch {
+		border: 0;
+		border-radius: 1rem;
+	}
+}

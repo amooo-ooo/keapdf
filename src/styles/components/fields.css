@@ -1,0 +1,39 @@
+/* Form field groups, labels, inputs, grids, and alignment rows */
+
+@layer components {
+	.field-group {
+		@apply flex flex-col gap-1;
+	}
+
+	.field-group-sm {
+		@apply flex flex-col gap-1;
+	}
+
+	.field-label {
+		@apply !text-[11px] text-muted-foreground font-medium select-none;
+	}
+
+	.field-input {
+		@apply h-8 !text-xs;
+	}
+
+	.field-grid-2 {
+		@apply grid grid-cols-2 gap-2;
+	}
+
+	.field-grid-2-sm {
+		@apply grid grid-cols-2 gap-1.5;
+	}
+
+	.field-row-end {
+		@apply flex items-end gap-2 w-full;
+	}
+
+	.field-header-row {
+		@apply flex items-center justify-between;
+	}
+
+	.panel-slider-value {
+		@apply text-[10px] text-muted-foreground font-sans tabular-nums;
+	}
+}

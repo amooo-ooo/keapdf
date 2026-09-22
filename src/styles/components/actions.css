@@ -1,0 +1,43 @@
+/* Action buttons, draggable items, destructive modifiers, and button stacks */
+
+@layer components {
+	.panel-action-stack {
+		@apply flex flex-col gap-1;
+	}
+
+	.panel-action-stack-sm {
+		@apply flex flex-col gap-1;
+	}
+
+	.btn-action {
+		@apply w-full !justify-start px-2 h-8 !text-xs;
+	}
+
+	.btn-panel {
+		@apply w-full !justify-start px-2 h-8 !text-xs font-normal border-border bg-background hover:bg-muted hover:text-foreground dark:hover:bg-input/30 dark:bg-transparent;
+	}
+
+	.btn-panel-destructive {
+		@apply w-full !justify-start px-2 h-8 !text-xs font-normal border-border bg-background hover:bg-destructive/10 text-destructive hover:text-destructive dark:bg-transparent;
+	}
+
+	.panel-icon-sm {
+		@apply h-3.5 w-3.5 shrink-0;
+	}
+
+	.panel-action-link {
+		@apply text-[10px] text-muted-foreground hover:text-foreground hover:underline cursor-pointer;
+	}
+
+	.panel-action-link-primary {
+		@apply text-[10px] text-primary hover:underline cursor-pointer;
+	}
+
+	.sidebar-drag-source {
+		cursor: grab;
+	}
+
+	.sidebar-drag-source:active {
+		cursor: grabbing;
+	}
+}

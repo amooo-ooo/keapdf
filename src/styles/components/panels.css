@@ -1,0 +1,70 @@
+/* Panel structural containers, headers, descriptions, cards, and bento sections */
+
+@layer components {
+	/* Panel structural containers */
+	.panel-container {
+		@apply h-full w-full bg-card rounded-xl flex flex-col overflow-hidden shadow-sm relative;
+	}
+
+	.panel-header {
+		@apply px-2.5 flex flex-col gap-2 shrink-0 bg-card pb-1.5;
+	}
+
+	.panel-header-compact {
+		@apply px-[0.4rem] pt-2 pb-0 flex flex-col gap-2 shrink-0 bg-card w-full pb-1.5;
+	}
+
+	.panel-title {
+		@apply text-xs font-medium text-foreground mb-0.5;
+	}
+
+	.panel-subtitle {
+		@apply text-[11px] text-muted-foreground truncate;
+	}
+
+	.panel-content {
+		@apply flex-1 overflow-y-auto min-h-0 flex flex-col pb-1;
+	}
+
+	.panel-root {
+		@apply flex flex-col min-h-0 overflow-auto;
+	}
+
+	.panel-inspector-root {
+		@apply flex flex-col w-full shrink-0 pb-1;
+	}
+
+	.panel-description {
+		@apply text-xs text-muted-foreground mb-2;
+	}
+
+	/* Inset sub cards and status banners */
+	.panel-card-inset {
+		@apply flex flex-col gap-2 rounded-lg border p-2.5 bg-muted/20;
+	}
+
+	.panel-metric-banner {
+		@apply rounded-xl text-xs flex flex-col gap-1.5 /* bg-muted/40 p-2.5 */;
+	}
+
+	.panel-status-pill {
+		@apply rounded-md bg-primary/10 px-2.5 py-1.5 text-[11px] text-primary flex items-center gap-1.5 font-medium;
+	}
+
+	.panel-error-pill {
+		@apply rounded-md bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive flex items-center gap-1.5 font-medium;
+	}
+
+	/* Key value metadata grid */
+	.panel-key-value-grid {
+		@apply grid grid-cols-[1fr_2fr] gap-x-2 gap-y-1.5 text-xs;
+	}
+
+	.panel-key-label {
+		@apply text-muted-foreground truncate;
+	}
+
+	.panel-value-text {
+		@apply text-foreground truncate font-medium tabular-nums;
+	}
+}
