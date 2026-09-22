@@ -5,15 +5,41 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kea PDF</title>
     <meta name="description" content="Kea PDF is a fast, privacy-focused, browser-native PDF editor built with Svelte 5 and PDFium WebAssembly." />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon-180x180.png" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Kea PDF" />
     <link rel="preload" href="/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/fonts/inter.css" />
     <script>
-      // System theme detection: apply dark class based on OS preference
       (function () {
+        var theme = 'system';
+        try {
+          theme = localStorage.getItem('kea_theme') || 'system';
+        } catch (e) {
+          // Ignore storage access errors
+        }
+        var isDark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        if (isDark) {
+          document.documentElement.classList.add('dark');
+        } else {
+          document.documentElement.classList.remove('dark');
+        }
         var mq = window.matchMedia('(prefers-color-scheme: dark)');
-        if (mq.matches) document.documentElement.classList.add('dark');
         mq.addEventListener('change', function (e) {
-          document.documentElement.classList.toggle('dark', e.matches);
+          var current = 'system';
+          try {
+            current = localStorage.getItem('kea_theme') || 'system';
+          } catch (err) {
+            // Ignore storage access errors
+          }
+          if (current === 'system') {
+            document.documentElement.classList.toggle('dark', e.matches);
+          }
         });
       })();
     </script>
