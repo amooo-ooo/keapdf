@@ -1,25 +1,14 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "./styles/components/panels.css";
+@import "./styles/components/fields.css";
+@import "./styles/components/actions.css";
+@import "./styles/components/canvas.css";
 
-@font-face {
-	font-family: 'Inter Variable';
-	font-weight: 100 900;
-	font-display: swap;
-	font-style: normal;
-	src: url('/fonts/InterVariable.woff2') format('woff2');
-}
-
-@font-face {
-	font-family: 'Inter Variable';
-	font-weight: 100 900;
-	font-display: swap;
-	font-style: italic;
-	src: url('/fonts/InterVariable-Italic.woff2') format('woff2');
-}
-
-@custom-variant dark (&:is(.dark *));
+@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
+	font-family: var(--font-sans);
 	--background: oklch(0.975 0.005 106.5);
 	--foreground: oklch(0.153 0.006 107.1);
 	--card: oklch(1 0 0);
@@ -31,7 +20,7 @@
 	--secondary: oklch(0.966 0.005 106.5);
 	--secondary-foreground: oklch(0.228 0.013 107.4);
 	--muted: oklch(0.966 0.005 106.5);
-	--muted-foreground: oklch(0.58 0.031 107.3);
+	--muted-foreground: oklch(0.48 0.025 107.3);
 	--accent: oklch(0.966 0.005 106.5);
 	--accent-foreground: oklch(0.228 0.013 107.4);
 	--destructive: oklch(0.577 0.245 27.325);
@@ -63,12 +52,50 @@
 	--sidebar-accent-foreground: oklch(0.228 0.013 107.4);
 	--sidebar-border: oklch(0.93 0.007 106.5);
 	--sidebar-ring: oklch(0.737 0.021 106.9);
+	--sidebar-bento-bg: color-mix(in oklch, var(--muted) 50%, transparent);
+	--sidebar-bento-border: color-mix(in oklch, var(--border) 70%, transparent);
+	--panel: var(--card);
+	--panel-foreground: var(--card-foreground);
+
+	/* Concentric border radius tokens */
+	--radius-control: 0.375rem;
+	--radius-card-inner: 0.5rem;
+	--radius-card: 0.75rem;
+	--radius-dialog: 1rem;
+	--radius-viewport: 1.5rem;
+
+	/* Spacing scale and component layout tokens */
+	--space-1: 0.25rem;
+	--space-1-5: 0.375rem;
+	--space-2: 0.5rem;
+	--space-2-5: 0.625rem;
+	--space-3: 0.75rem;
+	--space-4: 1rem;
+	--space-5: 1.25rem;
+	--space-6: 1.5rem;
+	--space-panel-padding: 0.625rem;
+	--space-card-gap: 0.5rem;
+	--space-card-padding: 0.625rem;
+
+	/* Motion and transition tokens */
+	--duration-fast: 150ms;
+	--duration-normal: 200ms;
+	--ease-standard: cubic-bezier(0.16, 1, 0.3, 1);
+	--ease-out: cubic-bezier(0, 0, 0.2, 1);
+
+	/* Layered elevation shadow tokens in light mode */
+	--shadow-elevation-1: 0 1px 2px oklch(0 0 0 / 0.05), 0 1px 3px oklch(0 0 0 / 0.05);
+	--shadow-elevation-2: 0 2px 4px oklch(0 0 0 / 0.04), 0 4px 8px oklch(0 0 0 / 0.06);
+	--shadow-elevation-3: 0 4px 12px oklch(0 0 0 / 0.05), 0 12px 28px oklch(0 0 0 / 0.08);
 }
 
 .dark {
 	--background: oklch(0.153 0.006 107.1);
+	/* --background: oklch(17.977% 0.00858 4.313); */
 	--foreground: oklch(0.988 0.003 106.5);
-	--card: oklch(0.228 0.013 107.4);
+	/* --card: oklch(0.228 0.013 107.4); */
+	/* --card: oklch(0.2072 0.01 107.48); */
+	--card: oklch(0.2119 0.01 107.48);
 	--card-foreground: oklch(0.988 0.003 106.5);
 	--popover: oklch(0.228 0.013 107.4);
 	--popover-foreground: oklch(0.988 0.003 106.5);
@@ -108,10 +135,27 @@
 	--sidebar-accent-foreground: oklch(0.988 0.003 106.5);
 	--sidebar-border: oklch(1 0 0 / 10%);
 	--sidebar-ring: oklch(0.58 0.031 107.3);
+	--sidebar-bento-bg: color-mix(in oklch, var(--muted) 45%, transparent);
+	--sidebar-bento-border: color-mix(in oklch, var(--border) 60%, transparent);
+	--panel: var(--card);
+	--panel-foreground: var(--card-foreground);
+
+	/* Concentric border radius tokens */
+	--radius-control: 0.375rem;
+	--radius-card-inner: 0.5rem;
+	--radius-card: 0.75rem;
+	--radius-dialog: 1rem;
+	--radius-viewport: 1.5rem;
+
+	/* Layered elevation shadow tokens in dark mode */
+	--shadow-elevation-1: 0 1px 2px oklch(0 0 0 / 0.3), 0 0 0 1px oklch(1 0 0 / 0.08);
+	--shadow-elevation-2: 0 3px 6px oklch(0 0 0 / 0.35), 0 6px 16px oklch(0 0 0 / 0.25), 0 0 0 1px oklch(1 0 0 / 0.1);
+	--shadow-elevation-3: 0 6px 16px oklch(0 0 0 / 0.4), 0 16px 36px oklch(0 0 0 / 0.3), 0 0 0 1px oklch(1 0 0 / 0.12);
 }
 
 @theme inline {
 	--font-sans: 'Inter Variable', 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+	--font-display: var(--font-sans);
 	--font-mono: var(--font-sans);
 	--color-sidebar-ring: var(--sidebar-ring);
 	--color-sidebar-border: var(--sidebar-border);
@@ -153,6 +197,8 @@
 	--color-popover: var(--popover);
 	--color-card-foreground: var(--card-foreground);
 	--color-card: var(--card);
+	--color-panel-foreground: var(--panel-foreground);
+	--color-panel: var(--panel);
 	--color-foreground: var(--foreground);
 	--color-background: var(--background);
 	--radius-sm: calc(var(--radius) * 0.6);
@@ -162,6 +208,15 @@
 	--radius-2xl: calc(var(--radius) * 1.8);
 	--radius-3xl: calc(var(--radius) * 2.2);
 	--radius-4xl: calc(var(--radius) * 2.6);
+	--radius-control: var(--radius-control);
+	--radius-card-inner: var(--radius-card-inner);
+	--radius-card: var(--radius-card);
+	--radius-dialog: var(--radius-dialog);
+	--radius-viewport: var(--radius-viewport);
+
+	--shadow-elevation-1: var(--shadow-elevation-1);
+	--shadow-elevation-2: var(--shadow-elevation-2);
+	--shadow-elevation-3: var(--shadow-elevation-3);
 
 	--cursor-default: url('/cursors/Arrow.svg') 8 5, default;
 	--cursor-pointer: url('/cursors/Pointer.svg') 8 6, pointer;
@@ -186,8 +241,11 @@
 		@apply border-border outline-ring/50;
 	}
 	html, body {
-		@apply bg-background text-foreground;
+		@apply bg-background text-foreground font-sans;
 		cursor: var(--cursor-default);
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+		text-rendering: optimizeLegibility;
 	}
 	html {
 		@apply font-sans;
@@ -215,7 +273,7 @@
 	/* Slim scrollbars globally */
 	* {
 		scrollbar-width: thin;
-		scrollbar-color: var(--muted) transparent;
+		scrollbar-color: color-mix(in oklch, var(--foreground) 25%, transparent) transparent;
 	}
 
 	*::-webkit-scrollbar {
@@ -228,31 +286,26 @@
 	}
 
 	*::-webkit-scrollbar-thumb {
-		background: var(--muted);
+		background: color-mix(in oklch, var(--foreground) 25%, transparent);
 		border-radius: 4px;
 	}
 
 	*::-webkit-scrollbar-thumb:hover {
-		background: var(--muted-foreground);
+		background: color-mix(in oklch, var(--foreground) 45%, transparent);
 	}
 }
 
-/* Editor shell grid layout */
+/* Editor shell layout */
 .editor-shell {
-	display: grid;
-	grid-template-columns: auto 1fr;
-	grid-template-rows: 1fr;
-	grid-template-areas:
-		"nav workspace";
+	display: flex;
 	height: 100vh;
 	width: 100vw;
 	overflow: hidden;
 }
-.editor-shell-nav { grid-area: nav; min-height: 0; height: 100%; }
-.editor-shell-workspace { grid-area: workspace; min-height: 0; min-width: 0; height: 100%; display: flex; }
+.editor-shell-nav { min-height: 0; height: 100%; }
 .editor-shell-left { min-height: 0; min-width: 0; height: 100%; }
 .editor-shell-canvas { min-width: 0; min-height: 0; height: 100%; }
-.editor-shell-right { min-height: 0; min-width: 240px; height: 100%; }
+.editor-shell-right { min-height: 0; min-width: 0; height: 100%; }
 
 /* Panel collapse rules */
 .panel-collapsible {
@@ -270,290 +323,55 @@
 	height: 0 !important;
 }
 
-@layer components {
-	/* Panel Structural Components */
-	.panel-container {
-		@apply h-full w-full bg-card border rounded-xl flex flex-col overflow-hidden shadow-sm relative;
-	}
-	
-	.panel-header {
-		@apply p-2.5 border-b flex flex-col gap-2 shrink-0 bg-card;
-	}
-
-	.panel-header-compact {
-		@apply p-2 border-b flex flex-col gap-2 shrink-0 bg-card w-full;
-	}
-	
-	.panel-title {
-		@apply text-xs font-medium text-foreground;
-	}
-	
-	.panel-subtitle {
-		@apply text-[11px] text-muted-foreground truncate;
-	}
-
-	.panel-content {
-		@apply flex-1 overflow-y-auto min-h-0 flex flex-col;
-	}
-	
-	/* Field Group Utilities */
-	.field-group {
-		@apply flex flex-col gap-1.5;
-	}
-	
-	.field-label {
-		@apply !text-[11px] text-muted-foreground font-medium select-none;
-	}
-	
-	.field-input {
-		@apply h-8 !text-xs;
-	}
-	
-	.color-swatch-fill {
-		@apply h-8 w-14 cursor-pointer rounded-2xl p-0 border-0 bg-transparent overflow-hidden;
-	}
-	.color-swatch-fill::-webkit-color-swatch-wrapper {
-		padding: 0;
-	}
-	.color-swatch-fill::-webkit-color-swatch {
-		border: 0;
-		border-radius: 1rem;
-	}
-	.color-swatch-fill::-moz-color-swatch {
-		border: 0;
-		border-radius: 1rem;
-	}
-	
-	.btn-action {
-		@apply w-full !justify-start px-2 h-8 !text-xs;
-	}
-}
 
 /* Sidebar Design System Tokens and Utilities */
 .sidebar-section {
 	display: flex;
 	flex-direction: column;
-	width: 100%;
-	background-color: transparent;
-	border-radius: 0;
-	border: none;
+	/* background-color: var(--background); */
+	background-color: var(--sidebar-bento-bg, color-mix(in oklch, var(--muted) 45%, transparent));
+	/* border: 1px solid var(--sidebar-bento-border, color-mix(in oklch, var(--border) 60%, transparent)); */
+	border-radius: 0.625rem;
+	margin: 0.25rem 0.5rem;
+	overflow: hidden;
+	flex-shrink: 0;
+	transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.sidebar-section:hover {
+	border-color: color-mix(in oklch, var(--border) 90%, transparent);
 }
 
 .sidebar-section-header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	height: 1.75rem;
-	padding-left: 0.75rem;
-	padding-right: 0.75rem;
+	height: 2rem;
+	min-height: 2rem;
+	padding-left: 0.625rem;
+	padding-right: 0.625rem;
 	flex-shrink: 0;
 	user-select: none;
 }
 
 .sidebar-section-title {
 	font-size: 0.75rem;
-	font-weight: 400;
+	font-weight: 500;
 	color: var(--foreground);
 	line-height: 1.3;
 }
 
 .sidebar-section-content {
-	padding: 0 0.75rem;
+	padding: 0 0.625rem 0.625rem 0.625rem;
 	display: flex;
 	flex-direction: column;
-	gap: 0.75rem;
+	gap: 0.625rem;
 }
 
 .sidebar-divider {
-	border-bottom: 1px solid var(--border);
+	border-bottom: none;
 }
 
-/* Figma Bounding Box Styles */
-.editable-overlay-layer {
-	position: absolute;
-	top: 0;
-	left: 0;
-	width: 100%;
-	height: 100%;
-	pointer-events: none;
-}
-
-.figma-text-box {
-	position: absolute;
-	pointer-events: auto;
-	box-sizing: border-box;
-	border: 1px solid transparent;
-	background-color: transparent;
-	cursor: pointer;
-}
-
-.figma-text-box:hover {
-	border: 1px solid var(--selection);
-}
-
-.figma-text-box.selected {
-	border: 1.5px solid var(--selection);
-	z-index: 10;
-}
-
-.figma-handle {
-	position: absolute;
-	width: 6px;
-	height: 6px;
-	background: #ffffff;
-	border: 1px solid var(--selection);
-	border-radius: 1px;
-	z-index: 11;
-	pointer-events: none;
-}
-
-.figma-handle.top-left {
-	top: -3.5px;
-	left: -3.5px;
-}
-
-.figma-handle.top-right {
-	top: -3.5px;
-	right: -3.5px;
-}
-
-.figma-handle.bottom-left {
-	bottom: -3.5px;
-	left: -3.5px;
-}
-
-.figma-handle.bottom-right {
-	bottom: -3.5px;
-	right: -3.5px;
-}
-
-.inline-editor-input {
-	position: absolute;
-	pointer-events: auto;
-	border: none;
-	background: transparent;
-	color: var(--color-foreground, #000000);
-	padding: 0;
-	outline: none;
-	box-shadow: none;
-	border-radius: 0;
-	box-sizing: border-box;
-	z-index: 100;
-}
-
-/* Canvas Element System */
-
-.canvas-element-layer {
-	position: absolute;
-	inset: 0;
-	pointer-events: none;
-	z-index: 20;
-}
-
-.canvas-element {
-	position: absolute;
-	pointer-events: auto;
-	box-sizing: border-box;
-	cursor: move;
-	user-select: none;
-}
-
-.canvas-element.locked {
-	cursor: default;
-}
-
-.canvas-element-selected {
-	outline: none;
-}
-
-.canvas-selection-box {
-	position: absolute;
-	pointer-events: none;
-	border: 1.5px solid var(--selection);
-	box-sizing: border-box;
-	z-index: 25;
-}
-
-.canvas-resize-handle {
-	position: absolute;
-	width: 8px;
-	height: 8px;
-	background: #ffffff;
-	border: 1.5px solid var(--selection);
-	border-radius: 1px;
-	pointer-events: auto;
-	z-index: 26;
-	box-sizing: border-box;
-}
-
-.canvas-resize-handle:hover {
-	background: color-mix(in srgb, var(--selection) 15%, #ffffff);
-}
-
-.canvas-drop-indicator {
-	position: absolute;
-	inset: 0;
-	border: 2px dashed var(--selection);
-	background: var(--selection-subtle);
-	pointer-events: none;
-	z-index: 15;
-	border-radius: 2px;
-}
-
-/* Canvas element content variants */
-
-.canvas-element-text {
-	overflow: hidden;
-	white-space: pre-wrap;
-	word-break: break-word;
-	line-height: 1.3;
-}
-
-.canvas-element-shape {
-	overflow: visible;
-}
-
-.canvas-element-shape svg {
-	display: block;
-	width: 100%;
-	height: 100%;
-}
-
-.canvas-element-image {
-	overflow: hidden;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	background: rgba(0, 0, 0, 0.03);
-	border: 1px dashed var(--border);
-}
-
-.canvas-element-image img {
-	display: block;
-	max-width: 100%;
-	max-height: 100%;
-}
-
-.canvas-element-form {
-	display: flex;
-	align-items: center;
-	border: 1px solid var(--border);
-	border-radius: 3px;
-	background: var(--color-card, #ffffff);
-	padding: 2px 6px;
-	font-size: 11px;
-	color: var(--muted-foreground);
-	overflow: hidden;
-}
-
-/* Draggable sidebar items */
-.sidebar-drag-source {
-	cursor: grab;
-}
-
-.sidebar-drag-source:active {
-	cursor: grabbing;
-}
 
 .cursor-rotate-tl {
 	cursor: url('/cursors/Rotate/Top Left.svg') 12 12, crosshair;
@@ -590,3 +408,15 @@
 		transparent 75% 100%
 	);
 }
+
+@layer utilities {
+	.tabular-nums {
+		font-variant-numeric: tabular-nums;
+	}
+
+	.theme-transition-suppressed,
+	.theme-transition-suppressed * {
+		transition: none !important;
+	}
+}
+
