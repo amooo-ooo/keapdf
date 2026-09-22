@@ -4,15 +4,16 @@
 	import { type VariantProps, tv } from "tailwind-variants";
 
 	export const buttonVariants = tv({
-		base: "focus-visible:border-ring focus-visible:ring-ring/30 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 rounded-2xl border border-transparent bg-clip-padding text-sm font-medium focus-visible:ring-3 active:not-aria-[haspopup]:translate-y-px aria-invalid:ring-3 [&_svg:not([class*='size-'])]:size-4 group/button inline-flex shrink-0 items-center justify-center whitespace-nowrap transition-all outline-none select-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+		base: "focus-visible:border-ring focus-visible:ring-ring/30 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 rounded-2xl border border-transparent bg-clip-padding text-sm font-medium focus-visible:ring-3 active:not-aria-[haspopup]:scale-[0.98] active:not-aria-[haspopup]:translate-y-px aria-invalid:ring-3 [&_svg:not([class*='size-'])]:size-4 group/button inline-flex shrink-0 items-center justify-center whitespace-nowrap transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out outline-none select-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0",
 		variants: {
 			variant: {
 				default: "bg-primary text-primary-foreground hover:bg-primary/80",
-				outline: "border-border bg-background hover:bg-muted hover:text-foreground dark:hover:bg-input/30 aria-expanded:bg-muted aria-expanded:text-foreground dark:bg-transparent aria-pressed:bg-primary aria-pressed:text-primary-foreground aria-pressed:border-primary aria-pressed:hover:bg-primary/80 data-[active=true]:bg-primary data-[active=true]:text-primary-foreground data-[active=true]:border-primary data-[active=true]:hover:bg-primary/80",
+				outline: "border-border bg-background text-foreground hover:bg-muted hover:text-foreground dark:hover:bg-input/30 aria-expanded:bg-muted aria-expanded:text-foreground dark:bg-transparent aria-pressed:bg-primary aria-pressed:text-primary-foreground aria-pressed:border-primary aria-pressed:hover:bg-primary/80 data-[active=true]:bg-primary data-[active=true]:text-primary-foreground data-[active=true]:border-primary data-[active=true]:hover:bg-primary/80",
 				secondary: "bg-secondary text-secondary-foreground aria-expanded:bg-secondary aria-expanded:text-secondary-foreground hover:bg-[color-mix(in_oklch,var(--secondary),var(--foreground)_5%)] aria-pressed:bg-primary aria-pressed:text-primary-foreground",
-				ghost: "hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 aria-expanded:bg-muted aria-expanded:text-foreground aria-pressed:bg-primary aria-pressed:text-primary-foreground aria-pressed:hover:bg-primary/80 data-[active=true]:bg-primary data-[active=true]:text-primary-foreground data-[active=true]:hover:bg-primary/80",
+				ghost: "text-foreground hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 aria-expanded:bg-muted aria-expanded:text-foreground aria-pressed:bg-primary aria-pressed:text-primary-foreground aria-pressed:hover:bg-primary/80 data-[active=true]:bg-primary data-[active=true]:text-primary-foreground data-[active=true]:hover:bg-primary/80",
 				destructive: "bg-destructive/10 hover:bg-destructive/20 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/20 text-destructive focus-visible:border-destructive/40 dark:hover:bg-destructive/30",
-				"panel-action": "w-full justify-start px-2 h-8 text-xs font-normal border-border bg-background hover:bg-muted hover:text-foreground dark:hover:bg-input/30 dark:bg-transparent",
+				panel: "w-full justify-start px-2 h-8 text-xs font-normal bg-panel hover:bg-muted hover:text-foreground dark:hover:bg-input/40 dark:bg-input/25 aria-expanded:bg-muted aria-expanded:text-foreground aria-pressed:bg-primary aria-pressed:text-primary-foreground aria-pressed:border-primary aria-pressed:hover:bg-primary/80 data-[active=true]:bg-primary data-[active=true]:text-primary-foreground data-[active=true]:border-primary data-[active=true]:hover:bg-primary/80 cursor-pointer [&[draggable=true]]:cursor-grab [&[draggable=true]:active]:cursor-grabbing",
+				"panel-destructive": "w-full justify-start px-2 h-8 text-xs font-normal border-border bg-background hover:bg-destructive/10 text-destructive hover:text-destructive dark:bg-transparent",
 				link: "text-primary underline-offset-4 hover:underline",
 			},
 			size: {
@@ -73,8 +74,9 @@
 	const isPressed = $derived(
 		Boolean(
 			active ??
-				isValueMatch ??
-				(restProps["aria-pressed"] === true || restProps["aria-pressed"] === "true")
+				(isValueMatch ||
+					restProps["aria-pressed"] === true ||
+					restProps["aria-pressed"] === "true")
 		)
 	);
 	const ariaPressed = $derived(
@@ -92,6 +94,16 @@
 		variant ?? (isPressed ? "default" : groupCtx?.variant ?? "default")
 	);
 	const effectiveSize = $derived(size ?? groupCtx?.size ?? "default");
+
+	// note: align active and focus states in button groups with input surface styling
+	const groupButtonActiveClasses = $derived(
+		groupCtx && isPressed
+			? "bg-input/50 text-foreground border-border hover:bg-input/70 aria-pressed:bg-input/50 aria-pressed:text-foreground aria-pressed:hover:bg-input/70 data-[active=true]:bg-input/50 data-[active=true]:text-foreground data-[active=true]:hover:bg-input/70"
+			: undefined
+	);
+	const groupButtonFocusClasses = $derived(
+		groupCtx ? "focus-visible:bg-input/50" : undefined
+	);
 
 	function handleButtonClick(e: MouseEvent & { currentTarget: HTMLButtonElement }): void {
 		if (groupCtx?.onValueChange && value !== undefined) {
@@ -120,9 +132,16 @@
 	<a
 		bind:this={ref}
 		data-slot="button"
+		data-variant={effectiveVariant}
+		data-size={effectiveSize}
 		data-active={isPressed ? "true" : undefined}
 		aria-pressed={ariaPressed}
-		class={cn(buttonVariants({ variant: effectiveVariant, size: effectiveSize }), className)}
+		class={cn(
+			buttonVariants({ variant: effectiveVariant, size: effectiveSize }),
+			groupButtonActiveClasses,
+			groupButtonFocusClasses,
+			className
+		)}
 		href={disabled ? undefined : href}
 		aria-disabled={disabled}
 		role={disabled ? "link" : undefined}
@@ -136,9 +155,16 @@
 	<button
 		bind:this={ref}
 		data-slot="button"
+		data-variant={effectiveVariant}
+		data-size={effectiveSize}
 		data-active={isPressed ? "true" : undefined}
 		aria-pressed={ariaPressed}
-		class={cn(buttonVariants({ variant: effectiveVariant, size: effectiveSize }), className)}
+		class={cn(
+			buttonVariants({ variant: effectiveVariant, size: effectiveSize }),
+			groupButtonActiveClasses,
+			groupButtonFocusClasses,
+			className
+		)}
 		{type}
 		{disabled}
 		{...restProps}
