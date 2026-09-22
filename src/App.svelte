@@ -39,6 +39,8 @@
   import ConvertDocumentDialog from './components/dialogs/ConvertDocumentDialog.svelte';
   import OcrDialog from './components/dialogs/OcrDialog.svelte';
   import PageScaleDialog from './components/dialogs/PageScaleDialog.svelte';
+  import PasswordPromptDialog from './components/dialogs/PasswordPromptDialog.svelte';
+  import PermissionsDialog from './components/dialogs/PermissionsDialog.svelte';
   import { WebMcpStore, provideWebMcpStore } from './stores/webmcp.svelte';
   import { WebMcpManager } from './core/webmcp/webmcp-manager';
   import {
@@ -139,7 +141,7 @@
       webMcpManager.unregisterAllTools();
     });
 
-    // Register all 54 tools immediately so agents can discover them without delay
+    // note: register webmcp tools immediately so agents discover them without delay
     void webMcpManager.initialize();
 
     actions.initializeEngine().then(async () => {
@@ -328,4 +330,10 @@
 {/if}
 {#if featureFlags.isEnabled('page-actions.scale')}
   <PageScaleDialog />
+{/if}
+{#if featureFlags.isEnabled('security.password')}
+  <PasswordPromptDialog />
+{/if}
+{#if featureFlags.isEnabled('security.permissions')}
+  <PermissionsDialog />
 {/if}
