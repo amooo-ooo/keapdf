@@ -34,7 +34,7 @@
     Undo2,
     Plus,
     Sparkles,
-    Sliders,
+    SlidersHorizontal,
     Loader2,
   } from 'lucide-svelte';
 
@@ -805,7 +805,7 @@
               <div class="space-y-2 bg-muted/20 p-3 rounded-lg border border-border">
                 <div class="flex items-center justify-between text-xs">
                   <span class="flex items-center gap-1 text-muted-foreground font-medium">
-                    <Sliders class="h-3.5 w-3.5" /> Background Cleanup Threshold
+                    <SlidersHorizontal class="h-3.5 w-3.5" /> Background Cleanup Threshold
                   </span>
                   <span class="text-xs font-sans">{threshold}</span>
                 </div>
