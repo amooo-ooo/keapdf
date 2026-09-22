@@ -59,6 +59,7 @@
 	data-slot="button-group"
 	data-orientation={orientation}
 	data-attached={attached ? "" : undefined}
+	data-shape={shape}
 	class={cn(buttonGroupVariants({ orientation, attached, shape }), className)}
 	{...restProps}
 >
