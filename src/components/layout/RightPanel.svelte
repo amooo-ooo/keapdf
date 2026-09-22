@@ -30,7 +30,7 @@
 
   let activeTab = $state('properties');
 
-  // Synchronize active tab with organizer view when organizer tab is enabled in panel registry.
+  // note: synchronise active tab with organiser view when organiser tab is active in panel registry
   $effect(() => {
     if (store.showOrganizerView) {
       activeTab = 'organizer';
@@ -48,11 +48,12 @@
 <aside 
   class="h-full flex flex-col overflow-hidden select-none w-full p-[4px]"
   style={store.rightPanelCollapsed ? 'width: 0px; padding: 0;' : ''}
+  aria-label="Properties and tools panel"
 >
   {#if !store.rightPanelCollapsed}
     <div class="panel-container">
       <div class="panel-header-compact">
-        <!-- Row 1: Undo/Redo left, Export right (decoupled flex row) -->
+        <!-- note: undo and redo controls on left and export trigger on right -->
         <div class="flex items-center justify-between gap-2 w-full min-w-0">
           {#if featureFlags.isEnabled('history')}
           <ButtonGroup class="shrink-0">
@@ -60,12 +61,13 @@
               <Tooltip.Trigger>
                 {#snippet child({ props })}
                   <Button
+                    {...props}
                     variant="ghost"
                     size="icon"
+                    aria-label="Undo"
                     class="h-7 w-7 text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:pointer-events-none"
                     disabled={!historyStore.canUndo}
                     onclick={() => actions.undo()}
-                    {...props}
                   >
                     <Undo2 class="w-3.5 h-3.5" />
                   </Button>
@@ -81,12 +83,13 @@
               <Tooltip.Trigger>
                 {#snippet child({ props })}
                   <Button
+                    {...props}
                     variant="ghost"
                     size="icon"
+                    aria-label="Redo"
                     class="h-7 w-7 text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:pointer-events-none"
                     disabled={!historyStore.canRedo}
                     onclick={() => actions.redo()}
-                    {...props}
                   >
                     <Redo2 class="w-3.5 h-3.5" />
                   </Button>
@@ -136,7 +139,7 @@
           {/if}
         </div>
 
-        <!-- Row 2: Tabs left, Zoom right (decoupled flex row) -->
+        <!-- note: tab navigation on left and zoom menu on right -->
         <div class="flex items-center justify-between gap-1.5 w-full min-w-0">
           <Tabs.Root value={activeTab} onValueChange={handleTabChange} class="min-w-0 flex-1 overflow-hidden">
             <Tabs.List class="h-6.5 p-0 bg-transparent gap-1 text-xs flex items-center justify-start overflow-x-auto hide-scrollbar">
@@ -160,6 +163,7 @@
                   "w-[68px] h-6 px-1.5 text-xs font-medium text-muted-foreground hover:text-foreground flex items-center justify-between cursor-pointer select-none shrink-0"
                 )}
                 disabled={!store.isDocumentLoaded}
+                aria-label="Zoom level"
               >
                 <span>{store.isDocumentLoaded ? `${store.zoomPercent}%` : '100%'}</span>
                 <ChevronDown class="w-3 h-3 ml-0.5 shrink-0" />
@@ -180,7 +184,7 @@
       
       <div class="panel-content">
         {#if store.showOrganizerView}
-          <div class="p-3 text-xs text-muted-foreground italic">
+          <div class="p-3 text-xs text-muted-foreground">
             Page Organizer is active in the main workspace view.
           </div>
         {:else}
