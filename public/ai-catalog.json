@@ -1,0 +1,16 @@
+{
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "Kea PDF",
+    "identifier": "https://keapdf.amorb.dev"
+  },
+  "entries": [
+    {
+      "identifier": "urn:keapdf:webmcp:pdf-tools",
+      "displayName": "Kea PDF WebMCP Client-Side Engine",
+      "type": "webmcp",
+      "url": "https://keapdf.amorb.dev",
+      "description": "59 atomic browser-native tools for PDF manipulation, text editing, AcroForm filling, and digital signing via WebMCP."
+    }
+  ]
+}

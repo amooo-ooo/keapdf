@@ -1,0 +1,11 @@
+# Kea PDF
+
+> Fast, privacy-focused, browser-native PDF editor built with Svelte 5 and PDFium WebAssembly. All PDF rendering, mutation, and analysis occurs client-side with zero server round-trips.
+
+## Core Capabilities and Tools
+
+- [README](https://keapdf.amorb.dev/README.md): Overview and architecture of Kea PDF.
+- [Tools Specification](https://keapdf.amorb.dev/TOOLS.md): Complete catalogue of 59 atomic WebMCP tools for PDF manipulation, text extraction, form filling, and digital signatures.
+- [Agent Guidelines](https://keapdf.amorb.dev/AGENTS.md): Full technical specification, architectural invariants, and test coverage standards.
+- [AI Catalog Manifest](https://keapdf.amorb.dev/ai-catalog.json): Machine-readable Agentic Resource Discovery manifest detailing available client-side tools.
+- [Compliance Suites](https://keapdf.amorb.dev/sample.pdf): Sample PDF document for compliance verification and layout analysis.

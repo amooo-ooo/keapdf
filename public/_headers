@@ -2,12 +2,25 @@
   Cache-Control: public, max-age=31536000, immutable
   Content-Type: application/wasm
 
-/fonts/*
-  Cache-Control: public, max-age=31536000, immutable
+# Font URLs are not fingerprinted, so they must never be marked immutable.
+# A stale or SPA fallback response would otherwise be pinned for a year.
+/fonts/*.woff2
+  Cache-Control: public, max-age=604800, stale-while-revalidate=86400
+  Access-Control-Allow-Origin: *
+
+/fonts/*.css
+  Cache-Control: public, max-age=0, must-revalidate
+  Access-Control-Allow-Origin: *
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
 
 /cursors/*
   Cache-Control: public, max-age=31536000, immutable
+
+/sw.js
+  Cache-Control: public, max-age=0, must-revalidate
+
+/manifest.webmanifest
+  Cache-Control: public, max-age=0, must-revalidate
 
