@@ -24,7 +24,6 @@
       workspace: 'workspace',
       components: 'components',
       annotate: 'annotations',
-      imposition: 'imposition',
       tools: 'tools',
       settings: 'settings',
     };
@@ -52,15 +51,16 @@
 
 <div class="h-full py-[4px] pl-[4px] {store.leftPanelCollapsed ? 'pr-[4px]' : ''}">
   <div class="w-[40px] h-full bg-card flex flex-col items-center py-1 gap-1 select-none {store.leftPanelCollapsed ? 'border rounded-xl shadow-sm' : 'border-y border-l border-r rounded-l-xl shadow-sm'}">
-  <!-- Top App Brand Icon / Open File -->
+  <!-- note: application brand icon and workspace file actions menu -->
   <DropdownMenu.Root>
     <DropdownMenu.Trigger>
       {#snippet child({ props })}
         <Button
+          {...props}
           variant="ghost"
           size="icon"
+          aria-label="Kea PDF main menu"
           class="w-8 h-8 text-primary hover:text-primary/90 hover:bg-primary/10"
-          {...props}
         >
           <FileText class="w-5 h-5 stroke-[2]" />
         </Button>
@@ -101,21 +101,26 @@
 
   <Separator class="w-[14px] h-[1px] bg-border shrink-0" />
 
-  <!-- Dynamic Left Panels from PanelRegistry -->
+  <!-- note: dynamic left sidebar panels from registry -->
   {#each enabledLeftPanels as panel (panel.id)}
     {@const IconComp = panel.icon as Component<{ class?: string }> | undefined}
     <Tooltip.Root>
       <Tooltip.Trigger>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="w-8 h-8 {isTabActive(panel.id as LeftPanelMode) ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}"
-          onclick={() => selectTab(panel.id as LeftPanelMode)}
-        >
-          {#if IconComp}
-            <IconComp class="w-4 h-4" />
-          {/if}
-        </Button>
+        {#snippet child({ props })}
+          <Button
+            {...props}
+            variant="ghost"
+            size="icon"
+            aria-label={panel.label}
+            aria-pressed={isTabActive(panel.id as LeftPanelMode)}
+            class="w-8 h-8 {isTabActive(panel.id as LeftPanelMode) ? 'bg-accent text-accent-foreground aria-pressed:bg-accent aria-pressed:text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}"
+            onclick={() => selectTab(panel.id as LeftPanelMode)}
+          >
+            {#if IconComp}
+              <IconComp class="w-4 h-4" />
+            {/if}
+          </Button>
+        {/snippet}
       </Tooltip.Trigger>
       <Tooltip.Content side="right">{panel.label}</Tooltip.Content>
     </Tooltip.Root>
@@ -126,14 +131,18 @@
   {#if store.leftPanelCollapsed}
     <Tooltip.Root>
       <Tooltip.Trigger>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="w-8 h-8 text-muted-foreground hover:text-foreground"
-          onclick={() => { store.leftPanelCollapsed = false; }}
-        >
-          <PanelLeftOpen class="w-4 h-4" />
-        </Button>
+        {#snippet child({ props })}
+          <Button
+            {...props}
+            variant="ghost"
+            size="icon"
+            aria-label="Expand sidebar"
+            class="w-8 h-8 text-muted-foreground hover:text-foreground"
+            onclick={() => { store.leftPanelCollapsed = false; }}
+          >
+            <PanelLeftOpen class="w-4 h-4" />
+          </Button>
+        {/snippet}
       </Tooltip.Trigger>
       <Tooltip.Content side="right">Expand Sidebar</Tooltip.Content>
     </Tooltip.Root>
