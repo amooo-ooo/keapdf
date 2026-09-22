@@ -191,6 +191,7 @@
             store.leftPanelCollapsed = true;
           }}
           title="Collapse Left Sidebar"
+          aria-label="Collapse Left Sidebar"
         >
           <PanelLeftClose class="h-4 w-4" />
         </Button>
@@ -226,6 +227,7 @@
                 class="h-6 w-6 text-muted-foreground hover:text-foreground"
                 onclick={() => actions.triggerFileOpen(true)}
                 title="Add PDF to workspace"
+                aria-label="Add PDF to workspace"
               >
                 <Plus class="h-3.5 w-3.5" />
               </Button>
@@ -317,6 +319,7 @@
               disabled={!store.isDocumentLoaded}
               onclick={() => actions.addBlankPage(store.currentPageIndex)}
               title="Add blank page"
+              aria-label="Add blank page"
             >
               <Plus class="h-3.5 w-3.5" />
             </Button>
@@ -369,7 +372,7 @@
 
           <div class="flex-1 overflow-y-auto px-1.5">
             {#if flatOutline.length === 0}
-              <div class="text-xs text-muted-foreground px-1 py-2 text-left italic">
+              <div class="text-xs text-muted-foreground px-1 py-2 text-left">
                 No outline in document.
               </div>
             {:else}
