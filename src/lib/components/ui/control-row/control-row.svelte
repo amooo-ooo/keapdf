@@ -35,6 +35,8 @@
 <div
 	bind:this={ref}
 	data-slot="control-row"
+	data-variant={variant}
+	data-size={size}
 	class={cn(controlRowVariants({ size, variant }), className)}
 	{...restProps}
 >
