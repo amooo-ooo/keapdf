@@ -34,6 +34,7 @@
 <LabelPrimitive.Root
 	bind:ref
 	data-slot="label"
+	data-size={size}
 	class={cn(labelVariants({ size }), className)}
 	{...restProps}
 />
