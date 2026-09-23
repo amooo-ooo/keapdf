@@ -292,10 +292,12 @@
 	{#if variant === "circle"}
 		<Popover.Trigger
 			{disabled}
+			data-slot="color-picker"
+			data-variant={variant}
 			aria-label={label}
 			title={label}
 			class={cn(
-				"size-7 rounded-full p-0.5 border border-border/80 shadow-2xs hover:scale-105 active:scale-95 transition-all outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer overflow-hidden relative bg-card shrink-0",
+				"size-7 rounded-full p-0.5 border border-transparent shadow-2xs hover:scale-105 active:scale-95 transition-[color,box-shadow,transform] duration-150 ease-out outline-none focus-visible:border-ring focus-visible:ring-ring/30 focus-visible:ring-3 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer overflow-hidden relative bg-input/50 shrink-0",
 				className
 			)}
 		>
@@ -316,12 +318,15 @@
 	{:else}
 		<Popover.Trigger
 			{disabled}
+			data-slot="color-picker"
+			data-variant={variant}
 			aria-label={label}
 			title={label}
 			class={cn(
+				"w-full bg-input/50 focus-visible:border-ring focus-visible:ring-ring/30 focus-visible:ring-3 border border-transparent transition-[color,box-shadow] duration-200 outline-none disabled:cursor-not-allowed disabled:opacity-50 text-left cursor-pointer hover:bg-input/70",
 				variant === "pill"
-					? "h-8 px-2.5 flex items-center justify-between gap-2 rounded-full border border-border bg-card shadow-xs transition-colors hover:bg-muted/40 hover:border-border/90 outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 text-left cursor-pointer"
-					: "h-8 px-2 flex items-center justify-between gap-2 rounded-xl border border-border bg-card shadow-xs transition-colors hover:bg-muted/40 hover:border-border/90 outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 text-left cursor-pointer",
+					? "h-8 px-2.5 flex items-center justify-between gap-2 rounded-full"
+					: "h-8 px-2 flex items-center justify-between gap-2 rounded-xl",
 				className
 			)}
 		>
@@ -349,7 +354,7 @@
 				</span>
 			</div>
 			{#if !isNone}
-				<span class="text-[10px] text-muted-foreground font-sans shrink-0">
+				<span class="text-[10px] text-muted-foreground font-sans tabular-nums shrink-0">
 					{Math.round(currentA * 100)}%
 				</span>
 			{/if}
@@ -462,7 +467,7 @@
 					max="100"
 					bind:value={opacityPercent}
 					oninput={handleOpacityInput}
-					class="w-full text-xs font-sans bg-transparent outline-none text-right [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+					class="w-full text-xs font-sans tabular-nums bg-transparent outline-none text-right [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
 				/>
 				<span class="text-[10px] text-muted-foreground font-sans">%</span>
 			</div>
