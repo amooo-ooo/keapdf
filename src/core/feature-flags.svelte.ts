@@ -1,17 +1,20 @@
 /**
- * Hierarchical feature flags system for the PDF editor.
- *
- * Provides fine-grained capability checks using dot notation.
- * Disabling a parent category automatically disables all child features.
- * All features are enabled by default unless listed in DISABLED_FEATURES.
+ * Hierarchical feature flag store with dot-notation capability gating.
+ * Disabling a parent category cascades to all child features.
+ * DEV_ENABLE_FEATURES and DEV_ENABLE_ALL allow targeted testing in dev mode.
  */
 
 import { getContext, setContext } from 'svelte';
-import { DISABLED_FEATURES } from './feature-config';
+import {
+  DISABLE_FEATURES,
+  DEV_ENABLE_FEATURES,
+  DEV_ENABLE_ALL,
+} from './feature-config';
 
-/**
- * Exhaustive union of all toggleable categories and specific tools.
- */
+/** Literal union of features present in DISABLE_FEATURES. */
+export type DisabledFeature = (typeof DISABLE_FEATURES)[number];
+
+/** Union of all toggleable feature and category identifiers. */
 export type FeatureFlag =
   | 'ocr'
   | 'ocr.recognize'
@@ -71,6 +74,11 @@ export type FeatureFlag =
   | 'components.media'
   | 'components.media.image-import'
   | 'components.media.image-placeholder'
+  | 'components.media.video'
+  | 'components.media.audio'
+  | 'components.media.3d'
+  | 'components.media.attachment'
+  | 'components.media.barcode'
   | 'components.media.stamp'
   | 'components.shapes'
   | 'components.shapes.rectangle'
@@ -81,6 +89,7 @@ export type FeatureFlag =
   | 'components.watermark.add'
   | 'components.watermark.overlay'
   | 'components.apply'
+  | 'components.gallery'
   | 'page-actions'
   | 'page-actions.crop'
   | 'page-actions.duplicate'
@@ -96,6 +105,9 @@ export type FeatureFlag =
   | 'page-actions.extract'
   | 'page-actions.rotate'
   | 'page-actions.scale'
+  | 'page-actions.compress'
+  | 'page-actions.sanitize'
+  | 'page-actions.extract-images'
   | 'export'
   | 'export.pdf'
   | 'export.flattened-pdf'
@@ -106,14 +118,26 @@ export type FeatureFlag =
   | 'workspace.open'
   | 'workspace.add'
   | 'workspace.convert'
+  | 'workspace.quick-convert'
   | 'workspace.compliance'
+  | 'workspace.compliance.suites'
+  | 'workspace.compliance.url'
   | 'workspace.merge'
   | 'workspace.files'
   | 'workspace.pages'
+  | 'conversion.quick-convert'
+  | 'compliance'
+  | 'compliance.suites'
+  | 'compliance.url'
   | 'settings'
   | 'settings.metadata'
   | 'settings.toc'
   | 'settings.security'
+  | 'settings.feature-flags'
+  | 'feature-flags'
+  | 'feature-flags.prod-only'
+  | 'feature-flags.dev-show-all'
+  | 'feature-flags.disable-in-prod-only'
   | 'security'
   | 'security.password'
   | 'security.unlock-forms'
@@ -126,12 +150,26 @@ export type FeatureFlag =
   | 'tools.api'
   | 'tools.folder-scan'
   | 'tools.sso-guide'
+  | 'tools.outline'
+  | 'tools.compress'
+  | 'tools.sanitize'
   | 'page-actions.reorder'
   | 'export.watermarked-summary'
   | 'plugins'
   | 'plugins.watermark'
   | 'webmcp'
   | 'zoom'
+  | 'view-mode'
+  | 'view-mode.editing'
+  | 'view-mode.viewing'
+  | 'view-mode.viewing.select'
+  | 'view-mode.viewing.form-values'
+  | 'view-mode.viewing.reorder'
+  | 'view-mode.viewing.merge'
+  | 'view-mode.viewing.extract'
+  | 'view-mode.viewing.text-selection'
+  | 'view-mode.viewing.collapse-sidebar'
+  | 'view-mode.suggesting'
   | 'history'
   | 'watermark'
   | 'canvas-elements.duplicate'
@@ -150,90 +188,277 @@ export type FeatureFlag =
   | 'snapping.page'
   | 'snapping.elements'
   | 'snapping.smart-guides'
-  | 'snapping.spacing';
+  | 'snapping.spacing'
+  | 'performance'
+  | 'performance.virtual-rendering'
+  | 'performance.fast-dimensions';
 
-/** Type alias for backwards compatibility. */
+/** Alias for FeatureFlag. */
 export type FeatureId = FeatureFlag;
 
 const FEATURE_FLAG_STORE_KEY = Symbol('feature-flag-store');
 
+/** Configuration options for FeatureFlagStore initialisation. */
+export interface FeatureFlagStoreOptions {
+  /** Force production or development environment for testing. */
+  isProduction?: boolean;
+  /** Custom disabled features for test isolation. */
+  disableFeatures?: readonly FeatureFlag[];
+  /** Custom dev-enabled features for test isolation. */
+  devEnableFeatures?: readonly FeatureFlag[];
+  /** Force enable all disabled features in dev mode. */
+  devEnableAll?: boolean;
+}
+
 /**
- * Reactive store managing feature capability checks.
- * Uses Svelte 5 runes for fine-grained reactivity.
+ * Detects whether the current runtime is a production environment.
+ * Checks Vite import.meta.env before falling back to process.env.NODE_ENV.
+ *
+ * @return {boolean} True if running in production.
  */
+export function isProductionEnvironment(): boolean {
+  if (typeof import.meta !== 'undefined' && import.meta.env) {
+    if (typeof import.meta.env.PROD === 'boolean') {
+      return import.meta.env.PROD;
+    }
+    if (import.meta.env.MODE === 'production') {
+      return true;
+    }
+  }
+  if (typeof process !== 'undefined' && process.env) {
+    return process.env.NODE_ENV === 'production';
+  }
+  return false;
+}
+
+/** Reactive store managing feature capability checks and dev overrides. */
 export class FeatureFlagStore {
-  /** Reactive set of currently disabled feature flags. */
+  /** Reactive set of disabled feature flags. */
   private disabledFlags = $state<Set<FeatureFlag>>(
-    new Set<FeatureFlag>(DISABLED_FEATURES)
+    new Set<FeatureFlag>(DISABLE_FEATURES)
   );
 
+  /** Map of explicit overrides (true = enabled, false = disabled). */
+  private explicitOverrides = $state<Map<FeatureFlag, boolean>>(new Map());
+
+  /** Set of features force-enabled in dev mode. */
+  private devEnableFeatures = $state<Set<FeatureFlag>>(
+    new Set<FeatureFlag>(DEV_ENABLE_FEATURES)
+  );
+
+  /** Whether all disabled features are force-enabled in dev mode. */
+  private devEnableAll = $state<boolean>(DEV_ENABLE_ALL);
+
+  /** Whether operating under production constraints. */
+  private isProd: boolean;
+
   /**
-   * Checks whether a feature is currently enabled.
-   * Checks the exact flag and all parent category prefixes.
+   * Initialises store with optional environment and flag overrides.
    *
-   * @param flag The feature identifier or category to check.
-   * @return True if the feature and all its parent categories are enabled.
+   * @param {FeatureFlagStoreOptions} [options] Store configuration options.
    */
-  isEnabled(flag: FeatureFlag): boolean {
+  constructor(options?: FeatureFlagStoreOptions) {
+    this.isProd = options?.isProduction ?? isProductionEnvironment();
+    if (options?.disableFeatures) {
+      this.disabledFlags = new Set<FeatureFlag>(options.disableFeatures);
+    }
+    if (options?.devEnableFeatures) {
+      this.devEnableFeatures = new Set<FeatureFlag>(options.devEnableFeatures);
+    }
+    if (options?.devEnableAll !== undefined) {
+      this.devEnableAll = options.devEnableAll;
+    }
+  }
+
+  /**
+   * Resolves whether the current context operates as production.
+   *
+   * @return {boolean} True if production constraints apply.
+   */
+  isProduction(): boolean {
+    return this.isProd;
+  }
+
+  /** Whether all disabled features are force-enabled in dev mode. */
+  get isDevEnableAll(): boolean {
+    return this.devEnableAll;
+  }
+
+  /** Set of features force-enabled in dev mode. */
+  get devEnabledFeatures(): ReadonlySet<FeatureFlag> {
+    return this.devEnableFeatures;
+  }
+
+  /**
+   * Checks whether a feature or parent category is in the disabled set.
+   *
+   * @param {FeatureFlag} flag Feature identifier to inspect.
+   * @return {boolean} True if the flag or any ancestor prefix is disabled.
+   */
+  private isDefaultDisabled(flag: FeatureFlag): boolean {
     if (this.disabledFlags.has(flag)) {
-      return false;
+      return true;
     }
     const parts = flag.split('.');
     let prefix = '';
     for (let i = 0; i < parts.length - 1; i++) {
       prefix = prefix ? `${prefix}.${parts[i]}` : parts[i];
       if (this.disabledFlags.has(prefix as FeatureFlag)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Checks whether a feature is force-enabled for dev mode testing.
+   *
+   * @param {FeatureFlag} flag Feature identifier to inspect.
+   * @return {boolean} True if the flag or any ancestor prefix is dev-enabled.
+   */
+  private isDevForceEnabled(flag: FeatureFlag): boolean {
+    if (this.devEnableAll) {
+      return true;
+    }
+    if (this.devEnableFeatures.has(flag)) {
+      return true;
+    }
+    const parts = flag.split('.');
+    let prefix = '';
+    for (let i = 0; i < parts.length - 1; i++) {
+      prefix = prefix ? `${prefix}.${parts[i]}` : parts[i];
+      if (this.devEnableFeatures.has(prefix as FeatureFlag)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Evaluates whether a feature is currently enabled.
+   * Checks explicit overrides, parent categories, and dev force-enable rules.
+   *
+   * @param {FeatureFlag} flag Feature identifier to check.
+   * @return {boolean} True if the feature is enabled.
+   */
+  isEnabled(flag: FeatureFlag): boolean {
+    const directOverride = this.explicitOverrides.get(flag);
+    if (directOverride === false) {
+      return false;
+    }
+
+    const parts = flag.split('.');
+    let prefix = '';
+    for (let i = 0; i < parts.length - 1; i++) {
+      prefix = prefix ? `${prefix}.${parts[i]}` : parts[i];
+      if (this.explicitOverrides.get(prefix as FeatureFlag) === false) {
         return false;
       }
     }
+
+    if (directOverride === true) {
+      return true;
+    }
+
+    if (this.isDefaultDisabled(flag)) {
+      if (!this.isProduction() && this.isDevForceEnabled(flag)) {
+        return true;
+      }
+      return false;
+    }
+
     return true;
   }
 
   /**
-   * Disables a feature or category programmatically.
+   * Disables a feature programmatically.
    *
-   * @param flag The feature identifier to disable.
+   * @param {FeatureFlag} flag Feature identifier to disable.
    */
   disable(flag: FeatureFlag): void {
-    const next = new Set(this.disabledFlags);
-    next.add(flag);
-    this.disabledFlags = next;
+    const nextDisabled = new Set(this.disabledFlags);
+    nextDisabled.add(flag);
+    this.disabledFlags = nextDisabled;
+
+    const nextOverrides = new Map(this.explicitOverrides);
+    nextOverrides.set(flag, false);
+    this.explicitOverrides = nextOverrides;
   }
 
   /**
-   * Enables a feature or category programmatically.
+   * Enables a feature programmatically.
    *
-   * @param flag The feature identifier to enable.
+   * @param {FeatureFlag} flag Feature identifier to enable.
    */
   enable(flag: FeatureFlag): void {
-    const next = new Set(this.disabledFlags);
-    next.delete(flag);
-    this.disabledFlags = next;
+    const nextDisabled = new Set(this.disabledFlags);
+    nextDisabled.delete(flag);
+    this.disabledFlags = nextDisabled;
+
+    const nextOverrides = new Map(this.explicitOverrides);
+    nextOverrides.set(flag, true);
+    this.explicitOverrides = nextOverrides;
   }
 
   /**
-   * Resets all feature flags to the static defaults from DISABLED_FEATURES.
-   */
-  resetAll(): void {
-    this.disabledFlags = new Set<FeatureFlag>(DISABLED_FEATURES);
-  }
-
-  /**
-   * Retrieves an array of all currently disabled feature flags.
+   * Toggles a feature flag state.
    *
-   * @return Array of disabled flags.
+   * @param {FeatureFlag} flag Feature identifier to toggle.
+   * @return {boolean} New enabled state after toggle.
+   */
+  toggle(flag: FeatureFlag): boolean {
+    if (this.isEnabled(flag)) {
+      this.disable(flag);
+      return false;
+    } else {
+      this.enable(flag);
+      return true;
+    }
+  }
+
+  /** Resets all flags and overrides to configuration defaults. */
+  resetAll(): void {
+    this.disabledFlags = new Set<FeatureFlag>(DISABLE_FEATURES);
+    this.devEnableFeatures = new Set<FeatureFlag>(DEV_ENABLE_FEATURES);
+    this.devEnableAll = DEV_ENABLE_ALL;
+    this.explicitOverrides = new Map();
+  }
+
+  /**
+   * Returns all currently disabled feature flags.
+   *
+   * @return {FeatureFlag[]} Array of disabled feature identifiers.
    */
   getDisabled(): FeatureFlag[] {
-    return Array.from(this.disabledFlags);
+    const list: FeatureFlag[] = [];
+    const candidates = new Set<FeatureFlag>([
+      ...DISABLE_FEATURES,
+      ...this.disabledFlags,
+      ...this.explicitOverrides.keys(),
+    ]);
+    for (const flag of candidates) {
+      if (!this.isEnabled(flag)) {
+        list.push(flag);
+      }
+    }
+    return list;
   }
 }
 
-/** Provide the feature flag store via Svelte context. */
+/**
+ * Provides the feature flag store via Svelte context.
+ *
+ * @param {FeatureFlagStore} store Store instance to register.
+ */
 export function provideFeatureFlagStore(store: FeatureFlagStore): void {
   setContext(FEATURE_FLAG_STORE_KEY, store);
 }
 
-/** Retrieve the feature flag store from Svelte context. */
+/**
+ * Retrieves the feature flag store from Svelte context.
+ *
+ * @return {FeatureFlagStore} Active store instance.
+ */
 export function useFeatureFlagStore(): FeatureFlagStore {
   const store = getContext<FeatureFlagStore>(FEATURE_FLAG_STORE_KEY);
   if (!store) {
@@ -242,4 +467,8 @@ export function useFeatureFlagStore(): FeatureFlagStore {
   return store;
 }
 
-export { DISABLED_FEATURES };
+export {
+  DISABLE_FEATURES,
+  DEV_ENABLE_FEATURES,
+  DEV_ENABLE_ALL,
+};
