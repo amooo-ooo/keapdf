@@ -47,7 +47,7 @@ export function registerBuiltinPanels(registry: PanelRegistry): void {
   registry.registerBuiltin({
     id: 'tools',
     label: 'Tools & OCR',
-    subtitle: 'OCR, extract & page numbers',
+    subtitle: 'OCR, imposition & page numbers',
     icon: Wrench,
     position: 'left',
     component: ToolsPanel,
@@ -65,12 +65,13 @@ export function registerBuiltinPanels(registry: PanelRegistry): void {
   });
 
   // Right Panels
-  registry.registerBuiltin({
-    id: 'properties',
-    label: 'Properties',
-    position: 'right',
-    order: 10,
-  });
+  // Built-in Properties tab on the right panel is temporarily commented out.
+  // registry.registerBuiltin({
+  //   id: 'properties',
+  //   label: 'Properties',
+  //   position: 'right',
+  //   order: 10,
+  // });
 
   // Built-in Organizer tab on the right panel is temporarily commented out.
   // registry.registerBuiltin({
