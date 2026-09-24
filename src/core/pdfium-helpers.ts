@@ -135,7 +135,10 @@ export function setPageObjectMatrix(
   objHandle: number,
   matrix: PdfMatrix,
 ): void {
-  const matrixPtr = safeAllocate(engine, 24);
+  const hasScratch = typeof engine?.getMatrixScratchBuffer === 'function';
+  const matrixPtr = hasScratch
+    ? engine.getMatrixScratchBuffer().matrixPtr
+    : safeAllocate(engine, 24);
   try {
     const heapF32 = mod.pdfium.HEAPF32;
     const idx = matrixPtr >> 2;
@@ -147,7 +150,9 @@ export function setPageObjectMatrix(
     heapF32[idx + 5] = matrix.f;
     mod.FPDFPageObj_SetMatrix(objHandle, matrixPtr);
   } finally {
-    engine.freeMemory(matrixPtr);
+    if (!hasScratch) {
+      engine.freeMemory(matrixPtr);
+    }
   }
 }
 
@@ -166,7 +171,10 @@ export function getPageObjectMatrix(
 ): PdfMatrix | null {
   if (typeof mod.FPDFPageObj_GetMatrix !== 'function') return null;
 
-  const matrixPtr = safeAllocate(engine, 24);
+  const hasScratch = typeof engine?.getMatrixScratchBuffer === 'function';
+  const matrixPtr = hasScratch
+    ? engine.getMatrixScratchBuffer().matrixPtr
+    : safeAllocate(engine, 24);
   try {
     const ok = mod.FPDFPageObj_GetMatrix(objHandle, matrixPtr);
     if (!ok) return null;
@@ -182,7 +190,9 @@ export function getPageObjectMatrix(
       f: heapF32[idx + 5],
     };
   } finally {
-    engine.freeMemory(matrixPtr);
+    if (!hasScratch) {
+      engine.freeMemory(matrixPtr);
+    }
   }
 }
 
@@ -380,7 +390,16 @@ export function mapStandardFontName(
   }
 
   const lower = detectedFontName.toLowerCase();
-  if (lower.includes('symbol')) return 'Symbol';
+  if (
+    lower.includes('symbol') ||
+    lower.startsWith('cmsy') ||
+    lower.startsWith('cmex') ||
+    lower.startsWith('msam') ||
+    lower.startsWith('msbm') ||
+    lower.startsWith('wasy')
+  ) {
+    return 'Symbol';
+  }
   if (lower.includes('zapfdingbat') || lower.includes('dingbat')) return 'ZapfDingbats';
 
   let base: 'Helvetica' | 'Times' | 'Courier' = 'Helvetica';
@@ -420,9 +439,7 @@ export function mapStandardFontName(
     lower.startsWith('cmti') ||
     lower.startsWith('cmsl') ||
     lower.startsWith('cmcsc') ||
-    lower.startsWith('cmsy') ||
     lower.startsWith('cmmi') ||
-    lower.startsWith('cmex') ||
     lower.startsWith('lmr') ||
     lower.startsWith('lmbx') ||
     lower.startsWith('lmti') ||
@@ -697,13 +714,8 @@ export function removeTextObjectsInBounds(
       }
     }
   } else {
-    // Without bounds API, remove all text objects (less precise fallback)
-    for (let i = objectCount - 1; i >= 0; i--) {
-      const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
-      if (!objHandle) continue;
-      if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
-      objectsToRemove.push(i);
-    }
+    // Without bounds API, bounds-based removal cannot proceed safely
+    return false;
   }
 
   if (objectsToRemove.length === 0) {
@@ -716,8 +728,8 @@ export function removeTextObjectsInBounds(
     const objHandle = mod.FPDFPage_GetObject(pageHandle, idx);
     if (!objHandle) continue;
 
-    mod.FPDFPage_RemoveObject(pageHandle, objHandle);
-    if (hasDestroy) {
+    const ok = mod.FPDFPage_RemoveObject(pageHandle, objHandle);
+    if (ok && hasDestroy) {
       mod.FPDFPageObj_Destroy(objHandle);
     }
   }
@@ -967,8 +979,8 @@ export function findTextObjectIndicesForSpan(
   // Tight bounding region with minimal tolerance (1pt horizontal)
   const targetLeft = pdfLeft - 1;
   const targetRight = pdfLeft + spanWidth + 1;
-  const targetBottom = spanBaselineY - spanFontSize * 0.3;
-  const targetTop = spanBaselineY + spanFontSize * 0.9;
+  const targetBottom = spanBaselineY - spanFontSize * 0.5;
+  const targetTop = spanBaselineY + spanFontSize * 1.2;
 
   const matchedObjects: Array<{ index: number; left: number; top: number }> = [];
   const { leftPtr, bottomPtr, rightPtr, topPtr } = engine.getBoundsScratchBuffer();
@@ -999,8 +1011,15 @@ export function findTextObjectIndicesForSpan(
         objCenterY >= targetBottom && objCenterY <= targetTop;
     } else {
       const domCenter = pdfToDomCoords(objCenterX, objCenterY, cropInfo);
+      const domBaselinePt = pdfToDomCoords(pdfLeft, spanBaselineY, cropInfo);
+      const domTargetTop = domBaselinePt.y - spanFontSize * 1.2;
+      const domTargetBottom = domBaselinePt.y + spanFontSize * 0.5;
+      const minY = Math.min(domTargetTop, domTargetBottom) - 2;
+      const maxY = Math.max(domTargetTop, domTargetBottom) + 2;
+
       centerInTarget =
-        domCenter.x >= spanLeft - 2 && domCenter.x <= spanLeft + spanWidth + 2;
+        domCenter.x >= spanLeft - 2 && domCenter.x <= spanLeft + spanWidth + 2 &&
+        domCenter.y >= minY && domCenter.y <= maxY;
     }
 
     if (centerInTarget) {
@@ -1041,8 +1060,8 @@ export function removeTextObjectsByIndex(
     typeof mod.FPDFPage_RemoveObject === 'function';
   if (!hasRemoveApi) return false;
 
-  // Descending order keeps lower indices stable during removal
-  const sorted = [...indices].sort((a, b) => b - a);
+  // Deduplicate and sort descending so lower indices remain stable during removal
+  const sorted = Array.from(new Set(indices)).sort((a, b) => b - a);
   const hasDestroy = typeof mod.FPDFPageObj_Destroy === 'function';
   let removed = false;
 
@@ -1050,11 +1069,11 @@ export function removeTextObjectsByIndex(
     const objHandle = mod.FPDFPage_GetObject(pageHandle, idx);
     if (!objHandle) continue;
 
-    mod.FPDFPage_RemoveObject(pageHandle, objHandle);
-    if (hasDestroy) {
+    const ok = mod.FPDFPage_RemoveObject(pageHandle, objHandle);
+    if (ok && hasDestroy) {
       mod.FPDFPageObj_Destroy(objHandle);
     }
-    removed = true;
+    if (ok) removed = true;
   }
 
   return removed;
@@ -1312,10 +1331,11 @@ export function findPageFontHandle(
     }
 
     const baseCandidate = extractBaseFontFamily(lowerName);
-    if (baseRaw && baseCandidate === baseRaw) {
+    const simplifiedCandidate = baseCandidate.replace(/-(bold|italic|oblique)/g, '').trim();
+    if (baseRaw && (baseCandidate === baseRaw || simplifiedCandidate === baseRaw)) {
       return fontHandle;
     }
-    if (baseTarget && baseCandidate === baseTarget) {
+    if (baseTarget && (baseCandidate === baseTarget || simplifiedCandidate === baseTarget)) {
       return fontHandle;
     }
   }
@@ -1401,14 +1421,14 @@ export function getPageCropInfo(
   let domCropLeft = marginLeft;
   let domCropTop = marginTop;
   if (rotation === 1) {
-    domCropLeft = marginTop;
-    domCropTop = marginRight;
+    domCropLeft = marginBottom;
+    domCropTop = marginLeft;
   } else if (rotation === 2) {
     domCropLeft = marginRight;
     domCropTop = marginBottom;
   } else if (rotation === 3) {
-    domCropLeft = marginBottom;
-    domCropTop = marginLeft;
+    domCropLeft = marginTop;
+    domCropTop = marginRight;
   }
 
   return {
