@@ -2,9 +2,9 @@
  * Element registry for extensible canvas element types.
  *
  * Follows the tldraw ShapeUtil pattern: each element type is a self-contained
- * registration that defines its own creation, rendering, serialization, and
+ * registration that defines its own creation, rendering, serialisation, and
  * property editing. Adding a new element type requires a single file with a
- * single registry call -- zero core modifications.
+ * single registry call with zero core modifications.
  *
  * @example
  * ```typescript
@@ -24,6 +24,7 @@
 import { getContext, setContext } from 'svelte';
 import type { Component } from 'svelte';
 import type {
+  CanvasElement,
   CanvasElementBase,
   TextElement,
   ShapeElement,
@@ -31,6 +32,12 @@ import type {
   FormFieldElement,
   PathElement,
   NoteElement,
+  VideoElement,
+  AudioElement,
+  ThreeDElement,
+  AttachmentElement,
+  BarcodeElement,
+  ElementDropPayload,
 } from '../stores/canvas-types';
 import type { PdfPage } from '../services/pdf/pdf-page';
 import type { PdfDocument } from '../services/pdf/pdf-document';
@@ -45,6 +52,11 @@ export interface BuiltinElementMap {
   'form-field': FormFieldElement;
   path: PathElement;
   note: NoteElement;
+  video: VideoElement;
+  audio: AudioElement;
+  '3d': ThreeDElement;
+  attachment: AttachmentElement;
+  barcode: BarcodeElement;
 }
 
 const ELEMENT_REGISTRY_KEY = Symbol('element-registry');
@@ -88,8 +100,8 @@ export interface ElementPanelProps<E extends CanvasElementBase = CanvasElementBa
 /**
  * Registration for a canvas element type.
  *
- * Each definition encapsulates all behavior for a single element kind:
- * creation, rendering, property editing, and PDF serialization.
+ * Each definition encapsulates all behaviour for a single element kind:
+ * creation, rendering, property editing, and PDF serialisation.
  * This enables open extension without modifying core switch statements.
  *
  * @template K The string literal kind discriminant.
@@ -213,11 +225,19 @@ export class ElementRegistry {
   get(kind: 'form-field'): ElementDefinition<'form-field', FormFieldElement>;
   get(kind: 'path'): ElementDefinition<'path', PathElement>;
   get(kind: 'note'): ElementDefinition<'note', NoteElement>;
+  get(kind: 'video'): ElementDefinition<'video', VideoElement>;
+  get(kind: 'audio'): ElementDefinition<'audio', AudioElement>;
+  get(kind: '3d'): ElementDefinition<'3d', ThreeDElement>;
+  get(kind: 'attachment'): ElementDefinition<'attachment', AttachmentElement>;
+  get(kind: 'barcode'): ElementDefinition<'barcode', BarcodeElement>;
   get<
     K extends string = string,
     E extends CanvasElementBase & { kind: K } = CanvasElementBase & { kind: K },
   >(kind: K): ElementDefinition<K, E>;
-  get(kind: string): ElementDefinition<any, any> {
+  get<
+    K extends string = string,
+    E extends CanvasElementBase & { kind: K } = CanvasElementBase & { kind: K },
+  >(kind: string): ElementDefinition<K, E> {
     const def = this.definitions.get(kind);
     if (!def) {
       throw new Error(
@@ -225,7 +245,7 @@ export class ElementRegistry {
         `Available kinds: ${this.getRegisteredKinds().join(', ')}`
       );
     }
-    return def as unknown as ElementDefinition;
+    return def as unknown as ElementDefinition<K, E>;
   }
 
   /**
@@ -234,8 +254,11 @@ export class ElementRegistry {
    * @param kind The element kind discriminant string.
    * @return The registered element definition or undefined.
    */
-  tryGet(kind: string): ElementDefinition<any, any> | undefined {
-    return this.definitions.get(kind) as unknown as ElementDefinition<any, any> | undefined;
+  tryGet<
+    K extends string = string,
+    E extends CanvasElementBase & { kind: K } = CanvasElementBase & { kind: K },
+  >(kind: string): ElementDefinition<K, E> | undefined {
+    return this.definitions.get(kind) as unknown as ElementDefinition<K, E> | undefined;
   }
 
   /**
@@ -275,6 +298,113 @@ export class ElementRegistry {
   getDefaults(kind: string): { width: number; height: number } {
     return this.get(kind).defaults;
   }
+
+  /**
+   * Constructs a canvas element from an ElementDropPayload using registered definitions.
+   *
+   * @param payload Drag payload describing the element to create.
+   * @param pageIndex Zero-based target page index.
+   * @param x Horizontal coordinate in PDF points.
+   * @param y Vertical coordinate in PDF points.
+   * @param id Unique element identifier.
+   * @param overrides Optional dimension or property overrides.
+   * @return Fully initialised CanvasElement instance.
+   */
+  createElementFromPayload(
+    payload: ElementDropPayload,
+    pageIndex: number,
+    x: number,
+    y: number,
+    id?: string,
+    overrides?: { width?: number; height?: number }
+  ): CanvasElement {
+    return createElementFromPayload(this, payload, pageIndex, x, y, id, overrides);
+  }
+}
+
+/**
+ * Constructs a canvas element from an ElementDropPayload.
+ *
+ * Maps payload properties to definition overrides so preview instances
+ * and dropped canvas elements maintain identical styling and dimensions.
+ *
+ * @param registry Element registry containing registered definitions.
+ * @param payload Drag payload describing the element to create.
+ * @param pageIndex Zero-based target page index.
+ * @param x Horizontal coordinate in PDF points.
+ * @param y Vertical coordinate in PDF points.
+ * @param id Unique element identifier.
+ * @param overrides Optional dimension or property overrides.
+ * @return Fully initialised CanvasElement instance.
+ */
+export function createElementFromPayload(
+  registry: ElementRegistry,
+  payload: ElementDropPayload,
+  pageIndex: number,
+  x: number,
+  y: number,
+  id: string = 'preview-element',
+  overrides?: { width?: number; height?: number }
+): CanvasElement {
+  if (!registry.has(payload.kind)) {
+    throw new Error(`Unsupported canvas element kind: ${payload.kind}`);
+  }
+  const def = registry.get(payload.kind);
+  const elementOverrides: Record<string, unknown> = {};
+
+  if (payload.width != null) elementOverrides.width = payload.width;
+  if (payload.height != null) elementOverrides.height = payload.height;
+  if (overrides?.width != null) elementOverrides.width = overrides.width;
+  if (overrides?.height != null) elementOverrides.height = overrides.height;
+
+  if (payload.variant != null) {
+    elementOverrides.variant = payload.variant;
+  } else if (payload.kind === 'shape' && payload.label) {
+    const l = payload.label.toLowerCase();
+    if (l === 'circle' || l === 'rectangle' || l === 'line' || l === 'arrow') {
+      elementOverrides.variant = l;
+    }
+  }
+
+  if (payload.src != null) elementOverrides.src = payload.src;
+
+  if (payload.text != null) {
+    elementOverrides.text = payload.text;
+  } else if (payload.kind === 'text' && payload.label) {
+    elementOverrides.text = payload.label;
+  }
+
+  if (payload.author != null) elementOverrides.author = payload.author;
+  if (payload.color != null) elementOverrides.color = payload.color;
+  if (payload.fontSize != null) elementOverrides.fontSize = payload.fontSize;
+  if (payload.fontWeight != null) elementOverrides.fontWeight = payload.fontWeight;
+  if (payload.fontFamily != null) elementOverrides.fontFamily = payload.fontFamily;
+  if (payload.label != null) elementOverrides.label = payload.label;
+  if (payload.backgroundColor != null) elementOverrides.backgroundColor = payload.backgroundColor;
+  if (payload.borderColor != null) elementOverrides.borderColor = payload.borderColor;
+  if (payload.borderWidth != null) elementOverrides.borderWidth = payload.borderWidth;
+  if (payload.borderStyle != null) elementOverrides.borderStyle = payload.borderStyle;
+  if (payload.borderRadius != null) elementOverrides.borderRadius = payload.borderRadius;
+  if (payload.textAlign != null) elementOverrides.textAlign = payload.textAlign;
+  if (payload.placeholder != null) elementOverrides.placeholder = payload.placeholder;
+  if (payload.value != null) elementOverrides.value = payload.value;
+  if (payload.options != null) elementOverrides.options = payload.options;
+  if (payload.required != null) elementOverrides.required = payload.required;
+  if (payload.readOnly != null) elementOverrides.readOnly = payload.readOnly;
+  if (payload.fileName != null) elementOverrides.fileName = payload.fileName;
+  if (payload.fileSize != null) elementOverrides.fileSize = payload.fileSize;
+  if (payload.mimeType != null) elementOverrides.mimeType = payload.mimeType;
+  if (payload.title != null) elementOverrides.title = payload.title;
+  if (payload.poster != null) elementOverrides.poster = payload.poster;
+  if (payload.modelFormat != null) elementOverrides.modelFormat = payload.modelFormat;
+  if (payload.payload != null) elementOverrides.payload = payload.payload;
+  if (payload.symbology != null) elementOverrides.symbology = payload.symbology;
+  if (payload.fgColor != null) elementOverrides.fgColor = payload.fgColor;
+  if (payload.bgColor != null) elementOverrides.bgColor = payload.bgColor;
+  if (payload.includeText != null) elementOverrides.includeText = payload.includeText;
+  if (payload.svgContent != null) elementOverrides.svgContent = payload.svgContent;
+
+  return def.create(id, pageIndex, x, y, elementOverrides) as CanvasElement;
 }
 
 /**
@@ -298,4 +428,13 @@ export function useElementRegistry(): ElementRegistry {
     throw new Error('ElementRegistry not found in context. Ensure provideElementRegistry() is called in a parent component.');
   }
   return registry;
+}
+
+/**
+ * Safely retrieve the element registry from Svelte context without throwing.
+ *
+ * @return The ElementRegistry instance, or null if not found in context.
+ */
+export function tryUseElementRegistry(): ElementRegistry | null {
+  return getContext<ElementRegistry>(ELEMENT_REGISTRY_KEY) ?? null;
 }
