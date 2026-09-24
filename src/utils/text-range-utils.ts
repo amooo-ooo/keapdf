@@ -243,6 +243,17 @@ export function setSelectionCharOffsets(container: HTMLElement, start: number, e
         if (isContainer && i > 0 && isLineBlockElement(child)) {
           currentOffset += 1;
         }
+        if (child.nodeName === 'BR' || (child.childNodes.length === 0 && !isTextNode)) {
+          if (!startNode && currentOffset >= start) {
+            startNode = node;
+            startNodeOffset = i;
+          }
+          if (!endNode && currentOffset >= end) {
+            endNode = node;
+            endNodeOffset = i;
+            return true;
+          }
+        }
         if (traverse(child)) return true;
       }
     }
@@ -250,6 +261,15 @@ export function setSelectionCharOffsets(container: HTMLElement, start: number, e
   }
 
   traverse(container);
+
+  if (!startNode) {
+    startNode = container;
+    startNodeOffset = container.childNodes.length;
+  }
+  if (!endNode) {
+    endNode = startNode;
+    endNodeOffset = startNodeOffset;
+  }
 
   if (startNode && endNode) {
     try {
@@ -431,6 +451,9 @@ export function splitWordsAtRange(
 
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
+    if (word.hasPrecedingSpace && i > 0) {
+      currentOffset += 1;
+    }
     const wordLen = word.text.length;
     const wordStart = currentOffset;
     const wordEnd = currentOffset + wordLen;
@@ -877,8 +900,11 @@ export type InlineKeyAction = 'submit' | 'lineBreak' | 'cancel' | null;
  * @return Resolved inline key action, or null if unhandled.
  */
 export function resolveInlineKeyAction(
-  e: Pick<KeyboardEvent, 'key' | 'shiftKey'>
+  e: Pick<KeyboardEvent, 'key' | 'shiftKey'> & Partial<Pick<KeyboardEvent, 'isComposing' | 'keyCode'>>
 ): InlineKeyAction {
+  if (e.isComposing || e.keyCode === 229) {
+    return null;
+  }
   if (e.key === 'Enter') {
     return e.shiftKey ? 'lineBreak' : 'submit';
   }
