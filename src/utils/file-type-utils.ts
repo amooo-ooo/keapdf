@@ -163,3 +163,36 @@ export function isConvertibleDocumentFile(
   return false;
 }
 
+import type { DocumentFormat } from '../services/conversion/types';
+
+/**
+ * Detects the DocumentFormat from file name and optional MIME type without loading heavy converter modules.
+ */
+export function detectDocumentFormat(
+  fileName: string,
+  _mimeType?: string
+): DocumentFormat {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith('.docx')) return 'docx';
+  if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) return 'xlsx';
+  if (lower.endsWith('.csv')) return 'csv';
+  if (lower.endsWith('.tsv')) return 'tsv';
+  if (lower.endsWith('.pptx') || lower.endsWith('.ppt')) return 'pptx';
+  if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'markdown';
+  if (lower.endsWith('.txt')) return 'text';
+  if (lower.endsWith('.json')) return 'json';
+  if (
+    lower.endsWith('.xml') ||
+    lower.endsWith('.html') ||
+    lower.endsWith('.htm') ||
+    lower.endsWith('.yaml') ||
+    lower.endsWith('.yml') ||
+    lower.endsWith('.log') ||
+    lower.endsWith('.js') ||
+    lower.endsWith('.ts')
+  ) {
+    return 'code';
+  }
+  return 'unknown';
+}
+

@@ -26,6 +26,13 @@ export function setupKeyboardShortcuts(
 
     const isCtrlOrCmd = (e.ctrlKey || e.metaKey) && !e.altKey;
 
+    // Ctrl+Alt+G: Open Component Variant Gallery
+    if ((e.ctrlKey || e.metaKey) && e.altKey && e.key.toLowerCase() === 'g') {
+      e.preventDefault();
+      store.openComponentGalleryDialog();
+      return;
+    }
+
     // Escape: cancel crop, cancel inline edit, or clear selection
     if (e.key === 'Escape') {
       if (store.isCropping) {
@@ -53,7 +60,7 @@ export function setupKeyboardShortcuts(
     }
 
     // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y: Undo & Redo
-    if (isCtrlOrCmd && !isTyping) {
+    if (isCtrlOrCmd && !isTyping && !store.isReadOnly) {
       if (e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) {
@@ -107,6 +114,7 @@ export function setupKeyboardShortcuts(
     if (!isTyping) {
       // Delete / Backspace: delete selected text span or canvas element
       if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (store.isReadOnly) return;
         if (canvasStore.selectedElementId || store.hasSelection) {
           e.preventDefault();
           void actions.deleteSelected();
