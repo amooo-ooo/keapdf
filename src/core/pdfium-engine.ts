@@ -38,11 +38,27 @@ export interface PdfiumImageMethods {
   FPDFBitmap_GetBuffer?(bitmap: number): number;
 }
 
+export interface PdfiumTextFontMethods {
+  FPDFText_LoadFont?(
+    document: number,
+    dataPtr: number,
+    size: number,
+    fontType: number,
+    cid: boolean | number
+  ): number;
+  FPDFText_LoadStandardFont?(
+    document: number,
+    fontName: string
+  ): number;
+  FPDFFont_Close?(fontHandle: number): void;
+}
+
 export type ExtendedPdfiumRuntime = PdfiumModule & PdfiumRuntimeMethods & EmscriptenHeaps;
 
 export type ExtendedWrappedPdfiumModule = Omit<WrappedPdfiumModule, 'pdfium'> &
   PdfiumSecurityMethods &
-  PdfiumImageMethods & {
+  PdfiumImageMethods &
+  PdfiumTextFontMethods & {
     pdfium: ExtendedPdfiumRuntime;
   };
 
@@ -75,6 +91,7 @@ export class PdfiumEngine {
   private fontFlagsPtr: number = 0;
   private colorScratchPtr: number = 0;
   private boundsScratchPtr: number = 0;
+  private matrixScratchPtr: number = 0;
 
   private constructor() {}
 
@@ -315,6 +332,19 @@ export class PdfiumEngine {
   }
 
   /**
+   * Retrieve persistent scratch buffer for 6-float FS_MATRIX transformation queries (24 bytes).
+   * Eliminates malloc and free churn during paragraph reflow and text matrix manipulation.
+   */
+  public getMatrixScratchBuffer(): { matrixPtr: number } {
+    if (!this.matrixScratchPtr) {
+      this.matrixScratchPtr = this.allocateMemory(24);
+    }
+    return {
+      matrixPtr: this.matrixScratchPtr,
+    };
+  }
+
+  /**
    * Releases all persistent scratch buffers.
    */
   public freeScratchBuffers(): void {
@@ -333,5 +363,9 @@ export class PdfiumEngine {
     const boundsBuf = this.boundsScratchPtr;
     this.boundsScratchPtr = 0;
     if (boundsBuf) this.freeMemory(boundsBuf);
+
+    const matrixBuf = this.matrixScratchPtr;
+    this.matrixScratchPtr = 0;
+    if (matrixBuf) this.freeMemory(matrixBuf);
   }
 }
