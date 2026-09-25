@@ -47,6 +47,11 @@ const SYSTEM_FONTS = new Set([
   'serif',
   'monospace',
   'inter',
+  'intervariable',
+  'inter variable',
+  'inter var',
+  'interdisplay',
+  'inter display',
   'symbol',
   'zapfdingbats',
   'georgia',
@@ -240,7 +245,7 @@ export function getCssFontFamily(
   rawFontFamily: string | undefined | null,
   extractBaseFontFamily: (name: string) => string = defaultExtractBaseFontFamily
 ): string {
-  if (!rawFontFamily) return '"Inter Variable", Inter, Helvetica, Arial, sans-serif';
+  if (!rawFontFamily) return '"Inter Variable", "Inter", Helvetica, Arial, sans-serif';
 
   if (extractBaseFontFamily === defaultExtractBaseFontFamily && cssFontFamilyCache.has(rawFontFamily)) {
     return cssFontFamilyCache.get(rawFontFamily)!;
@@ -311,7 +316,7 @@ function computeCssFontFamily(
     lower.includes('webding') ||
     lower.includes('dingbat')
   ) {
-    return `${fontPrefix}"Inter Variable", Inter, Helvetica, Arial, sans-serif`;
+    return `${fontPrefix}"Inter Variable", "Inter", Helvetica, Arial, sans-serif`;
   }
   if (
     lower.includes('courier') ||
@@ -362,9 +367,9 @@ function computeCssFontFamily(
     lower.includes('tahoma') ||
     lower.includes('verdana')
   ) {
-    return `${fontPrefix}"${cssName}", "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
+    return `${fontPrefix}"${cssName}", "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
   }
-  return `${fontPrefix}"${cssName}", "Inter Variable", Inter, Helvetica, Arial, sans-serif`;
+  return `${fontPrefix}"${cssName}", "Inter Variable", "Inter", Helvetica, Arial, sans-serif`;
 }
 
 /**
