@@ -3,6 +3,7 @@
   import type { ElementRenderProps } from '../../core/element-registry';
   import { useCanvasStore } from '../../stores/canvas.svelte';
   import { useCanvasActions } from '../../stores/canvas-actions';
+  import { useEditorStore } from '../../stores/editor.svelte';
   import { ChevronDown, Paperclip, Lock } from 'lucide-svelte';
   import { getCssFontFamily } from '../../services/font-loader';
   import { isInspectorControlTarget } from '../../utils/text-range-utils';
@@ -16,6 +17,7 @@
 
   const canvasStore = useCanvasStore();
   const canvasActions = useCanvasActions();
+  const editorStore = useEditorStore();
 
   let inputRef = $state<HTMLInputElement | null>(null);
   let textareaRef = $state<HTMLTextAreaElement | null>(null);
@@ -47,7 +49,7 @@
   });
 
   function commitInlineEdit(): void {
-    if (!editing) return;
+    if (!editing || editorStore.isReadOnly || !editorStore.canEditValues) return;
     const updates: Partial<FormFieldElement> = {};
     if (element.variant === 'text-input' || element.variant === 'dropdown') {
       updates.value = editValue;
@@ -208,9 +210,13 @@
     return styles.join('; ');
   });
 
+  const isFieldDisabled = $derived(
+    Boolean(element.readOnly || editorStore.isReadOnly || !editorStore.canEditValues)
+  );
+
   function handleGlyphClick(e: MouseEvent): void {
     e.stopPropagation();
-    if (element.readOnly) return;
+    if (isFieldDisabled) return;
     if (element.variant === 'checkbox') {
       const nextVal = isChecked ? 'false' : 'true';
       canvasActions.updateElementProperties(element.id, { value: nextVal });
@@ -265,12 +271,13 @@
           type="text"
           bind:value={editValue}
           placeholder="Option label..."
+          disabled={isFieldDisabled}
           onblur={handleBlur}
           onkeydown={handleKeyDown}
           onpointerdown={(e) => e.stopPropagation()}
           onclick={(e) => e.stopPropagation()}
           ondblclick={(e) => e.stopPropagation()}
-          class="flex-1 min-w-0 ml-2 bg-transparent outline-none border-b border-primary/50 p-0 m-0 select-text cursor-text leading-none"
+          class="flex-1 min-w-0 ml-2 bg-transparent outline-none border-b border-primary/50 p-0 m-0 select-text cursor-text leading-none disabled:cursor-not-allowed disabled:opacity-70"
           style="
             font-size: {(element.fontSize || 13) * zoom}px;
             font-family: {element.fontFamily ? getCssFontFamily(element.fontFamily) : 'inherit'};
@@ -281,7 +288,7 @@
     {:else if element.variant === 'checkbox'}
       <div class="flex items-center w-full h-full min-w-0">
         <div
-          class="rounded-[2.5px] shrink-0 flex items-center justify-center cursor-pointer transition-colors"
+          class="rounded-[2.5px] shrink-0 flex items-center justify-center transition-colors {isFieldDisabled ? 'cursor-default opacity-75' : 'cursor-pointer'}"
           style="
             width: {Math.max(12, Math.round(16 * zoom))}px;
             height: {Math.max(12, Math.round(16 * zoom))}px;
@@ -312,12 +319,13 @@
           type="text"
           bind:value={editValue}
           placeholder="Checkbox label..."
+          disabled={isFieldDisabled}
           onblur={handleBlur}
           onkeydown={handleKeyDown}
           onpointerdown={(e) => e.stopPropagation()}
           onclick={(e) => e.stopPropagation()}
           ondblclick={(e) => e.stopPropagation()}
-          class="flex-1 min-w-0 ml-2 bg-transparent outline-none border-b border-primary/50 p-0 m-0 select-text cursor-text leading-none"
+          class="flex-1 min-w-0 ml-2 bg-transparent outline-none border-b border-primary/50 p-0 m-0 select-text cursor-text leading-none disabled:cursor-not-allowed disabled:opacity-70"
           style="
             font-size: {(element.fontSize || 13) * zoom}px;
             font-family: {element.fontFamily ? getCssFontFamily(element.fontFamily) : 'inherit'};
@@ -330,12 +338,13 @@
         bind:this={textareaRef}
         bind:value={editValue}
         placeholder={element.placeholder || 'Enter text...'}
+        disabled={isFieldDisabled}
         onblur={handleBlur}
         onkeydown={handleKeyDown}
         onpointerdown={(e) => e.stopPropagation()}
         onclick={(e) => e.stopPropagation()}
         ondblclick={(e) => e.stopPropagation()}
-        class="w-full h-full bg-transparent outline-none border-none p-0 m-0 select-text cursor-text resize-none leading-normal"
+        class="w-full h-full bg-transparent outline-none border-none p-0 m-0 select-text cursor-text resize-none leading-normal disabled:cursor-not-allowed disabled:opacity-70"
         style="
           font-size: {(element.fontSize || 13) * zoom}px;
           font-family: {element.fontFamily ? getCssFontFamily(element.fontFamily) : 'inherit'};
@@ -349,12 +358,13 @@
         type={element.password ? 'password' : 'text'}
         bind:value={editValue}
         placeholder={element.variant === 'signature' ? (element.placeholder || 'Sign here') : element.placeholder || 'Enter value...'}
+        disabled={isFieldDisabled}
         onblur={handleBlur}
         onkeydown={handleKeyDown}
         onpointerdown={(e) => e.stopPropagation()}
         onclick={(e) => e.stopPropagation()}
         ondblclick={(e) => e.stopPropagation()}
-        class="w-full h-full bg-transparent outline-none border-none p-0 m-0 select-text cursor-text leading-none {element.variant === 'button' ? 'text-center' : ''}"
+        class="w-full h-full bg-transparent outline-none border-none p-0 m-0 select-text cursor-text leading-none disabled:cursor-not-allowed disabled:opacity-70 {element.variant === 'button' ? 'text-center' : ''}"
         style="
           font-size: {(element.fontSize || 13) * zoom}px;
           font-family: {element.fontFamily ? getCssFontFamily(element.fontFamily) : 'inherit'};
@@ -366,7 +376,7 @@
   {:else if element.variant === 'radio'}
     {#if isCompactButton}
       <div
-        class="rounded-full shrink-0 flex items-center justify-center cursor-pointer transition-colors"
+        class="rounded-full shrink-0 flex items-center justify-center transition-colors {isFieldDisabled ? 'cursor-default opacity-75' : 'cursor-pointer'}"
         style="
           width: {Math.max(10, Math.min(element.width, element.height) * zoom)}px;
           height: {Math.max(10, Math.min(element.width, element.height) * zoom)}px;
@@ -393,7 +403,7 @@
     {:else}
       <div class="flex items-center w-full min-w-0">
         <div
-          class="rounded-full shrink-0 flex items-center justify-center cursor-pointer transition-colors"
+          class="rounded-full shrink-0 flex items-center justify-center transition-colors {isFieldDisabled ? 'cursor-default opacity-75' : 'cursor-pointer'}"
           style="
             width: {Math.max(12, Math.round(16 * zoom))}px;
             height: {Math.max(12, Math.round(16 * zoom))}px;
@@ -426,7 +436,7 @@
   {:else if element.variant === 'checkbox'}
     {#if isCompactButton}
       <div
-        class="rounded-[2.5px] shrink-0 flex items-center justify-center cursor-pointer transition-colors"
+        class="rounded-[2.5px] shrink-0 flex items-center justify-center transition-colors {isFieldDisabled ? 'cursor-default opacity-75' : 'cursor-pointer'}"
         style="
           width: {Math.max(10, Math.min(element.width, element.height) * zoom)}px;
           height: {Math.max(10, Math.min(element.width, element.height) * zoom)}px;
@@ -460,7 +470,7 @@
     {:else}
       <div class="flex items-center w-full min-w-0">
         <div
-          class="rounded-[2.5px] shrink-0 flex items-center justify-center cursor-pointer transition-colors"
+          class="rounded-[2.5px] shrink-0 flex items-center justify-center transition-colors {isFieldDisabled ? 'cursor-default opacity-75' : 'cursor-pointer'}"
           style="
             width: {Math.max(12, Math.round(16 * zoom))}px;
             height: {Math.max(12, Math.round(16 * zoom))}px;
@@ -582,7 +592,7 @@
     </div>
   {/if}
 
-  {#if element.readOnly && !editing}
+  {#if (element.readOnly || editorStore.isReadOnly) && !editing}
     <div class="absolute right-1 top-1/2 -translate-y-1/2 pointer-events-none">
       <Lock class="w-3 h-3 opacity-40" />
     </div>
