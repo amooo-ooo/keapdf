@@ -85,7 +85,7 @@ export const textElementDef: ElementDefinition<'text', TextElement> = {
 
     if (element.originalSpan && typeof ctx.page.deleteTextSpan === 'function') {
       try {
-        ctx.page.deleteTextSpan(element.originalSpan);
+        ctx.page.deleteTextSpan(element.originalSpan, { reflowDownstream: false });
       } catch {
         // Best-effort cleanup of hidden original span text objects
       }

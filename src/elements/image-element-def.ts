@@ -58,19 +58,56 @@ export const imageElementDef: ElementDefinition<'image', ImageElement> = {
    */
   burn(element: ImageElement, ctx: BurnContext): Promise<void> {
     if (element.visible === false) return Promise.resolve();
-    if (!element.src) return Promise.resolve();
+
+    if (!element.src) {
+      ctx.page.drawRectangle({
+        x: element.x,
+        y: element.y,
+        width: element.width,
+        height: element.height,
+        fill: '#f4f4f5',
+        stroke: '#d4d4d8',
+        strokeWidth: 1,
+      });
+      ctx.page.drawText({
+        text: 'No image',
+        x: element.x + Math.max(4, (element.width - 50) / 2),
+        y: element.y + element.height / 2 + 4,
+        fontSize: 10,
+        fontFamily: 'Helvetica',
+        color: '#71717a',
+      });
+      return Promise.resolve();
+    }
+
+    if (typeof Image === 'undefined') {
+      return Promise.resolve();
+    }
 
     return new Promise((resolve) => {
+      let resolved = false;
+      const safeResolve = (): void => {
+        if (resolved) return;
+        resolved = true;
+        resolve();
+      };
+
+      const timer = setTimeout(safeResolve, 4000);
+
       const img = new Image();
-      img.crossOrigin = 'anonymous';
-      
-      img.onload = () => {
+      if (!element.src.startsWith('data:') && !element.src.startsWith('blob:')) {
+        img.crossOrigin = 'anonymous';
+      }
+
+      const drawImageToPage = (): void => {
+        clearTimeout(timer);
         try {
           const canvas = document.createElement('canvas');
           canvas.width = img.width;
           canvas.height = img.height;
           const cCtx = canvas.getContext('2d');
           if (!cCtx) {
+            safeResolve();
             return;
           }
 
@@ -104,16 +141,20 @@ export const imageElementDef: ElementDefinition<'image', ImageElement> = {
         } catch (err) {
           console.error('Failed to burn image element:', err);
         } finally {
-          resolve();
+          safeResolve();
         }
       };
-      
+
+      img.onload = drawImageToPage;
       img.onerror = () => {
-        // Silently resolve on error to avoid blocking export
-        resolve();
+        clearTimeout(timer);
+        safeResolve();
       };
-      
+
       img.src = element.src;
+      if (img.complete && img.naturalWidth > 0) {
+        drawImageToPage();
+      }
     });
   }
 };
