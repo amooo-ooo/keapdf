@@ -175,16 +175,16 @@
           const lineFontSize = origLine?.fontSize || element.fontSize;
           const lineText = sanitizePdfText(lineNode.innerText ?? lineNode.textContent ?? '');
 
-          const segNodes = Array.from(lineNode.querySelectorAll<HTMLSpanElement>('span[data-segment-index]'));
           const lineSegments: TextSegment[] = [];
-
-          if (segNodes.length > 0) {
-            for (let sIdx = 0; sIdx < segNodes.length; sIdx++) {
-              const segNode = segNodes[sIdx];
-              const origSegIdx = parseInt(segNode.dataset.segmentIndex || `${sIdx}`, 10);
-              const origSeg = origLine?.segments?.[origSegIdx];
+          for (let cIdx = 0; cIdx < lineNode.childNodes.length; cIdx++) {
+            const childNode = lineNode.childNodes[cIdx];
+            if (childNode instanceof HTMLElement) {
+              const segNode = childNode;
               const segText = sanitizePdfText(segNode.innerText ?? segNode.textContent ?? '');
               if (!segText) continue;
+
+              const origSegIdx = parseInt(segNode.dataset.segmentIndex || `${cIdx}`, 10);
+              const origSeg = origLine?.segments?.[origSegIdx];
 
               const nodeBg = segNode.style.backgroundColor;
               const hasValidNodeBg = Boolean(nodeBg && nodeBg !== 'transparent' && nodeBg !== 'inherit');
@@ -193,8 +193,8 @@
                 ? undefined
                 : (hasValidNodeBg ? nodeBg : (origSeg?.backgroundColor || undefined));
 
-              const isUnderline = origSeg?.underline !== undefined ? origSeg.underline : (segNode.style.textDecoration.includes('underline') ? true : undefined);
-              const isStrike = origSeg?.strikethrough !== undefined ? origSeg.strikethrough : (segNode.style.textDecoration.includes('line-through') ? true : undefined);
+              const isUnderline = segNode.style.textDecoration.includes('underline') ? true : undefined;
+              const isStrike = segNode.style.textDecoration.includes('line-through') ? true : undefined;
 
               const nodeFw = segNode.style.fontWeight === 'bold' || segNode.style.fontWeight === '700'
                 ? 'bold'
@@ -203,10 +203,11 @@
                 ? 'italic'
                 : (segNode.style.fontStyle === 'normal' ? 'normal' : undefined);
               const nodeColor = segNode.style.color && segNode.style.color !== '' ? segNode.style.color : undefined;
+              const parsedFs = origSeg?.fontSize || lineFontSize;
 
               const seg: TextSegment = {
                 text: segText,
-                fontSize: origSeg?.fontSize || lineFontSize,
+                fontSize: parsedFs,
                 fontFamily: origSeg?.fontFamily || element.fontFamily,
                 rawFontFamily: origSeg?.rawFontFamily || element.rawFontFamily,
                 color: nodeColor || origSeg?.color || element.color,
@@ -219,6 +220,26 @@
               };
               lineSegments.push(seg);
               allSegments.push(seg);
+            } else if (childNode.nodeType === 3) {
+              const rawTxt = childNode.textContent || '';
+              const cleanTxt = sanitizePdfText(rawTxt);
+              if (cleanTxt) {
+                const seg: TextSegment = {
+                  text: cleanTxt,
+                  fontSize: lineFontSize,
+                  fontFamily: element.fontFamily,
+                  rawFontFamily: element.rawFontFamily,
+                  color: element.color,
+                  backgroundColor: element.backgroundColor || undefined,
+                  fontWeight: element.fontWeight,
+                  fontStyle: element.fontStyle,
+                  underline: element.underline,
+                  strikethrough: element.strikethrough,
+                  charCount: cleanTxt.length,
+                };
+                lineSegments.push(seg);
+                allSegments.push(seg);
+              }
             }
           }
 
@@ -252,6 +273,59 @@
           text: fullText,
           lines: updatedLines,
           segments: allSegments,
+          width: newWidth,
+          height: newHeight,
+        });
+        return;
+      }
+
+      const flatSpans = Array.from(editableEl.querySelectorAll<HTMLSpanElement>('span[data-segment-index]'));
+      if (flatSpans.length > 0) {
+        const flatSegments: TextSegment[] = [];
+        for (let sIdx = 0; sIdx < flatSpans.length; sIdx++) {
+          const segNode = flatSpans[sIdx];
+          const segText = sanitizePdfText(segNode.innerText ?? segNode.textContent ?? '');
+          if (!segText) continue;
+          const origSeg = element.segments?.[sIdx];
+          const isUnderline = segNode.style.textDecoration.includes('underline') ? true : undefined;
+          const isStrike = segNode.style.textDecoration.includes('line-through') ? true : undefined;
+          const nodeBg = segNode.style.backgroundColor;
+          const hasValidBg = Boolean(nodeBg && nodeBg !== 'transparent' && nodeBg !== 'inherit');
+          const isCleared = nodeBg === 'transparent';
+          const segBg = isCleared ? undefined : (hasValidBg ? nodeBg : (origSeg?.backgroundColor || undefined));
+
+          const nodeFw = segNode.style.fontWeight === 'bold' || segNode.style.fontWeight === '700'
+            ? 'bold'
+            : (segNode.style.fontWeight === 'normal' || segNode.style.fontWeight === '400' ? 'normal' : undefined);
+          const nodeFs = segNode.style.fontStyle === 'italic'
+            ? 'italic'
+            : (segNode.style.fontStyle === 'normal' ? 'normal' : undefined);
+          const nodeColor = segNode.style.color && segNode.style.color !== '' ? segNode.style.color : undefined;
+          const rawFs = segNode.dataset.fontSize ? parseFloat(segNode.dataset.fontSize) : 0;
+          // Prefer live element font size when the inspector has updated it during editing
+          const liveFs = element.fontSize || 0;
+          const parsedFs = (liveFs > 0 && rawFs > 0 && Math.abs(liveFs - rawFs) > 0.1)
+            ? liveFs
+            : (rawFs > 0 ? rawFs : (origSeg?.fontSize || element.fontSize));
+
+          flatSegments.push({
+            text: segText,
+            fontSize: parsedFs,
+            fontFamily: origSeg?.fontFamily || element.fontFamily,
+            rawFontFamily: origSeg?.rawFontFamily || element.rawFontFamily,
+            color: nodeColor || origSeg?.color || element.color,
+            backgroundColor: segBg,
+            fontWeight: nodeFw || origSeg?.fontWeight || element.fontWeight,
+            fontStyle: nodeFs || origSeg?.fontStyle || element.fontStyle,
+            underline: isUnderline,
+            strikethrough: isStrike,
+            charCount: segText.length,
+          });
+        }
+
+        canvasActions.updateElementProperties(element.id, {
+          text: fullText,
+          segments: flatSegments,
           width: newWidth,
           height: newHeight,
         });
@@ -335,7 +409,12 @@
     } else if (action === 'cancel') {
       e.stopPropagation();
       e.preventDefault();
-      commitContent(true);
+      if (editableEl) {
+        populateEditableContent(editableEl);
+      }
+      if (canvasStore.editingElementId === element.id) {
+        canvasStore.editingElementId = null;
+      }
     }
   }
 
