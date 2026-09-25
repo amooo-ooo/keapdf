@@ -1,4 +1,3 @@
-import { PDFDocument } from 'pdf-lib';
 import type { EditableSpan } from '../../../core/types';
 
 /**
@@ -273,7 +272,7 @@ export function calculateCropMarginsFromDimensions(
 
 /**
  * Calculates page crop margins for a single click on the canvas,
- * centering a target crop box around the click coordinate clamped to page boundaries.
+ * centring a target crop box around the click coordinate clamped to page boundaries.
  *
  * @param clickPoint The point where the click occurred { x, y } in page points.
  * @param pageWidth Total page width in points.
@@ -326,17 +325,17 @@ export function computeRotationAwareCropBox(
 
   switch (roundedRot) {
     case 90: {
-      // Visual Top -> PDF Right, Visual Bottom -> PDF Left
-      // Visual Left -> PDF Top, Visual Right -> PDF Bottom
-      x = mediaBox.x + margins.bottom;
-      y = mediaBox.y + margins.right;
+      // Visual top maps to PDF left, visual bottom maps to PDF right
+      // Visual left maps to PDF bottom, visual right maps to PDF top
+      x = mediaBox.x + margins.top;
+      y = mediaBox.y + margins.left;
       width = mediaBox.width - margins.top - margins.bottom;
       height = mediaBox.height - margins.left - margins.right;
       break;
     }
     case 180: {
-      // Visual Top -> PDF Bottom, Visual Bottom -> PDF Top
-      // Visual Left -> PDF Right, Visual Right -> PDF Left
+      // Visual top maps to PDF bottom, visual bottom maps to PDF top
+      // Visual left maps to PDF right, visual right maps to PDF left
       x = mediaBox.x + margins.right;
       y = mediaBox.y + margins.top;
       width = mediaBox.width - margins.left - margins.right;
@@ -344,10 +343,10 @@ export function computeRotationAwareCropBox(
       break;
     }
     case 270: {
-      // Visual Top -> PDF Left, Visual Bottom -> PDF Right
-      // Visual Left -> PDF Bottom, Visual Right -> PDF Top
-      x = mediaBox.x + margins.top;
-      y = mediaBox.y + margins.left;
+      // Visual top maps to PDF right, visual bottom maps to PDF left
+      // Visual left maps to PDF top, visual right maps to PDF bottom
+      x = mediaBox.x + margins.bottom;
+      y = mediaBox.y + margins.right;
       width = mediaBox.width - margins.top - margins.bottom;
       height = mediaBox.height - margins.left - margins.right;
       break;
@@ -391,6 +390,7 @@ export async function cropPages(
   pdfBytes: Uint8Array | ArrayBuffer,
   options: CropPageOptions,
 ): Promise<Uint8Array> {
+  const { PDFDocument } = await import('pdf-lib');
   const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
   const totalPages = pdfDoc.getPageCount();
 
@@ -419,6 +419,7 @@ export async function resetCropPages(
   pdfBytes: Uint8Array | ArrayBuffer,
   pageIndices: number[],
 ): Promise<Uint8Array> {
+  const { PDFDocument } = await import('pdf-lib');
   const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
   const totalPages = pdfDoc.getPageCount();
 
