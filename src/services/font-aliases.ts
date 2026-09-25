@@ -52,7 +52,7 @@ const CSS_STACK_LATEX_SERIF =
   '"Latin Modern Roman", "CMU Serif", "Computer Modern Roman", "STIX Two Text", "Nimbus Roman No9 L", "Times New Roman", Times, serif';
 
 const CSS_STACK_LATEX_SANS =
-  '"Latin Modern Sans", "CMU Sans Serif", "Computer Modern Sans", "Source Sans 3", "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+  '"Latin Modern Sans", "CMU Sans Serif", "Computer Modern Sans", "Source Sans 3", "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
 
 const CSS_STACK_LATEX_MONO =
   '"Latin Modern Mono", "CMU Typewriter Text", "Computer Modern Typewriter", "Source Code Pro", "Courier New", Courier, monospace';
