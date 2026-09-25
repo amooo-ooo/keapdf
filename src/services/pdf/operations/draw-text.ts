@@ -9,7 +9,7 @@ import {
   getPageCropInfo,
 } from '../../../core/pdfium-helpers';
 import type { PageCropInfo } from '../../../core/types';
-import { parseColor, sanitizePdfText, buildTransformMatrix } from '../utils';
+import { parseColor, sanitizePdfText, safeEncodeForStandardFont, buildTransformMatrix } from '../utils';
 import type { StandardFontName } from '../../../core/types';
 import type { TextOptions } from './types';
 import type { TextSegment } from '../../../stores/canvas-types';
@@ -31,19 +31,25 @@ export function resolveStandardFont(
   fontWeight?: 'normal' | 'bold',
   fontStyle?: 'normal' | 'italic'
 ): StandardFontName {
-  if (rawFontFamily) {
+  if (rawFontFamily && !fontWeight && !fontStyle) {
     const directMap = mapStandardFontName(rawFontFamily);
     if (directMap !== 'Helvetica' || rawFontFamily.toLowerCase().includes('helvetica')) {
       return directMap;
     }
   }
 
-  const baseFont = mapStandardFontName(fontFamily || 'Helvetica');
-  const isBold = fontWeight === 'bold' || (fontFamily || '').toLowerCase().includes('bold');
+  const baseFont = mapStandardFontName(fontFamily || rawFontFamily || 'Helvetica');
+  const isBold =
+    fontWeight !== undefined
+      ? fontWeight === 'bold'
+      : (fontFamily || rawFontFamily || '').toLowerCase().includes('bold');
   const isItalic =
-    fontStyle === 'italic' ||
-    (fontFamily || '').toLowerCase().includes('italic') ||
-    (fontFamily || '').toLowerCase().includes('oblique');
+    fontStyle !== undefined
+      ? fontStyle === 'italic'
+      : (fontFamily || rawFontFamily || '').toLowerCase().includes('italic') ||
+        (fontFamily || rawFontFamily || '').toLowerCase().includes('oblique');
+
+  if (baseFont === 'Symbol') return 'Symbol';
 
   if (baseFont.startsWith('Times')) {
     if (isBold && isItalic) return 'Times-BoldItalic';
@@ -124,6 +130,7 @@ export function drawText(
   );
 
   // Fallback to standard PDF font if font subset is not available or characters missing
+  const isUsingStandardFont = !fontHandle;
   if (!fontHandle) {
     fontHandle = mod.FPDFText_LoadStandardFont(docHandle, standardFont);
     if (!fontHandle) fontHandle = mod.FPDFText_LoadStandardFont(docHandle, 'Helvetica');
@@ -133,7 +140,8 @@ export function drawText(
   }
 
   if (fontHandle) {
-    const textBuf = encodeUtf16Le(engine, cleanText);
+    const textToWrite = isUsingStandardFont ? safeEncodeForStandardFont(cleanText) : cleanText;
+    const textBuf = encodeUtf16Le(engine, textToWrite);
     try {
       const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, fontHandle, options.fontSize);
       if (textObjHandle) {
@@ -348,7 +356,7 @@ function drawMultiSegmentText(
         segment.fontStyle || options.fontStyle
       );
 
-      const segWidth = calculateTextWidth(cleanText, segFontSize, segStandardFont);
+      const segWidth = (segment.width !== undefined && segment.width > 0) ? segment.width : calculateTextWidth(cleanText, segFontSize, segStandardFont);
       const segRelX =
         segment.left !== undefined && line.segments.length > 1 && segment.left > 0
           ? segment.left
@@ -385,7 +393,9 @@ function drawMultiSegmentText(
         }
       }
 
+      let isUsingStandardFont = false;
       if (!segFontHandle) {
+        isUsingStandardFont = true;
         segFontHandle = getStandardFontHandle(segStandardFont);
         const fam = segment.fontFamily || options.fontFamily;
         if (fam) {
@@ -394,7 +404,8 @@ function drawMultiSegmentText(
       }
 
       if (segFontHandle) {
-        const textBuf = encodeUtf16Le(engine, cleanText);
+        const textToWrite = isUsingStandardFont ? safeEncodeForStandardFont(cleanText) : cleanText;
+        const textBuf = encodeUtf16Le(engine, textToWrite);
         try {
           const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, segFontHandle, segFontSize);
           if (textObjHandle) {
@@ -425,6 +436,49 @@ function drawMultiSegmentText(
                   );
                   setPageObjectMatrix(engine, mod, bgRect, bgMatrix);
                   mod.FPDFPage_InsertObject(pageHandle, bgRect);
+                }
+              }
+            }
+
+            if (segment.underline || segment.strikethrough) {
+              const lineCol = parseColor(segment.color || options.color || '#000000');
+              const lineThick = Math.max(0.75, segFontSize * 0.065);
+
+              if (segment.underline) {
+                const uDomBaselineY = options.y + segRelY + segFontSize * 0.94;
+                const uDomBaselineX = options.x + cropX + segRelX;
+                const uDx = uDomBaselineX - elemCx;
+                const uDy = uDomBaselineY - elemCy;
+                const uRotDx = uDx * cos - uDy * sin;
+                const uRotDy = uDx * sin + uDy * cos;
+                const uPdfX = elemCx + uRotDx * sx;
+                const uPdfY = (pageHeight - elemCy) + cropY - uRotDy * sy;
+                const uRect = mod.FPDFPageObj_CreateNewRect(0, 0, segWidth, lineThick);
+                if (uRect) {
+                  mod.FPDFPageObj_SetFillColor(uRect, lineCol.r, lineCol.g, lineCol.b, lineCol.a);
+                  mod.FPDFPath_SetDrawMode(uRect, 1, false);
+                  const uMatrix = { a, b, c, d, e: uPdfX, f: uPdfY };
+                  setPageObjectMatrix(engine, mod, uRect, uMatrix);
+                  mod.FPDFPage_InsertObject(pageHandle, uRect);
+                }
+              }
+
+              if (segment.strikethrough) {
+                const sDomBaselineY = options.y + segRelY + segFontSize * 0.52;
+                const sDomBaselineX = options.x + cropX + segRelX;
+                const sDx = sDomBaselineX - elemCx;
+                const sDy = sDomBaselineY - elemCy;
+                const sRotDx = sDx * cos - sDy * sin;
+                const sRotDy = sDx * sin + sDy * cos;
+                const sPdfX = elemCx + sRotDx * sx;
+                const sPdfY = (pageHeight - elemCy) + cropY - sRotDy * sy;
+                const sRect = mod.FPDFPageObj_CreateNewRect(0, 0, segWidth, lineThick);
+                if (sRect) {
+                  mod.FPDFPageObj_SetFillColor(sRect, lineCol.r, lineCol.g, lineCol.b, lineCol.a);
+                  mod.FPDFPath_SetDrawMode(sRect, 1, false);
+                  const sMatrix = { a, b, c, d, e: sPdfX, f: sPdfY };
+                  setPageObjectMatrix(engine, mod, sRect, sMatrix);
+                  mod.FPDFPage_InsertObject(pageHandle, sRect);
                 }
               }
             }
