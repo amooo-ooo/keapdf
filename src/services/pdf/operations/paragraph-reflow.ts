@@ -2,6 +2,7 @@ import type { PdfiumEngine } from '../../../core/pdfium-engine';
 import type {
   ColorRgba,
   EditableTextSpan,
+  PdfMatrix,
   StandardFontName,
   TextMutationOptions,
   TextLine,
@@ -10,16 +11,16 @@ import type {
 import {
   encodeUtf16Le,
   setPageObjectMatrix,
-  translationMatrix,
   mapStandardFontName,
   calculateTextWidth,
   findTextObjectIndicesForSpan,
   removeTextObjectsByIndex,
   setTextObjectByIndex,
   getPageObjectMatrix,
+  getPageCropInfo,
 } from '../../../core/pdfium-helpers';
-import { FontCharsetIndex, extractBaseFontFamily } from '../font-charset-index';
-import { isColorEqual, sanitizePdfText, parseColor } from '../utils';
+import { FontCharsetIndex, extractBaseFontFamily, isStandard14Font } from '../font-charset-index';
+import { isColorEqual, sanitizePdfText, safeEncodeForStandardFont, parseColor } from '../utils';
 import { detectParagraphs } from './paragraph-detector';
 import { resolveStandardFont } from './draw-text';
 import { UNICODE_TRAILING_WS_REGEX, UNICODE_LEADING_WS_REGEX, findBestMatchingOrigLine } from '../../../utils/text-range-utils';
@@ -343,8 +344,13 @@ export function reflowAndReplaceParagraph(
 
   if (!isDeletion && isOnlyTextChanged && reflowedLines.length === targetLines.length) {
     let charsAvailable = false;
-    if (charsetIndex) {
-      charsAvailable = charsetIndex.hasAllChars(updatedText, targetParagraph.rawFontFamily, targetParagraph.text);
+    const font = targetParagraph.rawFontFamily || targetParagraph.fontFamily;
+    const hasWhitespace = updatedText.includes(' ') || updatedText.includes('\t') || updatedText.includes('\n') || updatedText.includes('\r');
+
+    if (hasWhitespace && !isStandard14Font(font)) {
+      charsAvailable = false;
+    } else if (charsetIndex) {
+      charsAvailable = charsetIndex.hasAllChars(updatedText, font, targetParagraph.text);
     } else {
       const origText = targetParagraph.text;
       const nonWs = Array.from(updatedText).filter((c) => c !== ' ' && c !== '\t' && c !== '\n' && c !== '\r');
@@ -407,6 +413,7 @@ export function reflowAndReplaceParagraph(
 
   // 4. Collect ALL backing PDF text objects to remove in one batch
   const allIndicesToRemove = new Set<number>();
+  let origMatrix: PdfMatrix | null = null;
 
   for (const line of targetLines) {
     const indices = findTextObjectIndicesForSpan(
@@ -415,6 +422,12 @@ export function reflowAndReplaceParagraph(
     );
     for (const idx of indices) {
       allIndicesToRemove.add(idx);
+      if (!origMatrix) {
+        const objHandle = mod.FPDFPage_GetObject(pageHandle, idx);
+        if (objHandle) {
+          origMatrix = getPageObjectMatrix(engine, mod, objHandle);
+        }
+      }
     }
     // Only remove bullet object if the entire paragraph is being deleted
     if (isDeletion && line.hasBulletPrefix && line.bulletWord) {
@@ -489,9 +502,63 @@ export function reflowAndReplaceParagraph(
         }
 
         const isExactLineWords = Boolean(origLine?.words && !item.isContinuation && origLine.text === lineText);
-        const wordsToRender = isExactLineWords
-          ? origLine?.words
-          : (origLine?.words ? origLine.words.filter((w: TextWord) => lineText.includes(w.text)) : undefined);
+        let wordsToRender: TextWord[] | undefined;
+        if (isExactLineWords && origLine?.words) {
+          wordsToRender = origLine.words;
+        } else if (item.sourceLine?.words && item.sourceLine.words.length > 0) {
+          wordsToRender = item.sourceLine.words;
+        } else if (origLine?.words && origLine.words.length > 0) {
+          const tokens = lineText.split(/([\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+)/);
+          const freshWords: TextWord[] = [];
+          let currentTokenLeft = lineLeft;
+          let pendingSpace = false;
+          let origWordIdx = 0;
+
+          for (const token of tokens) {
+            if (!token) continue;
+            if (/^[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+$/.test(token)) {
+              pendingSpace = true;
+              continue;
+            }
+            const clean = sanitizePdfText(token);
+            if (!clean) continue;
+
+            const matchedOrig = origLine.words.find((w) => w.text === clean) || origLine.words[Math.min(origWordIdx, origLine.words.length - 1)];
+            origWordIdx++;
+
+            const wordFs = matchedOrig?.fontSize || origLine.fontSize || updatedFontSize;
+            const approxCharW = wordFs * 0.52;
+            const wordW = matchedOrig?.width && matchedOrig.width > 0 ? matchedOrig.width : clean.length * approxCharW;
+
+            if (pendingSpace) {
+              currentTokenLeft += wordFs * 0.25;
+            }
+
+            freshWords.push({
+              text: clean,
+              left: currentTokenLeft,
+              top: matchedOrig?.top || origLine.top || 0,
+              right: currentTokenLeft + wordW,
+              bottom: (matchedOrig?.top || origLine.top || 0) + wordFs,
+              width: wordW,
+              height: matchedOrig?.height || origLine.height || wordFs,
+              fontSize: wordFs,
+              baselineY: matchedOrig?.baselineY || lineBaselineY,
+              charStartIndex: 0,
+              charCount: clean.length,
+              fontFamily: matchedOrig?.fontFamily || origLine.fontFamily,
+              rawFontFamily: matchedOrig?.rawFontFamily || origLine.rawFontFamily,
+              color: matchedOrig?.color || origLine.color,
+              fontWeight: matchedOrig?.fontWeight || origLine.fontWeight,
+              fontStyle: matchedOrig?.fontStyle || origLine.fontStyle,
+              hasPrecedingSpace: pendingSpace || freshWords.length > 0,
+            });
+
+            currentTokenLeft += wordW;
+            pendingSpace = false;
+          }
+          wordsToRender = freshWords;
+        }
 
         const hasMultiStyleWords =
           Boolean(wordsToRender &&
@@ -559,14 +626,22 @@ export function reflowAndReplaceParagraph(
               }
             }
 
-            const wordBuf = encodeUtf16Le(engine, textToRender);
+            const wordBuf = encodeUtf16Le(engine, safeEncodeForStandardFont(textToRender));
             try {
               const wordObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, wordFontHandle, wordFontSize);
               if (wordObjHandle) {
                 mod.FPDFText_SetText(wordObjHandle, wordBuf.ptr);
                 const wCol = word.color || origLine?.color || updatedColor;
                 mod.FPDFPageObj_SetFillColor(wordObjHandle, wCol.r, wCol.g, wCol.b, wCol.a);
-                setPageObjectMatrix(engine, mod, wordObjHandle, translationMatrix(currentWordX, lineBaselineY));
+                const matrix = {
+                  a: origMatrix ? origMatrix.a : 1,
+                  b: origMatrix ? origMatrix.b : 0,
+                  c: origMatrix ? origMatrix.c : 0,
+                  d: origMatrix ? origMatrix.d : 1,
+                  e: currentWordX,
+                  f: lineBaselineY
+                };
+                setPageObjectMatrix(engine, mod, wordObjHandle, matrix);
                 mod.FPDFPage_InsertObject(pageHandle, wordObjHandle);
                 newObjectHandles.add(wordObjHandle);
               }
@@ -607,14 +682,22 @@ export function reflowAndReplaceParagraph(
             }
           }
 
-          const textBuf = encodeUtf16Le(engine, lineText);
+          const textBuf = encodeUtf16Le(engine, safeEncodeForStandardFont(lineText));
           try {
             const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, lineFontHandle, lineFontSize);
             if (textObjHandle) {
               mod.FPDFText_SetText(textObjHandle, textBuf.ptr);
               const lineCol = origLine?.color || updatedColor;
               mod.FPDFPageObj_SetFillColor(textObjHandle, lineCol.r, lineCol.g, lineCol.b, lineCol.a);
-              setPageObjectMatrix(engine, mod, textObjHandle, translationMatrix(lineLeft, lineBaselineY));
+              const matrix = {
+                a: origMatrix ? origMatrix.a : 1,
+                b: origMatrix ? origMatrix.b : 0,
+                c: origMatrix ? origMatrix.c : 0,
+                d: origMatrix ? origMatrix.d : 1,
+                e: lineLeft,
+                f: lineBaselineY
+              };
+              setPageObjectMatrix(engine, mod, textObjHandle, matrix);
               mod.FPDFPage_InsertObject(pageHandle, textObjHandle);
               newObjectHandles.add(textObjHandle);
             }
@@ -670,13 +753,27 @@ export function reflowAndReplaceParagraph(
         }
       }
 
+      const cropInfo = getPageCropInfo(engine, mod, pageHandle);
       for (const objHandle of handlesToShift) {
         const currentMatrix = getPageObjectMatrix(engine, mod, objHandle);
         if (currentMatrix) {
-          setPageObjectMatrix(engine, mod, objHandle, {
-            ...currentMatrix,
-            f: currentMatrix.f - deltaY,
-          });
+          const shiftMatrix = { ...currentMatrix };
+          switch (cropInfo.rotation) {
+            case 1:
+              shiftMatrix.e += deltaY;
+              break;
+            case 2:
+              shiftMatrix.f += deltaY;
+              break;
+            case 3:
+              shiftMatrix.e -= deltaY;
+              break;
+            case 0:
+            default:
+              shiftMatrix.f -= deltaY;
+              break;
+          }
+          setPageObjectMatrix(engine, mod, objHandle, shiftMatrix);
         }
       }
     }
