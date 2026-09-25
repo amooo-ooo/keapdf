@@ -1,3 +1,58 @@
+/**
+ * Windows-1252 (WinAnsiEncoding) defined high character code points (0x80 - 0x9F).
+ */
+export const WIN_ANSI_HIGH_CODEPOINTS = new Set<number>([
+  0x20ac, // 0x80: Euro sign
+  0x201a, // 0x82: Single low-9 quotation mark
+  0x0192, // 0x83: Latin small letter f with hook
+  0x201e, // 0x84: Double low-9 quotation mark
+  0x2026, // 0x85: Horizontal ellipsis
+  0x2020, // 0x86: Dagger
+  0x2021, // 0x87: Double dagger
+  0x02c6, // 0x88: Modifier letter circumflex accent
+  0x2030, // 0x89: Per mille sign
+  0x0160, // 0x8a: Latin capital letter S with caron
+  0x2039, // 0x8b: Single left-pointing angle quotation mark
+  0x0152, // 0x8c: Latin capital ligature OE
+  0x017d, // 0x8e: Latin capital letter Z with caron
+  0x2018, // 0x91: Left single quotation mark
+  0x2019, // 0x92: Right single quotation mark
+  0x201c, // 0x93: Left double quotation mark
+  0x201d, // 0x94: Right double quotation mark
+  0x2022, // 0x95: Bullet
+  0x2013, // 0x96: En dash
+  0x2014, // 0x97: Em dash
+  0x02dc, // 0x98: Small tilde
+  0x2122, // 0x99: Trade mark sign
+  0x0161, // 0x9a: Latin small letter s with caron
+  0x203a, // 0x9b: Single right-pointing angle quotation mark
+  0x0153, // 0x9c: Latin small ligature oe
+  0x017e, // 0x9e: Latin small letter z with caron
+  0x0178, // 0x9f: Latin capital letter Y with diaeresis
+]);
+
+/**
+ * Validates whether a Unicode code point can be represented in standard PDF WinAnsiEncoding.
+ */
+export function isWinAnsiCodePoint(code: number): boolean {
+  if (code >= 0x20 && code <= 0x7e) return true;
+  if (code >= 0xa0 && code <= 0xff) return true;
+  return WIN_ANSI_HIGH_CODEPOINTS.has(code);
+}
+
+/**
+ * Checks whether an entire string contains only characters representable in WinAnsiEncoding.
+ */
+export function isWinAnsiText(text: string): boolean {
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (code === undefined) continue;
+    if (code === 0x09 || code === 0x0a || code === 0x0d) continue;
+    if (!isWinAnsiCodePoint(code)) return false;
+  }
+  return true;
+}
+
 export interface Color {
   r: number;
   g: number;
@@ -216,6 +271,131 @@ export function sanitizePdfText(text: string): string {
     .replace(/\uF0B7/g, '\u2022')
     .replace(/\uF0A7/g, '\u25AA')
     .replace(/\uF0D8/g, '\u25B8');
+}
+
+/**
+ * Normalizes text specifically for rendering with standard 14 PDF fonts (Helvetica, Times, Courier),
+ * which are restricted to Windows-1252 (WinAnsiEncoding).
+ * Maps non-WinAnsi bullet characters, typography spaces, and unsupported diacritics to clean,
+ * readable WinAnsi equivalents, preventing PDFium CPDF_Font fallback corruption to \u00ff (ÿ).
+ *
+ * @param text The input text to prepare for standard font rendering.
+ * @return Safe WinAnsi-compatible text string.
+ */
+export function safeEncodeForStandardFont(text: string): string {
+  if (!text) return '';
+  let cleaned = sanitizePdfText(text);
+
+  // Map non-WinAnsi bullet symbols to WinAnsi bullet (0x95 / \u2022)
+  cleaned = cleaned.replace(/[\u25AA\u25AB\u25E6\u25CF\u25B8\u25BA\u25C6\u25C7\u25CB\u25FC\u25FE\u2023\u2043\u2219]/g, '\u2022');
+
+  // Map non-WinAnsi dashes to ASCII hyphen-minus
+  cleaned = cleaned.replace(/[\u2010\u2011\u2012\u2015\u2212]/g, '-');
+
+  // Map non-WinAnsi angle quotes to standard quotes
+  cleaned = cleaned.replace(/[\u00AB\u00BB]/g, '"');
+
+  // Map mathematical symbols, relations, operators, Greek letters to readable ASCII/WinAnsi equivalents
+  const mathTransliterations: Record<string, string> = {
+    '\u2212': '-', '\u00D7': 'x', '\u00F7': '/', '\u2217': '*', '\u2248': '~',
+    '\u2260': '!=', '\u2264': '<=', '\u2265': '>=', '\u221E': 'oo',
+    '\u03C0': 'pi', '\u03B1': 'alpha', '\u03B2': 'beta', '\u03B3': 'gamma',
+    '\u03B4': 'delta', '\u03B5': 'epsilon', '\u03B6': 'zeta', '\u03B7': 'eta',
+    '\u03B8': 'theta', '\u03B9': 'iota', '\u03BA': 'kappa', '\u03BB': 'lambda',
+    '\u03BC': 'mu', '\u03BD': 'nu', '\u03BE': 'xi', '\u03BF': 'o',
+    '\u03C1': 'rho', '\u03C2': 'sigma', '\u03C3': 'sigma', '\u03C4': 'tau',
+    '\u03C5': 'upsilon', '\u03C6': 'phi', '\u03C7': 'chi', '\u03C8': 'psi',
+    '\u03C9': 'omega',
+    '\u0393': 'Gamma', '\u0394': 'Delta', '\u0398': 'Theta', '\u039B': 'Lambda',
+    '\u039E': 'Xi', '\u03A0': 'Pi', '\u03A3': 'Sigma', '\u03A6': 'Phi',
+    '\u03A8': 'Psi', '\u03A9': 'Omega',
+    '\u2192': '->', '\u2190': '<-', '\u2194': '<->',
+    '\u21D2': '=>', '\u21D0': '<=', '\u21D4': '<=>',
+    '\u222B': 'int', '\u2202': 'd', '\u221A': 'sqrt',
+    '\u2211': 'sum', '\u220F': 'prod', '\u2207': 'grad',
+    '\u2200': 'for all', '\u2203': 'exists', '\u2204': 'not exists',
+    '\u2261': '==', '\u2245': '~=', '\u221D': 'prop', '\u2220': 'angle',
+    '\u2227': '&', '\u2228': '|', '\u2213': '-+',
+    '\u2229': 'cap', '\u222A': 'cup', '\u2208': 'in', '\u2209': 'notin',
+    '\u2282': 'sub', '\u2283': 'sup', '\u2286': 'sube', '\u2287': 'supe',
+    '\u2295': '(+)', '\u2297': '(x)', '\u22A5': 'perp', '\u22C5': '.',
+    '\u2135': 'aleph', '\u2111': 'Im', '\u211C': 'Re', '\u2118': 'wp',
+    '\u00B9': '1', '\u00B2': '2', '\u00B3': '3',
+    '\u2070': '0', '\u2074': '4', '\u2075': '5', '\u2076': '6',
+    '\u2077': '7', '\u2078': '8', '\u2079': '9',
+    '\u2080': '0', '\u2081': '1', '\u2082': '2', '\u2083': '3',
+    '\u2084': '4', '\u2085': '5', '\u2086': '6', '\u2087': '7',
+    '\u2088': '8', '\u2089': '9',
+    '\u00BC': '1/4', '\u00BD': '1/2', '\u00BE': '3/4',
+  };
+  const mathPattern = new RegExp(
+    '[' + Object.keys(mathTransliterations).map((k) => k.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')).join('') + ']',
+    'g'
+  );
+  cleaned = cleaned.replace(mathPattern, (match) => mathTransliterations[match] || match);
+
+  // Extended Latin characters that do not decompose into base letters under NFKD
+  const extendedLatinMap: Record<string, string> = {
+    '\u0141': 'L', '\u0142': 'l', // Polish L with stroke
+    '\u0110': 'D', '\u0111': 'd', // D with stroke (Croatian, Vietnamese)
+    '\u0126': 'H', '\u0127': 'h', // Maltese H with stroke
+    '\u0166': 'T', '\u0167': 't', // Northern Sami T with stroke
+    '\u0131': 'i',                // Turkish dotless i
+    '\u0130': 'I',                // Turkish capital I with dot
+    '\u014A': 'N', '\u014B': 'n', // Eng
+    '\u0138': 'k',                // Greenlandic kra
+    '\u018F': 'E', '\u0259': 'e', // Schwa
+  };
+
+  // Uppercase Greek letters whose visual forms mirror Latin capitals
+  const greekCapitals: Record<string, string> = {
+    '\u0391': 'A', '\u0392': 'B', '\u0395': 'E', '\u0396': 'Z',
+    '\u0397': 'H', '\u0399': 'I', '\u039A': 'K', '\u039C': 'M',
+    '\u039D': 'N', '\u039F': 'O', '\u03A1': 'P', '\u03A4': 'T',
+    '\u03A5': 'Y', '\u03A7': 'X',
+  };
+
+  // Cyrillic romanization fallback for standard font rendering
+  const cyrillicMap: Record<string, string> = {
+    'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'Yo', 'Ж': 'Zh',
+    'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M', 'Н': 'N', 'О': 'O',
+    'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 'У': 'U', 'Ф': 'F', 'Х': 'Kh', 'Ц': 'Ts',
+    'Ч': 'Ch', 'Ш': 'Sh', 'Щ': 'Shch', 'Ъ': '', 'Ы': 'Y', 'Ь': '', 'Э': 'E', 'Ю': 'Yu', 'Я': 'Ya',
+    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo', 'ж': 'zh',
+    'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o',
+    'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'kh', 'ц': 'ts',
+    'ч': 'ch', 'ш': 'sh', 'щ': 'shch', 'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya',
+    'Є': 'Ye', 'є': 'ye', 'І': 'I', 'і': 'i', 'Ї': 'Yi', 'ї': 'yi', 'Ґ': 'G', 'ґ': 'g',
+  };
+
+  // For any remaining characters outside WinAnsi:
+  // Check extended Latin, Greek capitals, Cyrillic fallback, and NFKD decomposition
+  // to prevent PDFium CPDF_Font::CharCodeFromUnicode fallback corruption to \u00ff (ÿ)
+  let result = '';
+  for (const char of cleaned) {
+    const code = char.codePointAt(0);
+    if (code !== undefined && isWinAnsiCodePoint(code)) {
+      result += char;
+    } else if (extendedLatinMap[char] !== undefined) {
+      result += extendedLatinMap[char];
+    } else if (greekCapitals[char] !== undefined) {
+      result += greekCapitals[char];
+    } else if (cyrillicMap[char] !== undefined) {
+      result += cyrillicMap[char];
+    } else {
+      const decomposed = char.normalize('NFKD').replace(/[\u0300-\u036F]/g, '');
+      if (decomposed && decomposed.length > 0 && isWinAnsiCodePoint(decomposed.charCodeAt(0))) {
+        result += decomposed;
+      } else {
+        // Drop characters that cannot be represented in WinAnsiEncoding
+        // rather than passing them through raw, which causes PDFium
+        // CPDF_Font::CharCodeFromUnicode to return 0xFF (y-diaeresis)
+        result += '?';
+      }
+    }
+  }
+
+  return result;
 }
 
 
