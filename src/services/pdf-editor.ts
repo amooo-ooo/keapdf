@@ -16,7 +16,7 @@ import type { SignPdfOptions, SignatureValidationResult } from './pdf/operations
 import type { WorkspaceFile } from '../stores/editor.svelte';
 import { deleteFileBuffer, clearAllFileBuffers } from '../stores/editor.svelte';
 import type { ElementRegistry, BurnContext } from '../core/element-registry';
-import { unlockAcroFormFields, type UnlockFormsResult } from './pdf/operations/form-ops';
+import type { UnlockFormsResult } from './pdf/operations/form-ops';
 import type { SecurityOptions } from './pdf/operations/security-ops';
 
 /**
@@ -83,6 +83,7 @@ export class PdfEditorService {
    * Unlocks AcroForm interactive form fields and widget annotations.
    */
   public async unlockAcroFormFields(bytes: Uint8Array): Promise<UnlockFormsResult> {
+    const { unlockAcroFormFields } = await import('./pdf/operations/form-ops');
     return unlockAcroFormFields(bytes);
   }
 
