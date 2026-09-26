@@ -1,5 +1,4 @@
-import { PDFDocument } from 'pdf-lib';
-import type { CanvasElement, PathElement, TextElement, ShapeElement } from '../../../stores/canvas-types';
+import type { CanvasElement, PathElement, TextElement, ShapeElement, FormFieldElement } from '../../../stores/canvas-types';
 
 /** Standard paper sizes in points (72 points per inch). */
 export const STANDARD_PAPER_SIZES: Record<string, { width: number; height: number; label: string }> = {
@@ -183,6 +182,7 @@ export async function scalePages(
   pdfBytes: Uint8Array | ArrayBuffer,
   options: ScalePageOptions,
 ): Promise<Uint8Array> {
+  const { PDFDocument } = await import('pdf-lib');
   const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
   const totalPages = pdfDoc.getPageCount();
   const targetIndices = options.pageIndices.filter((idx) => idx >= 0 && idx < totalPages);
@@ -193,9 +193,15 @@ export async function scalePages(
     const targetW = Math.max(10, options.targetDimensions.width);
     const targetH = Math.max(10, options.targetDimensions.height);
 
+    const pageRot = ((page.getRotation().angle % 360) + 360) % 360;
+    const isOrthogonal = pageRot === 90 || pageRot === 270;
+
+    const curVisualW = isOrthogonal ? curH : curW;
+    const curVisualH = isOrthogonal ? curW : curH;
+
     const metrics = computePageTransformMetrics(
-      curW,
-      curH,
+      curVisualW,
+      curVisualH,
       targetW,
       targetH,
       options.mode,
@@ -203,26 +209,35 @@ export async function scalePages(
       options.constrainProportions ?? true,
     );
 
-    // Apply new page box dimensions
-    page.setSize(targetW, targetH);
+    // Apply new page box dimensions calibrated to rotation
+    const targetUserW = isOrthogonal ? targetH : targetW;
+    const targetUserH = isOrthogonal ? targetW : targetH;
+    page.setSize(targetUserW, targetUserH);
+
+    const effSx = isOrthogonal ? metrics.scaleY : metrics.scaleX;
+    const effSy = isOrthogonal ? metrics.scaleX : metrics.scaleY;
 
     if (options.mode === 'proportional') {
-      page.scaleContent(metrics.scaleX, metrics.scaleY);
+      page.scaleContent(effSx, effSy);
       if (metrics.tx !== 0 || metrics.ty !== 0) {
-        page.translateContent(metrics.tx, metrics.ty);
+        const effTx = isOrthogonal ? metrics.ty : metrics.tx;
+        const effTy = isOrthogonal ? metrics.tx : metrics.ty;
+        page.translateContent(effTx, effTy);
       }
-      page.scaleAnnotations(metrics.scaleX, metrics.scaleY);
+      page.scaleAnnotations(effSx, effSy);
     } else {
       // Pad margins: translate existing content into target alignment
       if (metrics.tx !== 0 || metrics.ty !== 0) {
-        page.translateContent(metrics.tx, metrics.ty);
+        const effTx = isOrthogonal ? metrics.ty : metrics.tx;
+        const effTy = isOrthogonal ? metrics.tx : metrics.ty;
+        page.translateContent(effTx, effTy);
       }
     }
 
     // Synchronise CropBox if defined on the page
     const cropBox = page.getCropBox();
     if (cropBox) {
-      page.setCropBox(0, 0, targetW, targetH);
+      page.setCropBox(0, 0, targetUserW, targetUserH);
     }
   }
 
@@ -288,6 +303,18 @@ export function transformCanvasElementsForScale(
                 }))
               : ln.segments,
           }));
+        }
+      } else if (element.kind === 'form-field') {
+        const formEl = updated as FormFieldElement;
+        const sMin = Math.min(sx, sy);
+        if (formEl.fontSize) {
+          formEl.fontSize = Math.max(4, Math.round(formEl.fontSize * sMin * 10) / 10);
+        }
+        if (formEl.borderWidth !== undefined) {
+          formEl.borderWidth = Math.max(0.5, Math.round(formEl.borderWidth * sMin * 10) / 10);
+        }
+        if (formEl.borderRadius !== undefined) {
+          formEl.borderRadius = Math.round(formEl.borderRadius * sMin * 10) / 10;
         }
       } else if (element.kind === 'shape') {
         const shapeEl = updated as ShapeElement;
