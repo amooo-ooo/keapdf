@@ -198,11 +198,12 @@ export class PdfPage {
   /**
    * Completely removes a native text span from the page content stream.
    * @param targetSpan The text span to delete.
+   * @param options Optional reflow configuration for downstream paragraph text.
    * @returns The current PdfPage instance for chaining.
    */
-  public deleteTextSpan(targetSpan: EditableTextSpan): this {
+  public deleteTextSpan(targetSpan: EditableTextSpan, options: { reflowDownstream?: boolean } = {}): this {
     this.assertNotDisposed();
-    textEditOps.deleteTextSpan(this.engine, this.docHandle, this.pageIndex, this.pageHandle, targetSpan);
+    textEditOps.deleteTextSpan(this.engine, this.docHandle, this.pageIndex, this.pageHandle, targetSpan, options);
     return this;
   }
 
@@ -819,6 +820,25 @@ export class PdfPage {
   public drawFormFieldPlaceholder(options: FormFieldPlaceholderOptions): this {
     this.assertNotDisposed();
     drawFormFieldPlaceholder(this.engine, this.docHandle, this.pageHandle, options);
+    return this;
+  }
+
+  /**
+   * Adds an interactive clickable Link annotation to this page conforming to ISO 32000.
+   *
+   * @param options Link bounds, target URI, or attachment launch file name.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public addLinkAnnotation(options: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    uri?: string;
+    fileName?: string;
+  }): this {
+    this.assertNotDisposed();
+    this.document.addPendingLinkAnnotation(this.pageIndex, options);
     return this;
   }
 }
