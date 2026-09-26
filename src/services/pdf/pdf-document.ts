@@ -18,7 +18,7 @@ import type {
   TextOptions,
 } from './operations/types';
 import type { NoteAnnotationOptions } from './operations/add-annotations';
-import type { PDFAcroTerminal, PDFRadioGroup, PDFForm, PDFAcroField, PDFArray } from 'pdf-lib';
+import type { PDFAcroTerminal, PDFRadioGroup, PDFForm, PDFAcroField, PDFArray, PDFString } from 'pdf-lib';
 import type { PdfiumEngine } from '../../core/pdfium-engine';
 import { PdfPage } from './pdf-page';
 import { FontCharsetIndex } from './font-charset-index';
@@ -87,6 +87,7 @@ function getUniqueAcroFieldName(form: PDFForm, baseName: string, usedNames: Set<
   return candidate;
 }
 
+
 /**
  * High-level facade for interacting with a PDF document via PDFium.
  * Handles page lifecycle management and document-level operations.
@@ -109,6 +110,11 @@ export class PdfDocument {
   private _pageDimensionsCache: Map<number, { widthPts: number; heightPts: number }> = new Map();
 
   /**
+   * Persistent 16-byte scratch pointer for zero-allocation dimension queries.
+   */
+  private _dimScratchPtr: number = 0;
+
+  /**
    * Cached extracted overlay spans and objects mapped by page index.
    */
   private _pageSpansCache: Map<
@@ -122,6 +128,34 @@ export class PdfDocument {
     }
   > = new Map();
 
+  /**
+   * Retrieves a persistent 16-byte scratch pointer in WASM memory for fast dimension queries.
+   */
+  private getDimScratch(): number {
+    if (!this._dimScratchPtr && this.engine.isReady) {
+      try {
+        this._dimScratchPtr = this.engine.allocateMemory(16);
+      } catch {
+        this._dimScratchPtr = 0;
+      }
+    }
+    return this._dimScratchPtr;
+  }
+
+  /**
+   * Disposes the persistent dimension scratch pointer.
+   */
+  private disposeDimScratch(): void {
+    if (this._dimScratchPtr && this.engine.isReady) {
+      try {
+        this.engine.freeMemory(this._dimScratchPtr);
+      } catch {
+        // Safe disposal
+      }
+      this._dimScratchPtr = 0;
+    }
+  }
+
   public setRawBuffer(buffer: ArrayBuffer | Uint8Array | null): void {
     this._rawBuffer = buffer;
     this._cachedMetadata = null;
@@ -131,12 +165,14 @@ export class PdfDocument {
     this.pendingAcroFormFieldsByPage.clear();
     this._pageDimensionsCache.clear();
     this._pageSpansCache.clear();
-    if (buffer) {
-      this.initAcroFormFieldSpans(buffer).catch((err: unknown) => {
-        console.warn('Background AcroForm extraction failed:', err);
-      });
-    }
+    this.disposeDimScratch();
   }
+
+  public pendingLinkAnnotationsByPage: Map<
+    number,
+    Array<{ x: number; y: number; width: number; height: number; uri?: string; fileName?: string }>
+  > = new Map();
+  public pendingAttachments: Array<{ fileName: string; bytes: Uint8Array; mimeType?: string; description?: string }> = [];
 
   public addPendingAcroFormField(pageIndex: number, field: FormFieldPlaceholderOptions): void {
     let fields = this.pendingAcroFormFieldsByPage.get(pageIndex);
@@ -145,6 +181,22 @@ export class PdfDocument {
       this.pendingAcroFormFieldsByPage.set(pageIndex, fields);
     }
     fields.push(field);
+  }
+
+  public addPendingLinkAnnotation(
+    pageIndex: number,
+    link: { x: number; y: number; width: number; height: number; uri?: string; fileName?: string }
+  ): void {
+    let links = this.pendingLinkAnnotationsByPage.get(pageIndex);
+    if (!links) {
+      links = [];
+      this.pendingLinkAnnotationsByPage.set(pageIndex, links);
+    }
+    links.push(link);
+  }
+
+  public addPendingAttachment(attachment: { fileName: string; bytes: Uint8Array; mimeType?: string; description?: string }): void {
+    this.pendingAttachments.push(attachment);
   }
 
   public getPendingAcroFormFieldsForPage(pageIndex: number): FormFieldPlaceholderOptions[] {
@@ -313,6 +365,7 @@ export class PdfDocument {
   public closeAllPages(): void {
     if (!this.engine.isReady) {
       this.pages.clear();
+      this.disposeDimScratch();
       return;
     }
     const mod = this.engine.getModule();
@@ -322,6 +375,7 @@ export class PdfDocument {
       mod.FPDF_ClosePage(page.pageHandle);
     }
     this.pages.clear();
+    this.disposeDimScratch();
   }
 
   /**
@@ -730,9 +784,10 @@ export class PdfDocument {
   /**
    * Saves the current document state to a byte array and asynchronously applies pending AcroForm fields.
    * Ensures all opened pages are properly flushed and closed before saving to prevent memory leaks.
+   * @param pageTransforms Optional map or record of page rotation and scaling transforms to bake into the saved document.
    * @returns A Promise resolving to a Uint8Array containing the serialized PDF file.
    */
-    public async saveAsync(pageTransforms?: Record<number, PageTransform>): Promise<Uint8Array> {
+  public async saveAsync(pageTransforms?: Record<number, PageTransform> | Map<number, PageTransform>): Promise<Uint8Array> {
     const mod = this.engine.getModule();
     const docHandle = this.getDocHandle();
     for (const page of this.pages.values()) {
@@ -764,11 +819,25 @@ export class PdfDocument {
       mod.PDFiumExt_CloseFileWriter(writerPtr);
     }
 
-    const hasTransforms = pageTransforms && Object.values(pageTransforms).some(
-      t => t && (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1)
-    );
+    const getTransform = (idx: number): PageTransform | undefined => {
+      if (!pageTransforms) return undefined;
+      if (pageTransforms instanceof Map) return pageTransforms.get(idx);
+      return (pageTransforms as Record<number, PageTransform>)[idx];
+    };
 
-    if (pendingFields.length > 0 || hasTransforms || hasRemovedFields) {
+    const hasTransforms = Boolean(pageTransforms && (
+      pageTransforms instanceof Map
+        ? Array.from(pageTransforms.values()).some(
+            t => t && (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1)
+          )
+        : Object.values(pageTransforms).some(
+            t => t && (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1)
+          )
+    ));
+    const hasPendingLinks = this.pendingLinkAnnotationsByPage.size > 0;
+    const hasPendingAttachments = this.pendingAttachments.length > 0;
+
+    if (pendingFields.length > 0 || hasTransforms || hasRemovedFields || hasPendingLinks || hasPendingAttachments) {
       const {
         PDFDocument,
         TextAlignment,
@@ -800,10 +869,10 @@ export class PdfDocument {
         }
       }
 
-      if (pageTransforms) {
+      if (hasTransforms) {
         const pageCount = pdfDoc.getPageCount();
         for (let i = 0; i < pageCount; i++) {
-          const transform = pageTransforms[i];
+          const transform = getTransform(i);
           if (!transform) continue;
           const { rotation = 0, scaleX = 1, scaleY = 1 } = transform;
           if (rotation === 0 && scaleX === 1 && scaleY === 1) continue;
@@ -817,8 +886,58 @@ export class PdfDocument {
 
           const isScaleIdentity = Math.abs(scaleX - 1) < 0.001 && Math.abs(scaleY - 1) < 0.001;
           if (!isScaleIdentity) {
-            const rawSize = page.getSize();
-            page.setSize(rawSize.width * scaleX, rawSize.height * scaleY);
+            const isOrthogonal = finalAngle === 90 || finalAngle === 270;
+            const effSx = isOrthogonal ? scaleY : scaleX;
+            const effSy = isOrthogonal ? scaleX : scaleY;
+
+            const origCropBox = page.getCropBox();
+            const origMediaBox = page.getMediaBox();
+
+            page.scale(effSx, effSy);
+
+            if (origCropBox) {
+              page.setCropBox(
+                origCropBox.x * effSx,
+                origCropBox.y * effSy,
+                origCropBox.width * effSx,
+                origCropBox.height * effSy,
+              );
+            }
+            if (origMediaBox && (origMediaBox.x !== 0 || origMediaBox.y !== 0)) {
+              page.setMediaBox(
+                origMediaBox.x * effSx,
+                origMediaBox.y * effSy,
+                origMediaBox.width * effSx,
+                origMediaBox.height * effSy,
+              );
+            }
+            const bleedBox = page.getBleedBox();
+            if (bleedBox) {
+              page.setBleedBox(
+                bleedBox.x * effSx,
+                bleedBox.y * effSy,
+                bleedBox.width * effSx,
+                bleedBox.height * effSy,
+              );
+            }
+            const trimBox = page.getTrimBox();
+            if (trimBox) {
+              page.setTrimBox(
+                trimBox.x * effSx,
+                trimBox.y * effSy,
+                trimBox.width * effSx,
+                trimBox.height * effSy,
+              );
+            }
+            const artBox = page.getArtBox();
+            if (artBox) {
+              page.setArtBox(
+                artBox.x * effSx,
+                artBox.y * effSy,
+                artBox.width * effSx,
+                artBox.height * effSy,
+              );
+            }
           }
         }
       }
@@ -873,16 +992,23 @@ export class PdfDocument {
           const cropW = cropBox.width;
           const cropH = cropBox.height;
 
+          const transform = getTransform(pageIndex);
+          const sx = transform?.scaleX ?? 1;
+          const sy = transform?.scaleY ?? 1;
+          const sMin = Math.min(sx, sy);
+
           const pageRot = ((page.getRotation().angle % 360) + 360) % 360 as 0 | 90 | 180 | 270;
           const elemRot = (((Math.round((field.rotation ?? 0) / 90) * 90) % 360) + 360) % 360;
           const effectiveRot = (elemRot === pageRot || elemRot === 0
             ? pageRot
             : (pageRot + elemRot) % 360) as 0 | 90 | 180 | 270;
 
-          const vx = field.x;
-          const vy = field.y;
-          const vw = field.width;
-          const vh = field.height;
+          const vx = field.x * sx;
+          const vy = field.y * sy;
+          const vw = field.width * sx;
+          const vh = field.height * sy;
+          const scaledFontSize = field.fontSize ? Math.max(4, Math.round(field.fontSize * sMin * 10) / 10) : undefined;
+          const scaledBorderWidth = field.borderWidth !== undefined ? Math.max(0.5, Math.round(field.borderWidth * sMin * 10) / 10) : undefined;
 
           let targetX = cropX + vx;
           let targetY = cropY + cropH - vy - vh;
@@ -934,14 +1060,14 @@ export class PdfDocument {
                   mk.setBorderColor([rgb.r / 255, rgb.g / 255, rgb.b / 255]);
                 }
               }
-              if (f.borderWidth !== undefined || f.borderStyle) {
+              if (scaledBorderWidth !== undefined || f.borderStyle) {
                 const bs = w.getOrCreateBorderStyle();
-                if (f.borderWidth !== undefined) {
-                  bs.setWidth(f.borderWidth);
+                if (scaledBorderWidth !== undefined) {
+                  bs.setWidth(scaledBorderWidth);
                 }
                 if (f.borderStyle === 'dashed') {
                   bs.dict.set(PDFName.of('S'), PDFName.of('D'));
-                  bs.dict.set(PDFName.of('D'), pdfDoc.context.obj([3, 3]));
+                  bs.dict.set(PDFName.of('D'), pdfDoc.context.obj([3 * sMin, 3 * sMin]));
                 } else if (f.borderStyle === 'solid') {
                   bs.dict.set(PDFName.of('S'), PDFName.of('S'));
                 }
@@ -961,7 +1087,7 @@ export class PdfDocument {
               rotate: fieldRotationDegrees,
             });
             setTooltip(textField.acroField);
-            if (field.fontSize) textField.setFontSize(field.fontSize);
+            if (scaledFontSize) textField.setFontSize(scaledFontSize);
             if (field.readOnly) textField.enableReadOnly();
             if (field.required) textField.enableRequired();
             if (field.multiline) textField.enableMultiline();
@@ -978,8 +1104,8 @@ export class PdfDocument {
             const baseName = resolveAcroFieldName(field);
             const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
             const checkbox = form.createCheckBox(fieldName);
-            const isComposite = vw > 28 && Boolean(field.label);
-            const widgetSize = isComposite ? Math.min(vh, 16) : Math.min(vw, vh);
+            const isComposite = vw > 28 * sx && Boolean(field.label);
+            const widgetSize = isComposite ? Math.min(vh, 16 * sy) : Math.min(vw, vh);
             const widgetW = isComposite ? widgetSize : vw;
             const widgetH = isComposite ? widgetSize : vh;
             let widgetX = targetX;
@@ -1011,8 +1137,9 @@ export class PdfDocument {
             applyWidgetStyling(checkbox.acroField, field);
 
             if (isComposite && pageRot === 0 && field.label) {
-              const fontSize = field.fontSize && field.fontSize > 0 ? Math.min(field.fontSize, 13) : 11;
-              const textX = targetX + widgetSize + 6;
+              const baseFs = field.fontSize && field.fontSize > 0 ? Math.min(field.fontSize, 13) : 11;
+              const fontSize = baseFs * sMin;
+              const textX = targetX + widgetSize + 6 * sx;
               const textY = targetY + (vh - fontSize) / 2;
               try {
                 const font = await pdfDoc.embedStandardFont(StandardFonts.Helvetica);
@@ -1061,8 +1188,8 @@ export class PdfDocument {
               optCounter++;
             }
 
-            const isComposite = vw > 28 && Boolean(field.label);
-            const widgetSize = isComposite ? Math.min(vh, 16) : Math.min(vw, vh);
+            const isComposite = vw > 28 * sx && Boolean(field.label);
+            const widgetSize = isComposite ? Math.min(vh, 16 * sy) : Math.min(vw, vh);
             const widgetW = isComposite ? widgetSize : vw;
             const widgetH = isComposite ? widgetSize : vh;
             let widgetX = targetX;
@@ -1095,8 +1222,9 @@ export class PdfDocument {
             applyWidgetStyling(radioGroup.acroField, field);
 
             if (isComposite && pageRot === 0 && field.label) {
-              const fontSize = field.fontSize && field.fontSize > 0 ? Math.min(field.fontSize, 13) : 11;
-              const textX = targetX + widgetSize + 6;
+              const baseFs = field.fontSize && field.fontSize > 0 ? Math.min(field.fontSize, 13) : 11;
+              const fontSize = baseFs * sMin;
+              const textX = targetX + widgetSize + 6 * sx;
               const textY = targetY + (vh - fontSize) / 2;
               try {
                 const font = await pdfDoc.embedStandardFont(StandardFonts.Helvetica);
@@ -1128,7 +1256,7 @@ export class PdfDocument {
               rotate: fieldRotationDegrees,
             });
             setTooltip(dropdown.acroField);
-            if (field.fontSize) dropdown.setFontSize(field.fontSize);
+            if (scaledFontSize) dropdown.setFontSize(scaledFontSize);
             if (field.readOnly) dropdown.enableReadOnly();
             if (field.required) dropdown.enableRequired();
             if (field.options && field.options.length > 0) {
@@ -1162,11 +1290,27 @@ export class PdfDocument {
             const baseName = resolveAcroFieldName(field);
             const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
 
+            let sigRect: [number, number, number, number];
+            switch (pageRot) {
+              case 0:
+                sigRect = [cropX + vx, cropY + cropH - vy - vh, cropX + vx + vw, cropY + cropH - vy];
+                break;
+              case 90:
+                sigRect = [cropX + vy, cropY + vx, cropX + vy + vh, cropY + vx + vw];
+                break;
+              case 180:
+                sigRect = [cropX + cropW - vx - vw, cropY + vy, cropX + cropW - vx, cropY + vy + vh];
+                break;
+              case 270:
+                sigRect = [cropX + cropW - vy - vh, cropY + cropH - vx - vw, cropX + cropW - vy, cropY + cropH - vx];
+                break;
+            }
+
             const widgetDict = pdfDoc.context.obj({
               Type: PDFName.of('Annot'),
               Subtype: PDFName.of('Widget'),
               FT: PDFName.of('Sig'),
-              Rect: [targetX, targetY, targetX + vw, targetY + vh],
+              Rect: sigRect,
               T: PDFString.of(fieldName),
               F: 4,
               P: page.ref,
@@ -1199,12 +1343,12 @@ export class PdfDocument {
                     const embeddedImg = field.value.includes('image/jpeg') || field.value.includes('image/jpg')
                       ? await pdfDoc.embedJpg(imgBytes)
                       : await pdfDoc.embedPng(imgBytes);
-                    const scale = Math.min((vw - 8) / embeddedImg.width, (vh - 8) / embeddedImg.height);
+                    const scale = Math.min((vw - 8 * sx) / embeddedImg.width, (vh - 8 * sy) / embeddedImg.height);
                     const drawW = embeddedImg.width * scale;
                     const drawH = embeddedImg.height * scale;
                     page.drawImage(embeddedImg, {
-                      x: targetX + (vw - drawW) / 2,
-                      y: targetY + (vh - drawH) / 2,
+                      x: sigRect[0] + (sigRect[2] - sigRect[0] - drawW) / 2,
+                      y: sigRect[1] + (sigRect[3] - sigRect[1] - drawH) / 2,
                       width: drawW,
                       height: drawH,
                     });
@@ -1215,10 +1359,11 @@ export class PdfDocument {
               } else {
                 try {
                   const font = await pdfDoc.embedStandardFont(StandardFonts.TimesRomanItalic);
-                  const fontSize = Math.max(10, Math.min(vh * 0.45, 18));
+                  const baseFs = Math.max(10, Math.min(vh * 0.45, 18 * sMin));
+                  const fontSize = baseFs;
                   page.drawText(field.value, {
-                    x: targetX + 8,
-                    y: targetY + (vh - fontSize) / 2,
+                    x: sigRect[0] + 8 * sx,
+                    y: sigRect[1] + (sigRect[3] - sigRect[1] - fontSize) / 2,
                     size: fontSize,
                     font,
                     color: rgb(0.1, 0.15, 0.3),
@@ -1240,7 +1385,7 @@ export class PdfDocument {
               rotate: fieldRotationDegrees,
             });
             setTooltip(textField.acroField);
-            if (field.fontSize) textField.setFontSize(field.fontSize);
+            if (scaledFontSize) textField.setFontSize(scaledFontSize);
             if (field.readOnly) textField.enableReadOnly();
             if (field.required) textField.enableRequired();
             if (field.value !== undefined && field.value !== '') {
@@ -1253,12 +1398,142 @@ export class PdfDocument {
         }
       }
 
+      // Apply pending file attachments conforming to ISO 32000-2 Associated Files
+      if (this.pendingAttachments.length > 0) {
+        for (const att of this.pendingAttachments) {
+          try {
+            await pdfDoc.attach(att.bytes, att.fileName, {
+              mimeType: att.mimeType,
+              description: att.description,
+            });
+          } catch (err) {
+            console.warn('Failed to embed file attachment into PDF:', err);
+          }
+        }
+      }
+
+      // Apply pending interactive Link annotations conforming to ISO 32000
+      if (this.pendingLinkAnnotationsByPage.size > 0) {
+        for (const [pageIndex, links] of this.pendingLinkAnnotationsByPage.entries()) {
+          if (pageIndex >= pdfDoc.getPageCount()) continue;
+          const page = pdfDoc.getPage(pageIndex);
+          const cropBox = page.getCropBox() || page.getMediaBox();
+          const cropX = cropBox.x ?? 0;
+          const cropY = cropBox.y ?? 0;
+          const cropW = cropBox.width;
+          const cropH = cropBox.height;
+          const pageRot = (((page.getRotation().angle % 360) + 360) % 360) as 0 | 90 | 180 | 270;
+
+          const transform = getTransform(pageIndex);
+          const sx = transform?.scaleX ?? 1;
+          const sy = transform?.scaleY ?? 1;
+
+          for (const link of links) {
+            const vx = link.x * sx;
+            const vy = link.y * sy;
+            const vw = link.width * sx;
+            const vh = link.height * sy;
+
+            let rect: [number, number, number, number];
+            switch (pageRot) {
+              case 0:
+                rect = [
+                  cropX + vx,
+                  cropY + cropH - vy - vh,
+                  cropX + vx + vw,
+                  cropY + cropH - vy,
+                ];
+                break;
+              case 90:
+                rect = [
+                  cropX + vy,
+                  cropY + vx,
+                  cropX + vy + vh,
+                  cropY + vx + vw,
+                ];
+                break;
+              case 180:
+                rect = [
+                  cropX + cropW - vx - vw,
+                  cropY + vy,
+                  cropX + cropW - vx,
+                  cropY + vy + vh,
+                ];
+                break;
+              case 270:
+                rect = [
+                  cropX + cropW - vy - vh,
+                  cropY + cropH - vx - vw,
+                  cropX + cropW - vy,
+                  cropY + cropH - vx,
+                ];
+                break;
+            }
+
+            try {
+              let actionDict: { Type: string; S: string; URI?: PDFString; F?: PDFString } | null = null;
+              const uriStr = link.uri?.trim();
+
+              if (uriStr && /^https?:\/\//i.test(uriStr)) {
+                actionDict = {
+                  Type: 'Action',
+                  S: 'URI',
+                  URI: PDFString.of(uriStr),
+                };
+              } else if (uriStr && /^(mailto|tel):/i.test(uriStr)) {
+                actionDict = {
+                  Type: 'Action',
+                  S: 'URI',
+                  URI: PDFString.of(uriStr),
+                };
+              } else if (link.fileName) {
+                // ISO 32000-1 Clause 12.6.4.5 Launch Action for embedded attachments
+                actionDict = {
+                  Type: 'Action',
+                  S: 'Launch',
+                  F: PDFString.of(link.fileName),
+                };
+              } else if (uriStr && !uriStr.startsWith('blob:')) {
+                actionDict = {
+                  Type: 'Action',
+                  S: 'URI',
+                  URI: PDFString.of(uriStr),
+                };
+              }
+
+              if (actionDict) {
+                const annot = pdfDoc.context.obj({
+                  Type: 'Annot',
+                  Subtype: 'Link',
+                  Rect: rect,
+                  F: 4, // Print flag per ISO 32000 Table 165
+                  H: 'I', // Invert highlight on click per ISO 32000 Table 173
+                  Border: [0, 0, 0],
+                  BS: {
+                    Type: 'Border',
+                    W: 0,
+                    S: 'S',
+                  },
+                  P: page.ref,
+                  A: actionDict,
+                });
+                page.node.addAnnot(pdfDoc.context.register(annot));
+              }
+            } catch (err) {
+              console.warn('Failed to add Link annotation:', err);
+            }
+          }
+        }
+      }
+
       pdfiumBytes = await pdfDoc.save({ useObjectStreams: false });
     }
 
     this._cachedAcroFormFieldSpans = null;
     this._acroFormInitPromise = null;
     this.pendingAcroFormFieldsByPage.clear();
+    this.pendingLinkAnnotationsByPage.clear();
+    this.pendingAttachments = [];
     this.removedAcroFormFieldNames.clear();
     return pdfiumBytes;
   }
@@ -1424,6 +1699,25 @@ export class PdfDocument {
         const pageMap = new Map<unknown, number>();
         pages.forEach((p, idx) => pageMap.set(p.ref, idx));
 
+        let annotToPageMap: Map<unknown, number> | null = null;
+        function getAnnotToPageMap(): Map<unknown, number> {
+          if (!annotToPageMap) {
+            annotToPageMap = new Map<unknown, number>();
+            for (let p = 0; p < pages.length; p++) {
+              const annots = pages[p].node.Annots();
+              if (annots) {
+                for (let a = 0; a < annots.size(); a++) {
+                  const entry = annots.get(a);
+                  const lookedUp = annots.lookup(a);
+                  if (entry) annotToPageMap.set(entry, p);
+                  if (lookedUp) annotToPageMap.set(lookedUp, p);
+                }
+              }
+            }
+          }
+          return annotToPageMap;
+        }
+
         const byPage = new Map<number, EditableFormFieldSpan[]>();
 
         for (const field of fields) {
@@ -1466,18 +1760,12 @@ export class PdfDocument {
             const pRef = widget.P();
             let pageIndex = pRef ? pageMap.get(pRef) : undefined;
             if (pageIndex === undefined) {
-              for (let p = 0; p < pages.length; p++) {
-                const annots = pages[p].node.Annots();
-                if (annots) {
-                  for (let a = 0; a < annots.size(); a++) {
-                    const widgetRef = (widget as { ref?: unknown }).ref ?? pdfDoc.context.getObjectRef(widget.dict);
-                    if (annots.get(a) === widget.dict || annots.lookup(a) === widget.dict || (widgetRef !== undefined && annots.get(a) === widgetRef)) {
-                      pageIndex = p;
-                      break;
-                    }
-                  }
-                }
-                if (pageIndex !== undefined) break;
+              const map = getAnnotToPageMap();
+              const widgetRef = (widget as { ref?: unknown }).ref ?? pdfDoc.context.getObjectRef(widget.dict);
+              if (widgetRef && map.has(widgetRef)) {
+                pageIndex = map.get(widgetRef);
+              } else if (map.has(widget.dict)) {
+                pageIndex = map.get(widget.dict);
               }
             }
 
@@ -1671,16 +1959,17 @@ export class PdfDocument {
     left: number,
     top: number
   ): void {
+    const { baselineY, ...rest } = targetSpan;
     this.replaceTextSpan(pageIndex, targetSpan, {
-      ...targetSpan,
+      ...rest,
       left,
       top,
     });
   }
 
-  public deleteTextSpan(pageIndex: number, targetSpan: EditableTextSpan): void {
+  public deleteTextSpan(pageIndex: number, targetSpan: EditableTextSpan, options: { reflowDownstream?: boolean } = {}): void {
     const page = this.getPage(pageIndex);
-    page.deleteTextSpan(targetSpan);
+    page.deleteTextSpan(targetSpan, options);
     this.invalidatePage(pageIndex);
   }
 
@@ -1760,10 +2049,52 @@ export class PdfDocument {
     if (cached) {
       return cached;
     }
+
+    if (this.engine.isReady) {
+      try {
+        const mod = this.engine.getModule();
+        if (typeof mod.FPDF_GetPageSizeByIndex === 'function') {
+          const scratch = this.getDimScratch();
+          if (scratch) {
+            const docHandle = this.getDocHandle();
+            const widthPtr = scratch;
+            const heightPtr = scratch + 8;
+            const ok = mod.FPDF_GetPageSizeByIndex(docHandle, pageIndex, widthPtr, heightPtr);
+            if (ok) {
+              const widthPts = new Float64Array(mod.pdfium.HEAPF64.buffer, widthPtr, 1)[0];
+              const heightPts = new Float64Array(mod.pdfium.HEAPF64.buffer, heightPtr, 1)[0];
+              if (widthPts > 0 && heightPts > 0) {
+                const dims = { widthPts, heightPts };
+                this._pageDimensionsCache.set(pageIndex, dims);
+                return dims;
+              }
+            }
+          }
+        }
+      } catch {
+        // Safe fallback to loading page directly
+      }
+    }
+
     const page = this.getPage(pageIndex);
     const dims = page.getDimensions();
     this._pageDimensionsCache.set(pageIndex, dims);
     return dims;
+  }
+
+  /**
+   * Retrieves dimensions for all pages in the document.
+   * Leverages fast zero-load dimension resolution.
+   *
+   * @return Array of page dimensions indexed by page number.
+   */
+  public getAllPageDimensions(): Array<{ widthPts: number; heightPts: number }> {
+    const count = this.getPageCount();
+    const result: Array<{ widthPts: number; heightPts: number }> = new Array(count);
+    for (let i = 0; i < count; i++) {
+      result[i] = this.getPageDimensions(i);
+    }
+    return result;
   }
 
   /**
