@@ -125,6 +125,16 @@ export class RotatePageCommand implements Command<'rotate-page'> {
       }
     }
     
+    const fileId = ctx.editorStore.activeWorkspaceFileId;
+    if (fileId) {
+      const savedBytes = ctx.service.document.save();
+      const newBuffer = savedBytes.buffer.slice(
+        savedBytes.byteOffset,
+        savedBytes.byteOffset + savedBytes.byteLength,
+      ) as ArrayBuffer;
+      setFileBuffer(fileId, newBuffer);
+    }
+
     ctx.editorStore.incrementPageVersion(this.pageIndex);
     ctx.editorStore.incrementRenderVersion();
   }
@@ -187,6 +197,16 @@ export class RotatePageCommand implements Command<'rotate-page'> {
       }
     }
     
+    const fileId = ctx.editorStore.activeWorkspaceFileId;
+    if (fileId) {
+      const savedBytes = ctx.service.document.save();
+      const newBuffer = savedBytes.buffer.slice(
+        savedBytes.byteOffset,
+        savedBytes.byteOffset + savedBytes.byteLength,
+      ) as ArrayBuffer;
+      setFileBuffer(fileId, newBuffer);
+    }
+
     ctx.editorStore.incrementPageVersion(this.pageIndex);
     ctx.editorStore.incrementRenderVersion();
   }
