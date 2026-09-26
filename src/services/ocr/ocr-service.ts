@@ -108,16 +108,27 @@ export class OcrService {
   }
 
   /**
-   * Evaluates all pages in a document and detects which pages are scanned image documents.
+   * Evaluates pages in a document and detects which pages are scanned image documents.
+   * Supports limiting detection to a maximum page count or specific page indices for huge documents.
    *
    * @param doc The PdfDocument instance.
+   * @param options Optional configuration specifying maximum pages to inspect or explicit page indices.
    * @return Map of zero-based page indices to their detection status.
    */
-  public detectDocumentScannedPages(doc: PdfDocument): Map<number, ScannedPageDetection> {
+  public detectDocumentScannedPages(
+    doc: PdfDocument,
+    options?: { maxPages?: number; pageIndices?: number[] }
+  ): Map<number, ScannedPageDetection> {
     const results = new Map<number, ScannedPageDetection>();
     const pageCount = doc.getPageCount();
+    const indicesToScan: number[] = options?.pageIndices ?? (
+      options?.maxPages !== undefined
+        ? Array.from({ length: Math.min(pageCount, Math.max(0, options.maxPages)) }, (_, i) => i)
+        : Array.from({ length: pageCount }, (_, i) => i)
+    );
 
-    for (let i = 0; i < pageCount; i++) {
+    for (const i of indicesToScan) {
+      if (i < 0 || i >= pageCount) continue;
       try {
         const page = doc.getPage(i);
         const detection = this.isPageScanned(page);
