@@ -132,7 +132,8 @@ export class CanvasStore {
             this.dropPreview.width === preview.width &&
             this.dropPreview.height === preview.height &&
             this.dropPreview.kind === preview.kind &&
-            this.dropPreview.label === preview.label
+            this.dropPreview.label === preview.label &&
+            this.dropPreview.payload === preview.payload
         ) {
             return;
         }
