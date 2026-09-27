@@ -2473,13 +2473,21 @@ export class EditorActions {
 
   // -- Page Crop operations --
 
-  startCropMode(pageIndex?: number, unit: CropUnit = 'pt', scope: CropScope = 'current'): void {
-    if (!this.store.isDocumentLoaded) return;
+  async startCropMode(pageIndex?: number, unit: CropUnit = 'pt', scope: CropScope = 'current'): Promise<void> {
+    if (!this.store.isDocumentLoaded || this.store.isReadOnly || this.store.canMutateDocument === false) return;
+    const targetIdx = pageIndex ?? this.store.currentPageIndex;
+
+    const hasTransforms = Object.values(this.store.pageTransforms).some(
+      (t) => t && (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1),
+    );
+    if (hasTransforms) {
+      await this.bakePageTransforms();
+    }
+
     this.clearSelection(true);
     if (this.canvasStore) {
       this.canvasStore.selectElement(null);
     }
-    const targetIdx = pageIndex ?? this.store.currentPageIndex;
     this.store.activeCrop = {
       pageIndex: targetIdx,
       margins: { top: 0, right: 0, bottom: 0, left: 0 },
@@ -2554,8 +2562,7 @@ export class EditorActions {
 
     await this.executeDocumentMutation('Crop Page', pageIndex, async () => {
       const { cropPages } = await import('../services/pdf/operations/crop-ops');
-      const activeBuffer = getFileBuffer(fileId);
-      const buffer = activeBuffer ?? this.service.document.save();
+      const buffer = await this.service.document.saveAsync(this.store.pageTransforms);
       const croppedBytes = await cropPages(buffer, {
         pageIndices: targetIndices,
         margins,
@@ -2567,6 +2574,7 @@ export class EditorActions {
       ) as ArrayBuffer;
 
       this.service.loadDocumentFromBuffer(croppedBuffer);
+      this.store.pageTransforms = {};
 
       // Adjust canvas elements on cropped pages by subtracting top/left margins
       if (this.canvasStore && (margins.left !== 0 || margins.top !== 0)) {
@@ -2633,8 +2641,7 @@ export class EditorActions {
 
     await this.executeDocumentMutation('Reset Page Crop', pageIndex, async () => {
       const { resetCropPages } = await import('../services/pdf/operations/crop-ops');
-      const activeBuffer = getFileBuffer(fileId);
-      const buffer = activeBuffer ?? this.service.document.save();
+      const buffer = await this.service.document.saveAsync(this.store.pageTransforms);
       const resetBytes = await resetCropPages(buffer, targetIndices);
 
       const resetBuffer = resetBytes.buffer.slice(
@@ -2643,6 +2650,7 @@ export class EditorActions {
       ) as ArrayBuffer;
 
       this.service.loadDocumentFromBuffer(resetBuffer);
+      this.store.pageTransforms = {};
 
       // Restore canvas element coordinates by adding back the previous crop margins
       if (this.canvasStore && pageCropOffsets.size > 0) {
@@ -2707,8 +2715,7 @@ export class EditorActions {
 
     await this.executeDocumentMutation('Scale Page', pageIndex, async () => {
       const { scalePages, transformCanvasElementsForScale } = await import('../services/pdf/operations/scale-ops');
-      const activeBuffer = getFileBuffer(fileId);
-      const buffer = activeBuffer ?? this.service.document.save();
+      const buffer = await this.service.document.saveAsync(this.store.pageTransforms);
       const scaledBytes = await scalePages(buffer, fullScaleOptions);
 
       const scaledBuffer = scaledBytes.buffer.slice(
@@ -2724,6 +2731,7 @@ export class EditorActions {
       }
 
       this.service.loadDocumentFromBuffer(scaledBuffer);
+      this.store.pageTransforms = {};
 
       // Re-project canvas overlay elements to match scaled or margin-padded geometry
       if (this.canvasStore && this.canvasStore.elements.length > 0) {
@@ -2774,13 +2782,17 @@ export class EditorActions {
     indexMap: (oldIndex: number) => number,
     duplicateCopies?: Array<{ sourceIndex: number; targetIndex: number }>,
   ): void {
+    const currentFile = this.store.activeWorkspaceFileId
+      ? this.service.getFile(this.store.activeWorkspaceFileId)
+      : undefined;
+
     if (this.canvasStore) {
       // Remap canvas elements, removing those on deleted pages.
       const remappedElements: CanvasElement[] = [];
       for (const el of this.canvasStore.elements) {
         const newIndex = indexMap(el.pageIndex);
         if (newIndex >= 0) {
-          remappedElements.push(newIndex === el.pageIndex ? el : { ...el, pageIndex: newIndex });
+          remappedElements.push(newIndex === el.pageIndex ? el : remapElementPageIndex(el, newIndex));
         }
       }
 
@@ -2789,15 +2801,23 @@ export class EditorActions {
         for (const copy of duplicateCopies) {
           const sourceElements = this.canvasStore.elements.filter(el => el.pageIndex === copy.sourceIndex);
           for (const el of sourceElements) {
-            remappedElements.push({
-              ...safeClone(el),
-              id: this.canvasStore.generateId(),
-              pageIndex: copy.targetIndex,
-            });
+            remappedElements.push(remapElementPageIndex(el, copy.targetIndex, this.canvasStore.generateId()));
           }
         }
       }
       this.canvasStore.elements = remappedElements;
+      if (currentFile) {
+        currentFile.canvasElements = safeClone(remappedElements);
+      }
+    } else if (currentFile?.canvasElements) {
+      const remappedElements: CanvasElement[] = [];
+      for (const el of currentFile.canvasElements) {
+        const newIndex = indexMap(el.pageIndex);
+        if (newIndex >= 0) {
+          remappedElements.push(newIndex === el.pageIndex ? el : remapElementPageIndex(el, newIndex));
+        }
+      }
+      currentFile.canvasElements = remappedElements;
     }
 
     // Remap page transforms.
@@ -2834,10 +2854,29 @@ export class EditorActions {
       }
     }
     this.store.pageVersions = newVersions;
+
+    // Remap scanned pages.
+    if (this.store.scannedPages && this.store.scannedPages.size > 0) {
+      const newScannedPages = new Set<number>();
+      for (const oldPage of this.store.scannedPages) {
+        const newIndex = indexMap(oldPage);
+        if (newIndex >= 0) {
+          newScannedPages.add(newIndex);
+        }
+      }
+      if (duplicateCopies && duplicateCopies.length > 0) {
+        for (const copy of duplicateCopies) {
+          if (this.store.scannedPages.has(copy.sourceIndex)) {
+            newScannedPages.add(copy.targetIndex);
+          }
+        }
+      }
+      this.store.scannedPages = newScannedPages;
+    }
   }
 
   async deletePage(index: number): Promise<void> {
-    if (!this.store.isDocumentLoaded || this.store.pageCount <= 1) return;
+    if (!this.store.isDocumentLoaded || this.store.pageCount <= 1 || this.store.isReadOnly || this.store.canMutateDocument === false) return;
     const indices = this.getTargetPageIndices(index);
     const deletedSet = new Set(indices);
     const indexMap = (oldIdx: number) => {
@@ -2861,7 +2900,7 @@ export class EditorActions {
   }
 
   async addBlankPage(afterIndex: number): Promise<void> {
-    if (!this.store.isDocumentLoaded) return;
+    if (!this.store.isDocumentLoaded || this.store.isReadOnly || this.store.canMutateDocument === false) return;
     const indices = this.getTargetPageIndices(afterIndex);
     const sortedIndices = [...indices].sort((a, b) => a - b);
     const insertAfter = sortedIndices[sortedIndices.length - 1];
@@ -2876,7 +2915,7 @@ export class EditorActions {
   }
 
   async duplicatePage(index: number | number[]): Promise<void> {
-    if (!this.store.isDocumentLoaded) return;
+    if (!this.store.isDocumentLoaded || this.store.isReadOnly || this.store.canMutateDocument === false) return;
     const initialIndex = Array.isArray(index) ? index[0] : index;
     const rawIndices = Array.isArray(index) ? index : this.getTargetPageIndices(initialIndex);
     const sortedIndices = Array.from(new Set(rawIndices)).sort((a, b) => b - a);
@@ -2914,7 +2953,7 @@ export class EditorActions {
 
 
   async reorderPages(fromIndices: number[], toIndex: number): Promise<void> {
-    if (!this.store.isDocumentLoaded || fromIndices.length === 0) return;
+    if (!this.store.isDocumentLoaded || fromIndices.length === 0 || this.store.isReadOnly || this.store.canReorderPages === false) return;
 
     const indexMap = (old: number) => {
       if (fromIndices.includes(old)) {
@@ -2963,25 +3002,34 @@ export class EditorActions {
   }
 
   async mergePdfsFromFiles(files: File[], atIndex: number): Promise<void> {
+    if (this.store.isReadOnly || this.store.canMergeFiles === false) return;
     try {
-      await this.executeDocumentMutation('Merge Files', atIndex, async () => {
-        let currentIndex = atIndex;
-        for (const file of files) {
-          const buf = await file.arrayBuffer();
-          const previousPageCount = this.store.pageCount;
-          if (isImageFile(buf, file.name) || file.type.startsWith('image/')) {
-            await this.service.document.importImageAsPage(
-              buf,
-              file.type || inferImageMimeType(file.name),
-              currentIndex,
-            );
-          } else {
-            this.service.document.merge(buf, currentIndex);
+      let totalPagesAdded = 0;
+      await this.executeDocumentMutation(
+        'Merge Files',
+        atIndex,
+        async () => {
+          let currentIndex = atIndex;
+          for (const file of files) {
+            const buf = await file.arrayBuffer();
+            const previousPageCount = this.store.pageCount;
+            if (isImageFile(buf, file.name) || file.type.startsWith('image/')) {
+              await this.service.document.importImageAsPage(
+                buf,
+                file.type || inferImageMimeType(file.name),
+                currentIndex,
+              );
+            } else {
+              this.service.document.merge(buf, currentIndex);
+            }
+            this.store.pageCount = this.service.document.getPageCount();
+            const added = this.store.pageCount - previousPageCount;
+            totalPagesAdded += added;
+            currentIndex += added;
           }
-          this.store.pageCount = this.service.document.getPageCount();
-          currentIndex += (this.store.pageCount - previousPageCount);
-        }
-      });
+        },
+        (old: number) => (old >= atIndex ? old + totalPagesAdded : old),
+      );
     } catch (err) {
       console.error('Failed to merge files:', err);
     }
@@ -2989,18 +3037,25 @@ export class EditorActions {
 
   async importImagesFromFiles(files: File[], atIndex: number): Promise<void> {
     try {
-      await this.executeDocumentMutation('Import Image Page', atIndex, async () => {
-        let currentIndex = atIndex;
-        for (const file of files) {
-          const buf = await file.arrayBuffer();
-          await this.service.document.importImageAsPage(
-            buf,
-            file.type || inferImageMimeType(file.name),
-            currentIndex,
-          );
-          currentIndex++;
-        }
-      });
+      let totalPagesAdded = 0;
+      await this.executeDocumentMutation(
+        'Import Image Page',
+        atIndex,
+        async () => {
+          let currentIndex = atIndex;
+          for (const file of files) {
+            const buf = await file.arrayBuffer();
+            await this.service.document.importImageAsPage(
+              buf,
+              file.type || inferImageMimeType(file.name),
+              currentIndex,
+            );
+            currentIndex++;
+            totalPagesAdded++;
+          }
+        },
+        (old: number) => (old >= atIndex ? old + totalPagesAdded : old),
+      );
     } catch (err) {
       console.error('Failed to import images as pages:', err);
     }
@@ -3010,25 +3065,84 @@ export class EditorActions {
     indices: number[],
     mode: 'split' | 'extract',
     rangeString: string,
-    options?: { autoDownload?: boolean }
+    options?: { autoDownload?: boolean; targetFileIndex?: number }
   ): Promise<{ splitBytes: Uint8Array; newFileName: string } | void> {
-    if (!this.store.isDocumentLoaded) return;
+    if (!this.store.isDocumentLoaded || this.store.isReadOnly || this.store.canExtractPages === false) return;
     
     try {
-      const splitBytes = this.service.document.split(indices);
+      this.commitActiveEdits();
+      const sortedIndices = Array.from(new Set(indices)).sort((a, b) => a - b);
+      if (sortedIndices.length === 0) return;
+      const extractedSet = new Set(sortedIndices);
+
+      // Partition and re-index canvas elements
+      const allCurrentElements = this.canvasStore ? safeClone(this.canvasStore.elements) : [];
+      const extractedElements: CanvasElement[] = [];
+      const remainingElements: CanvasElement[] = [];
+
+      for (const el of allCurrentElements) {
+        if (extractedSet.has(el.pageIndex)) {
+          const newPageIndex = sortedIndices.indexOf(el.pageIndex);
+          extractedElements.push(remapElementPageIndex(el, newPageIndex, crypto.randomUUID()));
+        } else {
+          let shift = 0;
+          for (const d of sortedIndices) {
+            if (d < el.pageIndex) shift++;
+          }
+          const remainingPageIndex = el.pageIndex - shift;
+          remainingElements.push(remapElementPageIndex(el, remainingPageIndex));
+        }
+      }
+
+      // Partition and re-index page transforms
+      const extractedTransforms: Record<number, PageTransform> = {};
+      const remainingTransforms: Record<number, PageTransform> = {};
+
+      for (const [keyStr, transform] of Object.entries(this.store.pageTransforms)) {
+        const pageIdx = parseInt(keyStr, 10);
+        if (isNaN(pageIdx) || !transform) continue;
+        if (extractedSet.has(pageIdx)) {
+          const newPageIndex = sortedIndices.indexOf(pageIdx);
+          extractedTransforms[newPageIndex] = safeClone(transform);
+        } else {
+          let shift = 0;
+          for (const d of sortedIndices) {
+            if (d < pageIdx) shift++;
+          }
+          remainingTransforms[pageIdx - shift] = safeClone(transform);
+        }
+      }
+
+      const splitBytes = this.service.document.split(sortedIndices);
       const splitBuffer = splitBytes.buffer.slice(splitBytes.byteOffset, splitBytes.byteOffset + splitBytes.byteLength) as ArrayBuffer;
       
       if (mode === 'split') {
-        await this.executeDocumentMutation('Split Document', this.store.currentPageIndex, () => {
-          const sortedIndices = [...indices].sort((a, b) => b - a);
-          for (const idx of sortedIndices) {
+        const deletedSet = new Set(sortedIndices);
+        const indexMap = (oldIdx: number) => {
+          if (deletedSet.has(oldIdx)) return -1;
+          let shift = 0;
+          for (const d of deletedSet) {
+            if (d < oldIdx) shift++;
+          }
+          return oldIdx - shift;
+        };
+        const targetPage = Math.max(0, Math.min(this.store.currentPageIndex, this.store.pageCount - sortedIndices.length - 1));
+
+        await this.executeDocumentMutation('Split Document', targetPage, () => {
+          const descIndices = [...sortedIndices].sort((a, b) => b - a);
+          for (const idx of descIndices) {
             if (this.service.document.getPageCount() > 1) {
               this.service.document.deletePage(idx);
             }
           }
           this.store.pageCount = this.service.document.getPageCount();
           this.store.currentPageIndex = Math.max(0, Math.min(this.store.currentPageIndex, this.store.pageCount - 1));
-        });
+        }, indexMap);
+
+        if (this.canvasStore) {
+          this.canvasStore.elements = remainingElements;
+        }
+        this.store.pageTransforms = remainingTransforms;
         this.refreshDocument();
       }
       
@@ -3059,8 +3173,50 @@ export class EditorActions {
         this.isAddingToWorkspace = wasAdding;
       }
 
+      const activeFileId = this.store.activeWorkspaceFileId;
+      const newFile = activeFileId ? this.service.getFile(activeFileId) : undefined;
+      if (newFile) {
+        newFile.canvasElements = safeClone(extractedElements);
+        newFile.pageTransforms = safeClone(extractedTransforms);
+      }
+      if (this.canvasStore) {
+        this.canvasStore.elements = safeClone(extractedElements);
+      }
+      this.store.pageTransforms = safeClone(extractedTransforms);
+      this.store.incrementRenderVersion();
+
+      if (options?.targetFileIndex !== undefined) {
+        const newFileIndex = this.store.workspaceFiles.length - 1;
+        const clampedTarget = Math.max(0, Math.min(options.targetFileIndex, newFileIndex));
+        if (newFileIndex !== clampedTarget && clampedTarget >= 0) {
+          this.service.reorderFiles([newFileIndex], clampedTarget);
+        }
+        if (activeFileId) {
+          const selection = useSelection();
+          selection.clear();
+          selection.select(`file_${activeFileId}`, false, false);
+        }
+      }
+
       if (options?.autoDownload) {
-        downloadBytes(splitBytes, newFileName, 'application/pdf');
+        let exportBytes = splitBytes;
+        if (extractedElements.length > 0) {
+          const originalBytes = this.service.document.save();
+          const originalBuffer = originalBytes.buffer.slice(
+            originalBytes.byteOffset,
+            originalBytes.byteOffset + originalBytes.byteLength
+          ) as ArrayBuffer;
+          try {
+            await this.service.burnElementsToDocument(extractedElements);
+            exportBytes = await this.service.document.saveAsync(extractedTransforms);
+          } catch (err) {
+            console.warn('Failed to burn canvas elements to auto-downloaded PDF:', err);
+          } finally {
+            this.service.loadDocumentFromBuffer(originalBuffer);
+            this.refreshDocument();
+          }
+        }
+        downloadBytes(exportBytes, newFileName, 'application/pdf');
       }
 
       return { splitBytes, newFileName };
@@ -3137,6 +3293,68 @@ export class EditorActions {
 
     try {
       await this.executeDocumentMutation('Bake Page Transforms', this.store.currentPageIndex, async () => {
+        // Re-project active canvas overlay elements before resetting transforms
+        if (this.canvasStore && this.canvasStore.elements.length > 0) {
+          this.canvasStore.elements = this.canvasStore.elements.map((el) => {
+            const t = this.store.pageTransforms[el.pageIndex];
+            if (!t || (t.scaleX === 1 && t.scaleY === 1)) return el;
+            const sx = t.scaleX ?? 1;
+            const sy = t.scaleY ?? 1;
+            const sMin = Math.min(sx, sy);
+            const updated = { ...el };
+            updated.x = Math.round(el.x * sx * 10) / 10;
+            updated.y = Math.round(el.y * sy * 10) / 10;
+            updated.width = Math.round(el.width * sx * 10) / 10;
+            updated.height = Math.round(el.height * sy * 10) / 10;
+            if (el.kind === 'text') {
+              const textEl = updated as TextElement;
+              if (textEl.fontSize) {
+                textEl.fontSize = Math.max(4, Math.round(textEl.fontSize * sy * 10) / 10);
+              }
+              if (textEl.lines && Array.isArray(textEl.lines)) {
+                textEl.lines = textEl.lines.map((ln) => ({
+                  ...ln,
+                  lineHeight: ln.lineHeight ? Math.round(ln.lineHeight * sy * 10) / 10 : ln.lineHeight,
+                  segments: ln.segments
+                    ? ln.segments.map((seg) => ({
+                        ...seg,
+                        fontSize: seg.fontSize ? Math.max(4, Math.round(seg.fontSize * sy * 10) / 10) : seg.fontSize,
+                      }))
+                    : ln.segments,
+                }));
+              }
+            } else if (el.kind === 'form-field') {
+              const formEl = updated as FormFieldElement;
+              if (formEl.fontSize) {
+                formEl.fontSize = Math.max(4, Math.round(formEl.fontSize * sMin * 10) / 10);
+              }
+              if (formEl.borderWidth !== undefined) {
+                formEl.borderWidth = Math.max(0.5, Math.round(formEl.borderWidth * sMin * 10) / 10);
+              }
+              if (formEl.borderRadius !== undefined) {
+                formEl.borderRadius = Math.round(formEl.borderRadius * sMin * 10) / 10;
+              }
+            } else if (el.kind === 'shape') {
+              const shapeEl = updated as ShapeElement;
+              if (shapeEl.strokeWidth) {
+                shapeEl.strokeWidth = Math.max(0.5, Math.round(shapeEl.strokeWidth * Math.min(sx, sy) * 10) / 10);
+              }
+            } else if (el.kind === 'path') {
+              const pathEl = updated as PathElement;
+              if (pathEl.strokeWidth) {
+                pathEl.strokeWidth = Math.max(0.5, Math.round(pathEl.strokeWidth * Math.min(sx, sy) * 10) / 10);
+              }
+              if (pathEl.points && Array.isArray(pathEl.points)) {
+                pathEl.points = pathEl.points.map((pt) => ({
+                  x: Math.round(pt.x * sx * 10) / 10,
+                  y: Math.round(pt.y * sy * 10) / 10,
+                }));
+              }
+            }
+            return updated;
+          });
+        }
+
         const finalBytes = await this.service.document.saveAsync(this.store.pageTransforms);
         const bufferArray = finalBytes.buffer.slice(finalBytes.byteOffset, finalBytes.byteOffset + finalBytes.byteLength) as ArrayBuffer;
         this.service.loadDocumentFromBuffer(bufferArray);
@@ -3153,6 +3371,7 @@ export class EditorActions {
     canvasStore: CanvasStore
   ): Promise<string | undefined> {
     if (!this.store.isDocumentLoaded) return;
+    if (this.store.isReadOnly || this.store.canMutateDocument === false) return;
     if (!canvasStore) return;
 
     const newId = canvasStore.generateId();
@@ -3314,15 +3533,23 @@ export class EditorActions {
         }
       }
 
-      if (canvasStore && canvasStore.elements.length > 0) {
-        await this.service.burnElementsToDocument(canvasStore.elements);
-        canvasStore.elements = [];
-        canvasStore.clearDragState();
-        canvasStore.selectElement(null);
+      const originalBytes = this.service.document.save();
+      const originalBuffer = originalBytes.buffer.slice(
+        originalBytes.byteOffset,
+        originalBytes.byteOffset + originalBytes.byteLength
+      ) as ArrayBuffer;
+
+      try {
+        const elements = (canvasStore ?? this.canvasStore)?.elements ?? [];
+        if (elements.length > 0) {
+          await this.service.burnElementsToDocument(elements);
+        }
+        const bytes = await this.service.document.saveAsync(this.store.pageTransforms);
+        downloadBytes(bytes, `edited_${this.store.fileName}`, 'application/pdf');
+      } finally {
+        this.service.loadDocumentFromBuffer(originalBuffer);
         this.refreshDocument();
       }
-      const bytes = await this.service.document.saveAsync(this.store.pageTransforms);
-      downloadBytes(bytes, `edited_${this.store.fileName}`, 'application/pdf');
     } catch (err) {
       console.error('Failed to export PDF:', err);
     }
@@ -3492,11 +3719,16 @@ export class EditorActions {
    */
   detectScannedPages(): void {
     if (!this.store.isDocumentLoaded) return;
+    const pageCount = this.store.pageCount;
+    const maxStartupScan = 15;
     void (async () => {
       try {
         const { OcrService } = await import('../services/ocr');
         const ocrService = OcrService.getInstance();
-        const detected = ocrService.detectDocumentScannedPages(this.service.document);
+        const detected = ocrService.detectDocumentScannedPages(
+          this.service.document,
+          pageCount > maxStartupScan ? { maxPages: maxStartupScan } : undefined
+        );
         const scannedSet = new Set<number>();
         for (const [idx] of detected) {
           scannedSet.add(idx);
@@ -4284,12 +4516,10 @@ export class EditorActions {
     }
 
     const currentBytes = await this.service.document.saveAsync(this.store.pageTransforms);
-    const prevBuffer =
-      getFileBuffer(fileId) ??
-      (currentBytes.buffer.slice(
-        currentBytes.byteOffset,
-        currentBytes.byteOffset + currentBytes.byteLength
-      ) as ArrayBuffer);
+    const prevBuffer = currentBytes.buffer.slice(
+      currentBytes.byteOffset,
+      currentBytes.byteOffset + currentBytes.byteLength
+    ) as ArrayBuffer;
 
     const result = await this.service.unlockAcroFormFields(currentBytes);
     const newBuffer = result.unlockedBytes.buffer.slice(
@@ -4473,10 +4703,13 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
             const prevSeg = lineSegments[lineSegments.length - 1];
             const endsWithWs = UNICODE_TRAILING_WS_REGEX.test(prevSeg.text);
             const startsWithWs = UNICODE_LEADING_WS_REGEX.test(w.text);
+            const prevLeft = prevSeg.left ?? 0;
+            const prevWidth = prevSeg.width ?? 0;
+            const gap = w.left - (prevLeft + prevWidth);
             const hasSpace =
               !endsWithWs &&
               !startsWithWs &&
-              Boolean(w.hasPrecedingSpace);
+              (Boolean(w.hasPrecedingSpace) || gap >= 0.5);
             if (hasSpace) {
               segText += ' ';
             }
