@@ -13,7 +13,8 @@ import type {
   CompressionLevel,
 } from '../core/types';
 import type { CanvasElement, CanvasElementKind } from './canvas-types';
-import { DEFAULT_PAGE_TRANSFORM, type ActiveCropState, type EditorTool, type InlineEditState, type LeftPanelMode, type PageTransform } from './types';
+import { DEFAULT_PAGE_TRANSFORM, type ActiveCropState, type EditorTool, type InlineEditState, type LeftPanelMode, type PageTransform, type DocumentViewMode, type ViewModeConfig } from './types';
+import { getViewModeConfig, isTabAllowedInMode, isToolAllowedInMode } from '../core/document-mode';
 
 // Non-reactive storage for binary PDF payloads to prevent reactive proxy overhead
 const fileBufferStore = new Map<string, ArrayBuffer>();
@@ -47,10 +48,55 @@ export interface WorkspaceFile {
   scannedPages?: number[];
 }
 
+export type AppTheme = 'system' | 'light' | 'dark';
+
+export const THEME_STORAGE_KEY = 'kea_theme';
+
+function getInitialTheme(): AppTheme {
+  if (typeof window === 'undefined') return 'system';
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === 'light' || stored === 'dark' || stored === 'system') {
+      return stored;
+    }
+  } catch {
+    // Ignore storage access errors in restricted execution contexts
+  }
+  return 'system';
+}
+
+export function applyThemeToDocument(theme: AppTheme): void {
+  if (typeof document === 'undefined' || !document?.documentElement?.classList) return;
+  const isDark =
+    theme === 'dark' ||
+    (theme === 'system' &&
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.classList.toggle('dark', isDark);
+}
+
 const EDITOR_STORE_KEY = Symbol('editor-store');
 
 export class EditorStore {
-  // -- Document lifecycle --
+  // Theme state
+  theme = $state<AppTheme>(getInitialTheme());
+
+  constructor() {
+    if (typeof window !== 'undefined') {
+      applyThemeToDocument(this.theme);
+      if (typeof window.matchMedia === 'function') {
+        const mq = window.matchMedia('(prefers-color-scheme: dark)');
+        mq.addEventListener?.('change', () => {
+          if (this.theme === 'system') {
+            applyThemeToDocument('system');
+          }
+        });
+      }
+    }
+  }
+
+  // Document lifecycle
   isInitialized = $state(false);
   isDocumentLoaded = $state(false);
   fileName = $state('No document');
@@ -67,6 +113,9 @@ export class EditorStore {
   zoom = $state(1.0);
   isZooming = $state(false);
   scrollFraction = $state(0);
+
+  // -- Viewing mode --
+  viewMode = $state<DocumentViewMode>('editing');
 
   // -- Interaction --
   activeTool = $state<EditorTool>('select');
@@ -96,6 +145,7 @@ export class EditorStore {
   openUrlDialogInitialUrl = $state('');
   showConvertDialog = $state(false);
   convertInitialFile = $state<File | null>(null);
+  showComponentGalleryDialog = $state(false);
   showPageScaleDialog = $state(false);
   showPasswordPromptDialog = $state(false);
   pendingPasswordBuffer = $state<ArrayBuffer | null>(null);
@@ -109,6 +159,7 @@ export class EditorStore {
   esignInitialTab = $state<'signatures' | 'draw' | 'type' | 'upload'>('signatures');
   impositionInitialMode = $state<'nup' | 'booklet' | 'single-page' | 'posterize' | 'cut-stack'>('nup');
   activeMockupTool = $state<string | null>(null);
+  showQrBarcodeModal = $state(false);
   showOcrDialog = $state(false);
   isOcrRunning = $state(false);
   ocrProgress = $state<{ pageIndex: number; progress: number; status: string } | null>(null);
@@ -155,7 +206,123 @@ export class EditorStore {
     return this.inlineEdit !== null;
   }
 
-  // -- Convenience mutations --
+  get isReadOnly(): boolean {
+    return this.viewMode === 'viewing';
+  }
+
+  get isSuggestingMode(): boolean {
+    return this.viewMode === 'suggesting';
+  }
+
+  get isEditingMode(): boolean {
+    return this.viewMode === 'editing';
+  }
+
+  get canEditContent(): boolean {
+    return this.viewMode === 'editing';
+  }
+
+  get canMutateDocument(): boolean {
+    return this.viewModeConfig.canMutateDocument;
+  }
+
+  get canAnnotate(): boolean {
+    return this.viewMode !== 'viewing';
+  }
+
+  get canSelectElements(): boolean {
+    return this.viewModeConfig.canSelectElements;
+  }
+
+  get canEditValues(): boolean {
+    return this.viewModeConfig.canEditValues;
+  }
+
+  get canReorderPages(): boolean {
+    return this.viewModeConfig.canReorderPages;
+  }
+
+  get canMergeFiles(): boolean {
+    return this.viewModeConfig.canMergeFiles;
+  }
+
+  get canExtractPages(): boolean {
+    return this.viewModeConfig.canExtractPages;
+  }
+
+  get canExtractImages(): boolean {
+    return this.viewModeConfig.canExtractImages;
+  }
+
+  get canMoveElements(): boolean {
+    return this.viewModeConfig.canMoveElements;
+  }
+
+  get canResizeElements(): boolean {
+    return this.viewModeConfig.canResizeElements;
+  }
+
+  get canDeleteElements(): boolean {
+    return this.viewModeConfig.canDeleteElements;
+  }
+
+  get viewModeConfig(): ViewModeConfig {
+    return getViewModeConfig(this.viewMode);
+  }
+
+  /**
+   * Sets the active document viewing mode and reconciles tool and tab selections.
+   *
+   * @param mode Target viewing mode ('editing', 'viewing', or 'suggesting').
+   * @param collapseRightPanel Whether to collapse the right panel when entering viewing mode.
+   */
+  setViewMode(mode: DocumentViewMode, collapseRightPanel: boolean = true): void {
+    if (this.viewMode === mode) return;
+    this.viewMode = mode;
+
+    if (mode === 'viewing') {
+      if (collapseRightPanel) {
+        this.rightPanelCollapsed = true;
+      }
+      if (!this.viewModeConfig.canSelectElements) {
+        this.clearSelection();
+      }
+      this.placingElementKind = null;
+      this.showOrganizerView = false;
+      this.showSanitizeDialog = false;
+      this.showCompressDialog = false;
+      this.showPageScaleDialog = false;
+      this.showImpositionDialog = false;
+      if (this.isCropping) {
+        this.activeCrop = null;
+      }
+      if (!isToolAllowedInMode(mode, this.activeTool)) {
+        this.activeTool = 'select';
+      }
+      if (!isTabAllowedInMode(mode, this.leftPanelMode)) {
+        this.leftPanelMode = 'workspace';
+      }
+    } else if (mode === 'suggesting') {
+      this.rightPanelCollapsed = false;
+      this.inlineEdit = null;
+      this.showOrganizerView = false;
+      this.showSanitizeDialog = false;
+      this.showCompressDialog = false;
+      this.showPageScaleDialog = false;
+      this.showImpositionDialog = false;
+      if (this.isCropping) {
+        this.activeCrop = null;
+      }
+      if (!isToolAllowedInMode(mode, this.activeTool)) {
+        this.activeTool = 'select';
+      }
+      if (!isTabAllowedInMode(mode, this.leftPanelMode)) {
+        this.leftPanelMode = 'workspace';
+      }
+    } else if (mode === 'editing') {
+      this.rightPanelCollapsed = false;
+    }
+  }
 
   incrementRenderVersion(): void {
     this.renderVersion++;
@@ -211,6 +378,16 @@ export class EditorStore {
     this.convertInitialFile = null;
   }
 
+  /** Open the UI component variant gallery dialog. */
+  openComponentGalleryDialog(): void {
+    this.showComponentGalleryDialog = true;
+  }
+
+  /** Close the UI component variant gallery dialog. */
+  closeComponentGalleryDialog(): void {
+    this.showComponentGalleryDialog = false;
+  }
+
   /** Open the page scale and resizing dialog. */
   openPageScaleDialog(): void {
     this.showPageScaleDialog = true;
@@ -242,6 +419,22 @@ export class EditorStore {
   /** Clears active document loading error banner. */
   clearLoadError(): void {
     this.loadError = null;
+  }
+
+  /**
+   * Sets the visual colour theme of the application.
+   * Updates state, persists preference in local storage, and synchronises the document root class.
+   */
+  setTheme(theme: AppTheme): void {
+    this.theme = theme;
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+      } catch {
+        // Ignore storage write failure
+      }
+    }
+    applyThemeToDocument(theme);
   }
 }
 
