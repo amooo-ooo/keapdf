@@ -13,7 +13,7 @@ import {
   type TextElement,
 } from './canvas-types';
 import type { PageTransform } from './types';
-import type { ElementRegistry } from '../core/element-registry';
+import { type ElementRegistry, createElementFromPayload } from '../core/element-registry';
 import {
   AddElementCommand,
   RemoveElementCommand,
@@ -53,6 +53,19 @@ interface CreateElementOptions {
   options?: string[];
   required?: boolean;
   readOnly?: boolean;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  title?: string;
+  poster?: string;
+  modelFormat?: string;
+  description?: string;
+  payload?: string;
+  symbology?: 'qr-code' | 'code-128';
+  fgColor?: string;
+  bgColor?: string;
+  includeText?: boolean;
+  svgContent?: string;
 }
 
 export class CanvasActions {
@@ -104,6 +117,19 @@ export class CanvasActions {
     if (options?.options != null) overrides.options = options.options;
     if (options?.required != null) overrides.required = options.required;
     if (options?.readOnly != null) overrides.readOnly = options.readOnly;
+    if (options?.fileName != null) overrides.fileName = options.fileName;
+    if (options?.fileSize != null) overrides.fileSize = options.fileSize;
+    if (options?.mimeType != null) overrides.mimeType = options.mimeType;
+    if (options?.title != null) overrides.title = options.title;
+    if (options?.poster != null) overrides.poster = options.poster;
+    if (options?.modelFormat != null) overrides.modelFormat = options.modelFormat;
+    if (options?.description != null) overrides.description = options.description;
+    if (options?.payload != null) overrides.payload = options.payload;
+    if (options?.symbology != null) overrides.symbology = options.symbology;
+    if (options?.fgColor != null) overrides.fgColor = options.fgColor;
+    if (options?.bgColor != null) overrides.bgColor = options.bgColor;
+    if (options?.includeText != null) overrides.includeText = options.includeText;
+    if (options?.svgContent != null) overrides.svgContent = options.svgContent;
 
     const element = def.create(id, pageIndex, x, y, overrides) as CanvasElement;
 
@@ -462,8 +488,8 @@ export class CanvasActions {
             height: newHeight
         };
 
-        if (element.kind === 'text' && state.originFontSize !== undefined) {
-            const scale = newHeight / state.originHeight;
+        if (element.kind === 'text' && state.originFontSize !== undefined && isCorner) {
+            const scale = Math.min(newWidth / state.originWidth, newHeight / state.originHeight);
             const newFontSize = Math.max(1, state.originFontSize * scale);
             const textUpdates: Partial<TextElement> = {
                 fontSize: newFontSize,
@@ -621,74 +647,12 @@ export class CanvasActions {
     }
 
   dropElement(payload: ElementDropPayload, pageIndex: number, x: number, y: number): void {
-    const options: CreateElementOptions = {};
-    if (payload.variant) {
-      options.variant = payload.variant;
-    }
-    if (payload.label) {
-      options.label = payload.label;
-    }
-    if (payload.text) {
-      options.text = payload.text;
-    }
-    if (payload.author) {
-      options.author = payload.author;
-    }
-    if (payload.fontSize) {
-      options.fontSize = payload.fontSize;
-    }
-    if (payload.fontWeight) {
-      options.fontWeight = payload.fontWeight;
-    }
-    if (payload.fontFamily) {
-      options.fontFamily = payload.fontFamily;
-    }
-    if (payload.color) {
-      options.color = payload.color;
-    }
-    if (payload.backgroundColor) {
-      options.backgroundColor = payload.backgroundColor;
-    }
-    if (payload.borderColor) {
-      options.borderColor = payload.borderColor;
-    }
-    if (payload.borderWidth != null) {
-      options.borderWidth = payload.borderWidth;
-    }
-    if (payload.borderStyle) {
-      options.borderStyle = payload.borderStyle;
-    }
-    if (payload.borderRadius != null) {
-      options.borderRadius = payload.borderRadius;
-    }
-    if (payload.textAlign) {
-      options.textAlign = payload.textAlign;
-    }
-    if (payload.placeholder) {
-      options.placeholder = payload.placeholder;
-    }
-    if (payload.value) {
-      options.value = payload.value;
-    }
-    if (payload.width != null) {
-      options.width = payload.width;
-    }
-    if (payload.height != null) {
-      options.height = payload.height;
-    }
-    if (payload.options != null) {
-      options.options = payload.options;
-    }
-    if (payload.required != null) {
-      options.required = payload.required;
-    }
-    if (payload.readOnly != null) {
-      options.readOnly = payload.readOnly;
-    }
-    if (payload.src != null) {
-      options.src = payload.src;
-    }
-    this.createElement(payload.kind, pageIndex, x, y, options);
+    const id = this.canvasStore.generateId();
+    const element = createElementFromPayload(this.elementRegistry, payload, pageIndex, x, y, id);
+    this.canvasStore.addElement(element);
+    this.canvasStore.selectElement(element.id);
+    this.editorActions?.pushCommand(new AddElementCommand(`Add ${payload.kind}`, element));
+    this.editorActions?.setTool('select');
   }
 
     deleteElement(id: string): void {
@@ -730,12 +694,20 @@ export class CanvasActions {
         const el = this.canvasStore.elements.find((e) => e.id === id);
         if (el) {
             const prevProps: Record<string, unknown> = {};
+            const cleanUpdates: Record<string, unknown> = {};
             for (const key of Object.keys(updates)) {
-                prevProps[key] = (el as unknown as Record<string, unknown>)[key];
+                const rawPrev = (el as unknown as Record<string, unknown>)[key];
+                prevProps[key] = rawPrev !== undefined && typeof rawPrev === 'object' && rawPrev !== null
+                    ? safeClone(rawPrev)
+                    : rawPrev;
+                const rawNext = updates[key];
+                cleanUpdates[key] = rawNext !== undefined && typeof rawNext === 'object' && rawNext !== null
+                    ? safeClone(rawNext)
+                    : rawNext;
             }
             this.canvasStore.updateElementProperties(id, updates);
             this.editorActions?.recordDebouncedCommand(
-                new UpdateElementPropertyCommand('Update Element Property', id, prevProps, updates),
+                new UpdateElementPropertyCommand('Update Element Property', id, prevProps, cleanUpdates),
                 300,
             );
         }
