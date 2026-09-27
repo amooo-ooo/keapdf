@@ -22,12 +22,13 @@ import type {
   DocumentMetadataUpdate,
   ColorRgba,
 } from '../core/types';
-import type { EditorStore } from './editor.svelte';
+import type { EditorStore, AppTheme } from './editor.svelte';
 import { getFileBuffer, setFileBuffer } from './editor.svelte';
 import type { CanvasStore } from './canvas.svelte';
 import type { HistoryStore } from './history.svelte';
-import type { EditorTool, CropUnit, CropScope } from './types';
-import type { CanvasElement, TextElement, TextSegment, TextElementLine, ShapeElement } from './canvas-types';
+import type { EditorTool, CropUnit, CropScope, PageTransform } from './types';
+import { isToolAllowedInMode, isMutationAllowedInMode, type DocumentViewMode } from '../core/document-mode';
+import type { CanvasElement, TextElement, TextSegment, TextElementLine, ShapeElement, FormFieldElement, PathElement } from './canvas-types';
 import type { CanvasActions } from './canvas-actions';
 import { downloadBytes } from '../utils/download-utils';
 import { safeClone } from '../utils/clone-utils';
@@ -96,13 +97,42 @@ export interface ScrollTargetOptions {
 
 export type ScrollCallback = (index: number, options?: ScrollTargetOptions) => void;
 
+/**
+ * Safely clone a canvas element and update its page index and optional identifier,
+ * keeping any original text or form field span calibrated to the new page.
+ */
+function remapElementPageIndex(
+  element: CanvasElement,
+  newPageIndex: number,
+  newId?: string,
+): CanvasElement {
+  const cloned = safeClone(element);
+  const updated: CanvasElement = {
+    ...cloned,
+    pageIndex: newPageIndex,
+    ...(newId ? { id: newId } : {}),
+  };
+  if ('originalSpan' in updated && updated.originalSpan) {
+    updated.originalSpan = {
+      ...updated.originalSpan,
+      pageIndex: newPageIndex,
+    };
+  }
+  return updated;
+}
+
 export class EditorActions {
   /** DOM references for hidden file inputs. Set by the root component. */
   fileInputEl: HTMLInputElement | null = null;
   mergeFileInputEl: HTMLInputElement | null = null;
   imageFileInputEl: HTMLInputElement | null = null;
   imageAsPageFileInputEl: HTMLInputElement | null = null;
+  videoFileInputEl: HTMLInputElement | null = null;
+  audioFileInputEl: HTMLInputElement | null = null;
+  threeDFileInputEl: HTMLInputElement | null = null;
+  attachmentFileInputEl: HTMLInputElement | null = null;
   mergeFilesInputEl: HTMLInputElement | null = null;
+  quickConvertFileInputEl: HTMLInputElement | null = null;
 
   /**
    * Scroll callback registered by Canvas.svelte.
@@ -138,6 +168,15 @@ export class EditorActions {
 
   setPluginManager(pluginManager: PluginManager): void {
     this._pluginManager = pluginManager;
+  }
+
+  /**
+   * Sets the visual colour theme of the application.
+   *
+   * @param theme Target theme: 'system', 'light', or 'dark'.
+   */
+  setTheme(theme: AppTheme): void {
+    this.store.setTheme(theme);
   }
 
   /**
@@ -228,14 +267,24 @@ export class EditorActions {
     indexMap?: (oldIndex: number) => number,
     skipPush?: boolean,
     duplicateCopies?: Array<{ sourceIndex: number; targetIndex: number }>,
+    additionalElements?: CanvasElement[],
+    additionalTransforms?: Record<number, PageTransform>,
+    additionalScannedPages?: number[],
   ): Promise<MutateDocumentCommand | undefined> {
     const fileId = this.store.activeWorkspaceFileId;
     if (!fileId || !this.store.isDocumentLoaded) return;
+    if (this.store.isReadOnly && !isMutationAllowedInMode(this.store.viewMode, description)) return;
+    if (this.store.canMutateDocument === false && !isMutationAllowedInMode(this.store.viewMode, description)) return;
 
     const prevSaved = this.service.document.save();
-    const prevBuffer = getFileBuffer(fileId) ?? (prevSaved.buffer.slice(prevSaved.byteOffset, prevSaved.byteOffset + prevSaved.byteLength) as ArrayBuffer);
+    const prevBuffer = prevSaved.buffer.slice(
+      prevSaved.byteOffset,
+      prevSaved.byteOffset + prevSaved.byteLength,
+    ) as ArrayBuffer;
     const prevPageIndex = this.store.currentPageIndex;
-    const prevElements = this.canvasStore ? safeClone(this.canvasStore.elements) : [];
+    const prevElements = this.canvasStore
+      ? safeClone(this.canvasStore.elements)
+      : (this.service.getFile(fileId)?.canvasElements ? safeClone(this.service.getFile(fileId)!.canvasElements!) : []);
     const prevTransforms = { ...this.store.pageTransforms };
 
     try {
@@ -249,13 +298,46 @@ export class EditorActions {
       this.remapPageIndices(indexMap, duplicateCopies);
     }
 
+    if (additionalElements && additionalElements.length > 0) {
+      if (this.canvasStore) {
+        this.canvasStore.elements = [...this.canvasStore.elements, ...additionalElements];
+      }
+      const activeFile = this.service.getFile(fileId);
+      if (activeFile) {
+        activeFile.canvasElements = this.canvasStore
+          ? safeClone(this.canvasStore.elements)
+          : [...(activeFile.canvasElements ?? []), ...additionalElements];
+      }
+    }
+    if (additionalTransforms && Object.keys(additionalTransforms).length > 0) {
+      this.store.pageTransforms = { ...this.store.pageTransforms, ...additionalTransforms };
+      const activeFile = this.service.getFile(fileId);
+      if (activeFile) {
+        activeFile.pageTransforms = safeClone(this.store.pageTransforms);
+      }
+    }
+    if (additionalScannedPages && additionalScannedPages.length > 0) {
+      if (!this.store.scannedPages) {
+        this.store.scannedPages = new Set<number>();
+      }
+      for (const page of additionalScannedPages) {
+        this.store.scannedPages.add(page);
+      }
+      const activeFile = this.service.getFile(fileId);
+      if (activeFile) {
+        activeFile.scannedPages = Array.from(this.store.scannedPages);
+      }
+    }
+
     const savedBytes = this.service.document.save();
     const newBuffer = savedBytes.buffer.slice(
       savedBytes.byteOffset,
       savedBytes.byteOffset + savedBytes.byteLength
     ) as ArrayBuffer;
 
-    const newElements = this.canvasStore ? safeClone(this.canvasStore.elements) : [];
+    const newElements = this.canvasStore
+      ? safeClone(this.canvasStore.elements)
+      : (this.service.getFile(fileId)?.canvasElements ? safeClone(this.service.getFile(fileId)!.canvasElements!) : []);
     const newTransforms = { ...this.store.pageTransforms };
 
     const cmd = new MutateDocumentCommand(
@@ -708,7 +790,11 @@ export class EditorActions {
     this.store.closeConvertDialog();
   }
 
-  async convertAndLoadDocument(file: File, options?: DocumentConversionOptions): Promise<void> {
+  async convertAndLoadDocument(
+    file: File,
+    options?: DocumentConversionOptions,
+    addToWorkspace: boolean = false
+  ): Promise<void> {
     if (!this.store.isInitialized) {
       await this.initializeEngine();
       if (!this.store.isInitialized) return;
@@ -723,11 +809,12 @@ export class EditorActions {
         { name: file.name, buffer, mimeType: file.type },
         options
       );
-      await this.loadDocumentFromBuffer(converted.buffer, converted.fileName);
+      await this.loadDocumentFromBuffer(converted.buffer, converted.fileName, addToWorkspace);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error during document conversion.';
       this.store.loadError = `Failed to convert document: ${message}`;
       console.error('Failed to convert document:', err);
+      throw err;
     } finally {
       this.store.isLoadingDocument = false;
     }
@@ -748,6 +835,89 @@ export class EditorActions {
       void this.initializeEngine();
     }
     this.mergeFilesInputEl?.click();
+  }
+
+  triggerQuickConvert(): void {
+    if (!this.store.isInitialized) {
+      void this.initializeEngine();
+    }
+    this.quickConvertFileInputEl?.click();
+  }
+
+  /**
+   * Automatically converts one or more files to PDF format, triggers an immediate
+   * browser download of each converted PDF byte stream, and loads the converted
+   * document into the viewport workspace.
+   *
+   * @param files Array of files to convert and download.
+   * @param options Optional document conversion formatting options.
+   */
+  async quickConvertFiles(files: File[], options?: DocumentConversionOptions): Promise<void> {
+    if (!files || files.length === 0) return;
+
+    if (!this.store.isInitialized) {
+      await this.initializeEngine();
+      if (!this.store.isInitialized) return;
+    }
+
+    this.store.isLoadingDocument = true;
+    this.store.loadingProgress = files.length === 1
+      ? `Converting ${files[0].name} to PDF...`
+      : `Converting ${files.length} files to PDF...`;
+    this.store.loadError = null;
+
+    try {
+      if (!this.isAddingToWorkspace) {
+        this.clearWorkspaceState();
+      }
+
+      const originalIsAdding = this.isAddingToWorkspace;
+      this.isAddingToWorkspace = true;
+
+      try {
+        for (const file of files) {
+          let buffer: ArrayBuffer | Uint8Array = await file.arrayBuffer();
+          let fileName = file.name;
+
+          if (isImageFile(buffer, file.name) || file.type.startsWith('image/')) {
+            const { mergeFilesToPdfBuffer } = await import('../services/file-merger');
+            const converted = await mergeFilesToPdfBuffer([
+              { name: file.name, buffer, mimeType: file.type || inferImageMimeType(file.name) },
+            ], this.service.engine);
+            buffer = converted.buffer;
+            fileName = converted.fileName;
+          } else if (!file.name.toLowerCase().endsWith('.pdf')) {
+            const { documentConverter } = await import('../services/conversion');
+            if (!documentConverter.isConvertible(file.name, buffer, file.type)) {
+              throw new Error(`Unsupported document format for conversion: "${file.name}".`);
+            }
+            const converted = await documentConverter.convertDocument(
+              {
+                name: file.name,
+                buffer,
+                mimeType: file.type,
+              },
+              options
+            );
+            buffer = converted.buffer;
+            fileName = converted.fileName;
+          }
+
+          const pdfBytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+          downloadBytes(pdfBytes, fileName, 'application/pdf');
+
+          await this.loadDocumentFromBuffer(buffer, fileName);
+        }
+      } finally {
+        this.isAddingToWorkspace = originalIsAdding;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error during document conversion.';
+      this.store.loadError = `Failed to convert document: ${message}`;
+      console.error('Failed to quick convert document:', err);
+    } finally {
+      this.store.isLoadingDocument = false;
+    }
   }
 
   /**
@@ -799,47 +969,118 @@ export class EditorActions {
   }
 
   async mergeWorkspaceFiles(fileIds: string[], atIndex?: number): Promise<void> {
+    if (this.store.isReadOnly || this.store.canMergeFiles === false) return;
     const filesToMerge = fileIds
       .map(id => this.service.getFile(id))
       .filter((f): f is NonNullable<typeof f> => f !== undefined);
       
     if (filesToMerge.length < 2) return;
     
-    // We will merge everything into the first selected file IN MEMORY
+    // Merge into the first target file in memory
     const firstFile = filesToMerge[0];
     if (this.store.activeWorkspaceFileId !== firstFile.id) {
        await this.switchWorkspaceFile(firstFile.id);
+    } else {
+       this.commitActiveEdits();
     }
     
-    await this.executeDocumentMutation('Merge Workspace Files', this.store.currentPageIndex, async () => {
-      let targetIndex = atIndex !== undefined ? atIndex : this.store.pageCount;
-      for (let i = 1; i < filesToMerge.length; i++) {
-         const fileBuf = getFileBuffer(filesToMerge[i].id);
-         if (!fileBuf) continue;
-         const previousPageCount = this.store.pageCount;
-         if (isImageFile(fileBuf, filesToMerge[i].fileName)) {
-           await this.service.document.importImageAsPage(
-             fileBuf,
-             inferImageMimeType(filesToMerge[i].fileName),
-             targetIndex,
-           );
-         } else {
-           this.service.document.merge(fileBuf, targetIndex);
-         }
-         this.store.pageCount = this.service.document.getPageCount();
-         if (atIndex !== undefined) {
-             targetIndex += (this.store.pageCount - previousPageCount);
-         }
-      }
-      
-      // Remove the merged files from the workspace
-      const idsToRemove = new Set(filesToMerge.slice(1).map(f => f.id));
-      for (const id of idsToRemove) {
-        this.service.removeFile(id);
-        this.historyStore?.clearFile(id);
-      }
-    });
+    const targetInsertionIndex = atIndex !== undefined ? atIndex : this.store.pageCount;
+    let totalPagesAdded = 0;
+    const additionalElements: CanvasElement[] = [];
+    const additionalTransforms: Record<number, PageTransform> = {};
+    const additionalScannedPages: number[] = [];
 
+    await this.executeDocumentMutation(
+      'Merge Workspace Files',
+      targetInsertionIndex,
+      async () => {
+        let targetIndex = targetInsertionIndex;
+        for (let i = 1; i < filesToMerge.length; i++) {
+          const secondaryFile = filesToMerge[i];
+          const fileBuf = getFileBuffer(secondaryFile.id);
+          if (!fileBuf) continue;
+          const previousPageCount = this.store.pageCount;
+          if (isImageFile(fileBuf, secondaryFile.fileName)) {
+            await this.service.document.importImageAsPage(
+              fileBuf,
+              inferImageMimeType(secondaryFile.fileName),
+              targetIndex,
+            );
+          } else {
+            this.service.document.merge(fileBuf, targetIndex);
+          }
+          this.store.pageCount = this.service.document.getPageCount();
+          const added = this.store.pageCount - previousPageCount;
+          totalPagesAdded += added;
+
+          // Merge canvas elements with mapped page indices and fresh identifiers
+          if (secondaryFile.canvasElements && secondaryFile.canvasElements.length > 0) {
+            for (const elem of secondaryFile.canvasElements) {
+              const mappedPageIndex = elem.pageIndex + targetIndex;
+              const freshId = this.canvasStore?.generateId() ?? crypto.randomUUID();
+              additionalElements.push(remapElementPageIndex(elem, mappedPageIndex, freshId));
+            }
+          }
+
+          // Merge page transforms calibrated by insertion offset
+          if (secondaryFile.pageTransforms) {
+            for (const [pageKey, transform] of Object.entries(secondaryFile.pageTransforms)) {
+              const mappedPageIndex = Number(pageKey) + targetIndex;
+              additionalTransforms[mappedPageIndex] = safeClone(transform);
+            }
+          }
+
+          // Merge hidden span identifiers from previous redactions
+          if (secondaryFile.hiddenSpanIds && secondaryFile.hiddenSpanIds.length > 0) {
+            if (!this.store.hiddenSpanIds) {
+              this.store.hiddenSpanIds = new SvelteSet<string>();
+            }
+            for (const spanId of secondaryFile.hiddenSpanIds) {
+              this.store.hiddenSpanIds.add(spanId);
+            }
+          }
+
+          // Merge scanned page designations with adjusted indices
+          if (secondaryFile.scannedPages && secondaryFile.scannedPages.length > 0) {
+            for (const scannedPage of secondaryFile.scannedPages) {
+              additionalScannedPages.push(scannedPage + targetIndex);
+            }
+          }
+
+          targetIndex += added;
+        }
+        
+        // Remove the merged files from the workspace
+        const idsToRemove = new Set(filesToMerge.slice(1).map(f => f.id));
+        for (const id of idsToRemove) {
+          this.service.removeFile(id);
+          this.historyStore?.clearFile(id);
+        }
+      },
+      (old: number) => (old >= targetInsertionIndex ? old + totalPagesAdded : old),
+      false,
+      undefined,
+      additionalElements,
+      additionalTransforms,
+      additionalScannedPages,
+    );
+
+    // Synchronise target file state cache
+    firstFile.canvasElements = this.canvasStore
+      ? safeClone(this.canvasStore.elements)
+      : [...(firstFile.canvasElements ?? []), ...additionalElements];
+    firstFile.pageTransforms = safeClone(this.store.pageTransforms);
+    firstFile.hiddenSpanIds = this.store.hiddenSpanIds ? Array.from(this.store.hiddenSpanIds) : [];
+    firstFile.scannedPages = this.store.scannedPages ? Array.from(this.store.scannedPages) : [];
+
+    if (this.canvasStore) {
+      this.canvasStore.selectElement(null);
+      this.canvasStore.clearDragState();
+      this.canvasStore.hoveredElementId = null;
+      this.canvasStore.editingElementId = null;
+    }
+
+    this.goToPage(targetInsertionIndex);
     useSelection().clear();
   }
 
@@ -849,6 +1090,26 @@ export class EditorActions {
 
   triggerImageImportAsPage(): void {
     this.imageAsPageFileInputEl?.click();
+  }
+
+  triggerVideoImport(): void {
+    this.videoFileInputEl?.click();
+  }
+
+  triggerAudioImport(): void {
+    this.audioFileInputEl?.click();
+  }
+
+  trigger3DImport(): void {
+    this.threeDFileInputEl?.click();
+  }
+
+  triggerAttachmentImport(): void {
+    this.attachmentFileInputEl?.click();
+  }
+
+  openQrBarcodeModal(): void {
+    this.store.showQrBarcodeModal = true;
   }
   
   /**
@@ -1235,6 +1496,7 @@ export class EditorActions {
 
   setTool(tool: EditorTool): void {
     if (this.store.activeTool === tool) return;
+    if (!isToolAllowedInMode(this.store.viewMode, tool)) return;
 
     if (this.canvasStore) {
       this.canvasStore.clearDragState();
@@ -1331,6 +1593,28 @@ export class EditorActions {
       }
     }
     this.store.clearSelection();
+    if (this.canvasStore) {
+      this.canvasStore.selectElement(null);
+    }
+  }
+
+  /**
+   * Sets the active viewing mode and synchronises tool, selection, and panel states.
+   *
+   * @param mode Target document viewing mode.
+   * @param collapseRightPanel Whether to collapse the right panel when entering viewing mode.
+   */
+  setViewMode(mode: DocumentViewMode, collapseRightPanel?: boolean): void {
+    this.store.setViewMode(mode, collapseRightPanel);
+    if (mode === 'viewing' || !this.store.canSelectElements) {
+      this.clearSelection(false);
+      this.canvasStore?.selectElement(null);
+      try {
+        useSelection().clear();
+      } catch {
+        // Context might not be available in isolated test environments
+      }
+    }
   }
 
   /**
@@ -1341,6 +1625,9 @@ export class EditorActions {
    * @param span The span to select.
    */
   selectSpan(span: EditableSpan): void {
+    if (this.store.isReadOnly || this.store.canSelectElements === false) {
+      return;
+    }
     if (this.store.inlineEdit) {
       this.submitInlineEdit();
     }
@@ -1397,6 +1684,8 @@ export class EditorActions {
    * @param span The text span to edit inline.
    */
   startInlineEdit(span: EditableTextSpan): void {
+    if (this.store.isReadOnly || this.store.canEditContent === false) return;
+
     if (this.store.inlineEdit) {
       if (this.store.inlineEdit.spanId === span.id) {
         return;
@@ -1469,7 +1758,7 @@ export class EditorActions {
    *
    * @param extractedData Optional structured text and styled lines extracted directly from the editor DOM.
    */
-  submitInlineEdit(extractedData?: { text: string; lines?: TextLine[] }): void {
+  async submitInlineEdit(extractedData?: { text: string; lines?: TextLine[] }): Promise<void> {
     const { inlineEdit } = this.store;
     if (!inlineEdit) return;
 
@@ -1520,7 +1809,7 @@ export class EditorActions {
         reflowParagraph: isMultiLine,
       };
 
-      this.executeCommand(
+      await this.executeCommand(
         new ReplaceOcrTextCommand('Edit Scanned Text', span.pageIndex, span, prevOptions, newOptions)
       );
       this.refreshDocument();
@@ -1574,12 +1863,12 @@ export class EditorActions {
         reflowParagraph: isMultiLine,
       };
 
-      this.executeCommand(
+      await this.executeCommand(
         new ReplaceTextCommand('Edit Text', span.pageIndex, span, prevOptions, newOptions)
       );
     } else {
       // Emptied paragraph: delete and shift downstream lines up
-      this.executeCommand(
+      await this.executeCommand(
         new DeleteTextCommand('Delete Text', span.pageIndex, span)
       );
     }
@@ -1684,6 +1973,7 @@ export class EditorActions {
   }
 
   async deleteSelectedSpan(): Promise<void> {
+    if (this.store.isReadOnly || this.store.canEditContent === false) return;
     const { selectedSpan } = this.store;
     if (!selectedSpan || !this.store.isDocumentLoaded) return;
     
@@ -1730,6 +2020,7 @@ export class EditorActions {
    * Deletes the currently selected canvas element if one is selected.
    */
   deleteSelectedElement(): void {
+    if (this.store.isReadOnly) return;
     if (this._canvasActions) {
       this._canvasActions.deleteSelectedElement();
       return;
@@ -1749,9 +2040,10 @@ export class EditorActions {
 
   /**
    * Deletes the currently active selection across canvas elements and PDF layer spans.
-   * Prioritizes canvas layer elements, falling back to selected PDF spans.
+   * Prioritises canvas layer elements, falling back to selected PDF spans.
    */
   async deleteSelected(): Promise<void> {
+    if (this.store.isReadOnly) return;
     if (this.canvasStore?.selectedElementId) {
       this.deleteSelectedElement();
       return;
@@ -2137,7 +2429,7 @@ export class EditorActions {
   // -- Page operations --
 
   rotatePage(index: number): void {
-    if (!this.store.isDocumentLoaded) return;
+    if (!this.store.isDocumentLoaded || this.store.isReadOnly) return;
     const indices = this.getTargetPageIndices(index);
     if (indices.length === 1) {
       this.executeCommand(new RotatePageCommand('Rotate Page', indices[0], 90));
