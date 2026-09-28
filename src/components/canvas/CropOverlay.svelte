@@ -381,7 +381,7 @@
       <div
         class="absolute {cropTopPx > 42 ? '-top-10' : 'top-2.5'} left-1/2 -translate-x-1/2 bg-card/95 text-foreground backdrop-blur-md border border-border/80 shadow-lg rounded-2xl px-2 py-1 pointer-events-auto whitespace-nowrap flex items-center gap-2 z-50 select-none"
       >
-        <span class="text-[11px] font-sans px-2.5 py-1 font-medium text-muted-foreground">
+        <span class="text-[11px] font-sans px-2.5 py-1 font-medium text-muted-foreground tabular-nums">
           {Math.round(cropWidthPts)} × {Math.round(cropHeightPts)} pt
         </span>
         <Button
@@ -395,7 +395,7 @@
             }
           }}
         >
-          <Check class="w-3 h-3" /> Apply
+          <Check class="w-3 h-3" aria-hidden="true" /> Apply
         </Button>
         <Button
           size="sm"
@@ -406,7 +406,7 @@
             actions.cancelCropMode();
           }}
         >
-          <X class="w-3 h-3" /> Cancel
+          <X class="w-3 h-3" aria-hidden="true" /> Cancel
         </Button>
       </div>
 
