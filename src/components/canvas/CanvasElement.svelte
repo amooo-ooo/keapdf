@@ -33,6 +33,7 @@
 
   function handlePointerDown(e: PointerEvent): void {
     if (e.button !== 0) return;
+    if (editorStore.isReadOnly || !editorStore.canSelectElements) return;
     e.stopPropagation();
     if (isEditing) return;
     if (e.detail > 1) return;
@@ -45,12 +46,13 @@
 
     const target = e.target as HTMLElement;
     const pageEl = target.closest('[data-page-element]') as HTMLElement;
-    if (pageEl) {
+    if (pageEl && editorStore.canMoveElements && !editorStore.isReadOnly) {
       canvasActions.startDrag(element.id, e.clientX, e.clientY, pageEl, zoom, editorStore.getPageTransform(element.pageIndex));
     }
   }
 
   function handleClick(e: MouseEvent): void {
+    if (editorStore.isReadOnly || !editorStore.canSelectElements) return;
     e.stopPropagation();
     if (isEditing) return;
     selection.clear();
@@ -63,24 +65,36 @@
 
   function handleDblClick(e: MouseEvent): void {
     e.stopPropagation();
-    if (element.kind === 'text' || element.kind === 'form-field') {
+    if (element.kind === 'form-field') {
+      if (editorStore.isReadOnly || !editorStore.canEditValues) return;
+      canvasActions.endDrag();
+      canvasActions.endResize();
+      canvasStore.editingElementId = element.id;
+    } else if (element.kind === 'text') {
+      if (editorStore.isReadOnly || !editorStore.canEditContent) return;
       canvasActions.endDrag();
       canvasActions.endResize();
       canvasStore.editingElementId = element.id;
     }
   }
+
+  const pointerEventsClass = $derived(
+    isDrawingOrAnnotating || (editorStore.isReadOnly && !editorStore.canSelectElements)
+      ? 'pointer-events-none'
+      : 'pointer-events-auto'
+  );
 </script>
 
 <div
   data-element-id={element.id}
-  class="canvas-element-container absolute flex {isDrawingOrAnnotating ? 'pointer-events-none' : 'pointer-events-auto'} {element.kind === 'text' || element.kind === 'note' || element.kind === 'path' ? 'items-start overflow-visible' : 'items-center justify-center overflow-hidden'} {isSelected ? 'canvas-element-selected' : ''}"
+  class="canvas-element-container absolute flex {pointerEventsClass} {element.kind === 'text' || element.kind === 'note' || element.kind === 'path' ? 'items-start overflow-visible' : 'items-center justify-center overflow-hidden'} {isSelected ? 'canvas-element-selected' : ''}"
   style="
     left: {element.x * zoom}px;
     top: {element.y * zoom}px;
     width: {element.width * zoom}px;
     height: {element.height * zoom}px;
     transform: rotate({element.rotation}deg) scaleX({element.flipX ? -1 : 1}) scaleY({element.flipY ? -1 : 1});
-    cursor: {element.locked ? 'var(--cursor-default, default)' : (isEditing ? 'var(--cursor-text, text)' : 'var(--cursor-move, move)')};
+    cursor: {element.locked || !editorStore.canMoveElements || editorStore.isReadOnly ? 'var(--cursor-default, default)' : (isEditing ? 'var(--cursor-text, text)' : 'var(--cursor-move, move)')};
     opacity: {'opacity' in element && typeof element.opacity === 'number' ? element.opacity : 1};
   "
   onpointerdown={handlePointerDown}
@@ -89,12 +103,13 @@
   onkeydown={(e) => {
     if (!isEditing) {
       if (e.key === 'Enter') {
+        if (editorStore.isReadOnly || !editorStore.canSelectElements) return;
         e.stopPropagation();
         selection.clear();
         editorActions.clearSelection(true);
         canvasStore.selectElement(element.id);
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (!element.locked) {
+        if (!element.locked && editorStore.canDeleteElements && !editorStore.isReadOnly) {
           e.stopPropagation();
           e.preventDefault();
           canvasActions.deleteElement(element.id);
