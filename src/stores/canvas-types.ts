@@ -19,7 +19,18 @@ export type {
 };
 
 /** Built-in canvas element kinds. */
-export type BuiltinCanvasElementKind = 'text' | 'image' | 'shape' | 'form-field' | 'path' | 'note';
+export type BuiltinCanvasElementKind =
+  | 'text'
+  | 'image'
+  | 'shape'
+  | 'form-field'
+  | 'path'
+  | 'note'
+  | 'video'
+  | 'audio'
+  | '3d'
+  | 'attachment'
+  | 'barcode';
 
 /** Supported canvas element kinds, open to extension by plugins. */
 export type CanvasElementKind = BuiltinCanvasElementKind | (string & {});
@@ -213,8 +224,81 @@ export interface NoteElement extends CanvasElementBase {
   isOpen: boolean;
 }
 
+/** Video element conforming to ISO 32000-1 Clause 13.2 / 13.7 RichMedia. */
+export interface VideoElement extends CanvasElementBase {
+  kind: 'video';
+  src: string;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  title?: string;
+  poster?: string;
+  autoplay?: boolean;
+  controls?: boolean;
+  loop?: boolean;
+  muted?: boolean;
+}
+
+/** Audio element conforming to ISO 32000-1 Clause 13.3 / 13.7 RichMedia. */
+export interface AudioElement extends CanvasElementBase {
+  kind: 'audio';
+  src: string;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  title?: string;
+  duration?: number;
+  controls?: boolean;
+}
+
+/** 3D model element conforming to ISO 32000-1 Clause 13.6 interactive 3D annotations. */
+export interface ThreeDElement extends CanvasElementBase {
+  kind: '3d';
+  src: string;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  modelFormat?: string;
+  title?: string;
+  viewName?: string;
+}
+
+/** File attachment element conforming to ISO 32000-2 Clause 14.13 Associated Files. */
+export interface AttachmentElement extends CanvasElementBase {
+  kind: 'attachment';
+  src: string;
+  fileName: string;
+  fileSize?: number;
+  mimeType?: string;
+  description?: string;
+  attachmentType?: string;
+}
+
+/** 2D QR code and 1D barcode element conforming to ISO/IEC 18004 and ISO/IEC 15417. */
+export interface BarcodeElement extends CanvasElementBase {
+  kind: 'barcode';
+  payload: string;
+  symbology: 'qr-code' | 'code-128';
+  fgColor?: string;
+  bgColor?: string;
+  includeText?: boolean;
+  svgContent?: string;
+  dataUrl?: string;
+}
+
 /** Built-in discriminated union of standard canvas element types. */
-export type BuiltinCanvasElement = TextElement | ImageElement | ShapeElement | FormFieldElement | PathElement | NoteElement;
+export type BuiltinCanvasElement =
+  | TextElement
+  | ImageElement
+  | ShapeElement
+  | FormFieldElement
+  | PathElement
+  | NoteElement
+  | VideoElement
+  | AudioElement
+  | ThreeDElement
+  | AttachmentElement
+  | BarcodeElement;
 
 /** Union of all canvas element types, open to custom plugin element extension. */
 export type CanvasElement = BuiltinCanvasElement | (CanvasElementBase & { kind: string; [key: string]: unknown });
@@ -250,6 +334,7 @@ export interface DropPreviewState {
   height: number;
   kind: CanvasElementKind;
   label?: string;
+  payload?: ElementDropPayload;
 }
 
 /** Data transferred during a sidebar drag-to-canvas operation. */
@@ -277,6 +362,18 @@ export interface ElementDropPayload {
   required?: boolean;
   readOnly?: boolean;
   src?: string;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  title?: string;
+  poster?: string;
+  modelFormat?: string;
+  payload?: string;
+  symbology?: 'qr-code' | 'code-128';
+  fgColor?: string;
+  bgColor?: string;
+  includeText?: boolean;
+  svgContent?: string;
 }
 
 /** Default dimensions for newly created built-in elements (in PDF points). */
@@ -287,4 +384,9 @@ export const ELEMENT_DEFAULTS: Record<BuiltinCanvasElementKind, { width: number;
   'form-field': { width: 160, height: 28 },
   path: { width: 0, height: 0 },
   note: { width: 140, height: 100 },
+  video: { width: 280, height: 180 },
+  audio: { width: 240, height: 60 },
+  '3d': { width: 220, height: 180 },
+  attachment: { width: 180, height: 48 },
+  barcode: { width: 120, height: 120 },
 };

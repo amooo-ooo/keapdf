@@ -11,6 +11,8 @@ export type EditorTool = 'select' | 'hand' | 'text' | 'place' | 'highlight' | 'p
 /** Content mode for the left panel. */
 export type LeftPanelMode = 'workspace' | 'components' | 'annotate' | 'tools' | 'settings';
 
+export type { DocumentViewMode, ViewModeConfig } from '../core/document-mode';
+
 /** State for an active inline text edit on the canvas. */
 export interface InlineEditState {
   spanId: string;
