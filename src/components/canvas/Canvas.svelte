@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions, ZOOM_MIN, ZOOM_MAX, type ScrollTargetOptions } from '../../stores/editor-actions';
   import { useCanvasStore } from '../../stores/canvas.svelte';
@@ -13,15 +13,15 @@
     screenToPageCoordsWithMetrics,
     capturePageMetrics,
     calculatePageCenteringScroll,
-    resolveTargetPageIndex,
     calculateOutOfBoundsScrollSpeeds,
     calculatePageLayoutDimensions,
+    calculateZoomScrollOffsets,
+    calculateSmoothZoomFactor,
     computePageVerticalOffsets,
     resolvePageIndexFromOffsets,
   } from '../../utils/geometry';
   import type {
     CachedPageMetrics,
-    PageLayoutBound,
     PageLayoutDimensions,
     PageVerticalOffset,
   } from '../../utils/geometry';
@@ -30,7 +30,7 @@
   import PageOrganizerPanel from '../panels/PageOrganizerPanel.svelte';
 
   import { Button } from '$lib/components/ui/button/index.js';
-  import { FileText, Globe, AlertCircle, Files, FileType } from 'lucide-svelte';
+  import { FileText, Globe, AlertCircle, Files, FileType, FolderOpen } from 'lucide-svelte';
   import { useFeatureFlagStore } from '../../core/feature-flags';
   import { isPdfFile, isConvertibleDocumentFile } from '../../utils/file-type-utils';
 
@@ -70,6 +70,7 @@
 
     if (canvasStore.selectedElement) {
       if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (store.isReadOnly || !store.canDeleteElements) return;
         e.stopImmediatePropagation();
         e.stopPropagation();
         e.preventDefault();
@@ -120,12 +121,6 @@
   let autoScrollSpeedY = 0;
   let lastDragClientX: number | null = null;
   let lastDragClientY: number | null = null;
-  interface CachedPageLayout {
-    pageIndex: number;
-    offsetTop: number;
-    offsetBottom: number;
-  }
-  let cachedPageLayouts: CachedPageLayout[] | null = null;
   let cachedTargetPageIndex: number | null = null;
   let cachedTargetLayerEl: HTMLElement | null = null;
   let dropRafId: number | null = null;
@@ -133,28 +128,6 @@
   let latestDragClientX = 0;
   let latestDragClientY = 0;
   let latestDragTarget: HTMLElement | null = null;
-
-  function initDragPageLayouts(): void {
-    if (!viewportEl) return;
-    const viewportRect = viewportEl.getBoundingClientRect();
-    const currentScrollTop = viewportEl.scrollTop;
-    const pageContainers = Array.from(viewportEl.querySelectorAll<HTMLElement>('[data-page-index]'));
-    const layouts: CachedPageLayout[] = [];
-    for (const container of pageContainers) {
-      const attr = container.getAttribute('data-page-index');
-      if (attr !== null) {
-        const idx = parseInt(attr, 10);
-        if (!isNaN(idx)) {
-          const rect = container.getBoundingClientRect();
-          const offsetTop = rect.top - viewportRect.top + currentScrollTop;
-          const offsetBottom = rect.bottom - viewportRect.top + currentScrollTop;
-          layouts.push({ pageIndex: idx, offsetTop, offsetBottom });
-        }
-      }
-    }
-    layouts.sort((a, b) => a.pageIndex - b.pageIndex);
-    cachedPageLayouts = layouts;
-  }
 
   function performDragMove(clientX: number, clientY: number, disabledSnap: boolean = false): void {
     if (!canvasStore.dragState || canvasStore.dragState.mode !== 'move' || !viewportEl) return;
@@ -164,19 +137,10 @@
     // Resolve target page based on vertical pointer position and midpoint thresholds
     let targetPageIndex = draggedElement.pageIndex;
     if (store.pageCount > 1) {
-      if (!cachedPageLayouts) {
-        initDragPageLayouts();
-      }
-      if (cachedPageLayouts && cachedPageLayouts.length > 0) {
-        const viewportRect = viewportEl.getBoundingClientRect();
-        const currentScrollTop = viewportEl.scrollTop;
-        const pageBounds: PageLayoutBound[] = cachedPageLayouts.map((c) => ({
-          pageIndex: c.pageIndex,
-          top: c.offsetTop - currentScrollTop + viewportRect.top,
-          bottom: c.offsetBottom - currentScrollTop + viewportRect.top,
-        }));
-        targetPageIndex = resolveTargetPageIndex(clientY, pageBounds, draggedElement.pageIndex);
-      }
+      // Resolve target page via O(log N) binary search over cached vertical offsets
+      const viewportRect = viewportEl.getBoundingClientRect();
+      const targetScrollY = clientY - viewportRect.top + viewportEl.scrollTop;
+      targetPageIndex = resolvePageIndexAtScrollY(targetScrollY);
     }
 
     if (targetPageIndex !== cachedTargetPageIndex || !cachedTargetLayerEl) {
@@ -311,7 +275,6 @@
         canvasActions.endRotate();
       }
     }
-    cachedPageLayouts = null;
     cachedTargetPageIndex = null;
     cachedTargetLayerEl = null;
   }
@@ -360,23 +323,180 @@
     cachedFirstPageOffsetTop = null;
   }
 
+  let visiblePageRange = $state<{ min: number; max: number }>({ min: 0, max: 2 });
+  const VIRTUAL_OVERSCAN = 2;
+
+  function updateVisiblePageRange(): void {
+    if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0) return;
+    if (!featureFlags.isEnabled('performance.virtual-rendering') || store.pageCount <= 10) {
+      const targetMax = store.pageCount - 1;
+      const curMin = untrack(() => visiblePageRange.min);
+      const curMax = untrack(() => visiblePageRange.max);
+      if (curMin !== 0 || curMax !== targetMax) {
+        visiblePageRange = { min: 0, max: targetMax };
+      }
+      return;
+    }
+
+    const scrollTop = viewportEl.scrollTop;
+    const clientHeight = viewportEl.clientHeight;
+    if (clientHeight <= 0) {
+      const cur = store.currentPageIndex;
+      const newMin = Math.max(0, cur - VIRTUAL_OVERSCAN);
+      const newMax = Math.min(store.pageCount - 1, cur + VIRTUAL_OVERSCAN);
+      const curMin = untrack(() => visiblePageRange.min);
+      const curMax = untrack(() => visiblePageRange.max);
+      if (newMin !== curMin || newMax !== curMax) {
+        visiblePageRange = { min: newMin, max: newMax };
+      }
+      return;
+    }
+
+    const minIdx = resolvePageIndexAtScrollY(scrollTop);
+    const maxIdx = resolvePageIndexAtScrollY(scrollTop + clientHeight);
+
+    const newMin = Math.max(0, Math.min(minIdx, maxIdx) - VIRTUAL_OVERSCAN);
+    const newMax = Math.min(store.pageCount - 1, Math.max(minIdx, maxIdx) + VIRTUAL_OVERSCAN);
+
+    const curMin = untrack(() => visiblePageRange.min);
+    const curMax = untrack(() => visiblePageRange.max);
+    if (newMin !== curMin || newMax !== curMax) {
+      visiblePageRange = { min: newMin, max: newMax };
+    }
+  }
+
+  function shouldMountPage(pageIdx: number): boolean {
+    if (!featureFlags.isEnabled('performance.virtual-rendering') || store.pageCount <= 10) {
+      return true;
+    }
+
+    if (store.currentPageIndex === pageIdx) {
+      return true;
+    }
+
+    if (store.activeCrop?.pageIndex === pageIdx) {
+      return true;
+    }
+    if (store.inlineEdit?.span.pageIndex === pageIdx) {
+      return true;
+    }
+    if (store.selectedSpan?.pageIndex === pageIdx) {
+      return true;
+    }
+
+    if (canvasStore.activeDropPageIndex === pageIdx) {
+      return true;
+    }
+    if (canvasStore.dragState) {
+      const draggedEl = canvasStore.elements.find(el => el.id === canvasStore.dragState?.elementId);
+      if (draggedEl && draggedEl.pageIndex === pageIdx) {
+        return true;
+      }
+    }
+
+    return pageIdx >= visiblePageRange.min && pageIdx <= visiblePageRange.max;
+  }
+
+  // Spacer-based DOM virtualisation: compute heights for placeholder spacer divs
+  // that replace unmounted pages above and below the visible window
+
+  function computeTopSpacerHeight(): number {
+    if (visiblePageRange.min <= 0) return 0;
+    const offsets = getPageVerticalOffsets();
+    if (offsets.length === 0) return 0;
+    const firstVisibleOffset = offsets[visiblePageRange.min];
+    if (!firstVisibleOffset) return 0;
+    return firstVisibleOffset.top - offsets[0].top;
+  }
+
+  function computeBottomSpacerHeight(): number {
+    const pageCount = store.pageCount;
+    if (visiblePageRange.max >= pageCount - 1) return 0;
+    const offsets = getPageVerticalOffsets();
+    if (offsets.length === 0) return 0;
+    const lastVisibleOffset = offsets[visiblePageRange.max];
+    const lastPageOffset = offsets[pageCount - 1];
+    if (!lastVisibleOffset || !lastPageOffset) return 0;
+    return lastPageOffset.bottom - lastVisibleOffset.bottom;
+  }
+
+  let topSpacerHeight = $derived(computeTopSpacerHeight());
+  let bottomSpacerHeight = $derived(computeBottomSpacerHeight());
+
+  // Windowed page indices: only these pages produce DOM nodes inside the content container
+  let windowedPageIndices = $derived.by(() => {
+    const useWindowing = featureFlags.isEnabled('performance.virtual-rendering') && store.pageCount > 10;
+    if (!useWindowing) {
+      return Array.from({ length: store.pageCount }, (_, i) => i);
+    }
+    const min = visiblePageRange.min;
+    const max = visiblePageRange.max;
+    const count = max - min + 1;
+    const indices: number[] = new Array(count);
+    for (let i = 0; i < count; i++) {
+      indices[i] = min + i;
+    }
+    return indices;
+  });
+
   function getPageVerticalOffsets(): PageVerticalOffset[] {
     if (cachedVerticalOffsets) return cachedVerticalOffsets;
     if (!viewportEl || store.pageCount === 0) return [];
 
     let currentY: number = cachedFirstPageOffsetTop !== null ? cachedFirstPageOffsetTop : 0;
     if (cachedFirstPageOffsetTop === null) {
-      if (contentEl) {
-        const firstChild = contentEl.querySelector('[data-page-index="0"]') as HTMLElement | null;
-        currentY = firstChild ? firstChild.offsetTop : (viewportEl.clientHeight * 0.2);
-      } else {
-        currentY = viewportEl.clientHeight * 0.2;
-      }
+      // Arithmetic computation of the content container's 20vh top padding
+      // mirrors py-[20vh] on the content wrapper without requiring page 0 in the DOM
+      currentY = Math.round(viewportEl.clientHeight * 0.2);
       cachedFirstPageOffsetTop = currentY;
     }
 
+    const pageCount = store.pageCount;
+    if (featureFlags.isEnabled('performance.fast-dimensions') && pageCount > 50) {
+      const hasCustomTransforms = Boolean(
+        store.pageTransforms && Object.keys(store.pageTransforms).length > 0
+      );
+      if (!hasCustomTransforms) {
+        const firstDims = actions.service.document?.getPageDimensions(0) ?? { widthPts: 612, heightPts: 792 };
+        const midDims = actions.service.document?.getPageDimensions(Math.floor(pageCount / 2)) ?? firstDims;
+        const lastDims = actions.service.document?.getPageDimensions(pageCount - 1) ?? firstDims;
+        const isUniform =
+          firstDims.widthPts === midDims.widthPts &&
+          firstDims.heightPts === midDims.heightPts &&
+          firstDims.widthPts === lastDims.widthPts &&
+          firstDims.heightPts === lastDims.heightPts;
+
+        if (isUniform) {
+          const firstLayout = getPageLayout(0);
+          const offsets: PageVerticalOffset[] = new Array(pageCount);
+          let currentTop = currentY;
+          const height = firstLayout.height;
+          const spacing = firstLayout.spacing;
+
+          for (let i = 0; i < pageCount; i++) {
+            const top = currentTop;
+            const bottom = top + height;
+            const isLast = i === pageCount - 1;
+            const s = isLast ? 0 : spacing;
+            const threshold = isLast ? bottom : bottom + s / 2;
+
+            offsets[i] = {
+              pageIndex: i,
+              top,
+              bottom,
+              threshold,
+            };
+
+            currentTop = bottom + s;
+          }
+          cachedVerticalOffsets = offsets;
+          return offsets;
+        }
+      }
+    }
+
     const layouts: PageLayoutDimensions[] = [];
-    for (let i = 0; i < store.pageCount; i++) {
+    for (let i = 0; i < pageCount; i++) {
       layouts.push(getPageLayout(i));
     }
 
@@ -410,26 +530,28 @@
     scrollRafId = requestAnimationFrame(() => {
       scrollRafId = null;
       computeCurrentPage();
+      updateVisiblePageRange();
     });
   }
 
   function centerPage(pageIndex: number = 0, behavior: ScrollBehavior = 'instant', options?: ScrollTargetOptions): void {
     if (!viewportEl || !contentEl || !store.isDocumentLoaded || store.pageCount === 0 || canvasStore.dragState) return;
-    const pageEl = viewportEl.querySelector(`[data-page-index="${pageIndex}"]`) as HTMLElement | null;
-    if (!pageEl) return;
+    if (pageIndex < 0 || pageIndex >= store.pageCount) return;
 
     // Find the visible canvas opening between LeftPanel and RightPanel.
     // Falls back to viewportEl if .editor-shell-canvas is not present (e.g. in headless tests).
     const visibleContainer = (document.querySelector('.editor-shell-canvas') as HTMLElement | null) ?? viewportEl;
 
-    const pageRect = pageEl.getBoundingClientRect();
+    const pageEl = viewportEl.querySelector(`[data-page-index="${pageIndex}"]`) as HTMLElement | null;
+    const pageRect = pageEl?.getBoundingClientRect();
     const visibleRect = visibleContainer.getBoundingClientRect();
+    const viewportRect = viewportEl.getBoundingClientRect();
 
     let targetScrollLeft: number;
     let targetScrollTop: number;
 
     // When elements have valid rendered dimensions, compute exact screen-space centering.
-    if (pageRect.width > 0 && visibleRect.width > 0 && pageRect.height > 0 && visibleRect.height > 0) {
+    if (pageEl && pageRect && pageRect.width > 0 && visibleRect.width > 0 && pageRect.height > 0 && viewportRect.height > 0) {
       const currentScrollLeft = viewportEl.scrollLeft;
       const currentScrollTop = viewportEl.scrollTop;
 
@@ -457,22 +579,27 @@
         targetScreenY = pageRect.top + targetTop * scaleFactor;
       }
 
+      const visibleCenterY = viewportRect.top + viewportRect.height / 2;
       if (targetScreenY !== null) {
-        const visibleCenterY = visibleRect.top + visibleRect.height / 2;
         const deltaY = targetScreenY - visibleCenterY;
         targetScrollTop = Math.max(0, currentScrollTop + deltaY);
-      } else if (pageRect.height <= visibleRect.height) {
+      } else if (pageRect.height <= viewportRect.height) {
         const pageCenterY = pageRect.top + pageRect.height / 2;
-        const visibleCenterY = visibleRect.top + visibleRect.height / 2;
         const deltaY = pageCenterY - visibleCenterY;
         targetScrollTop = Math.max(0, currentScrollTop + deltaY);
       } else {
-        const deltaY = pageRect.top - (visibleRect.top + 24);
+        const deltaY = pageRect.top - (viewportRect.top + 24);
         targetScrollTop = Math.max(0, currentScrollTop + deltaY);
       }
     } else {
-      // Fallback for headless environments or unrendered layout boxes.
-      const viewportRect = viewportEl.getBoundingClientRect();
+      // Fallback for unmounted (virtualised) pages or headless environments without DOM layout boxes
+      const offsets = getPageVerticalOffsets();
+      const pageOffset = offsets[pageIndex];
+      const layout = getPageLayout(pageIndex);
+      const pageWidth = pageEl?.offsetWidth || layout.width;
+      const pageHeight = pageEl?.offsetHeight || (pageOffset ? (pageOffset.bottom - pageOffset.top) : layout.height);
+      const pageOffsetTop = pageEl?.offsetTop || (pageOffset ? pageOffset.top : 0);
+      // Reuse existing viewportRect from outer function scope
       const visibleOffsetX = visibleRect.width > 0 && viewportRect.width > 0
         ? Math.max(0, visibleRect.left - viewportRect.left)
         : 0;
@@ -480,14 +607,16 @@
         ? Math.max(0, visibleRect.top - viewportRect.top)
         : 0;
 
+      const pageOffsetLeft = pageEl?.offsetLeft || Math.max(0, (contentEl.scrollWidth - pageWidth) / 2);
+
       const scrollOffsets = calculatePageCenteringScroll({
         viewportWidth: viewportEl.clientWidth,
         viewportHeight: viewportEl.clientHeight,
         contentWidth: contentEl.scrollWidth,
-        pageOffsetLeft: pageEl.offsetLeft,
-        pageOffsetTop: pageEl.offsetTop,
-        pageWidth: pageEl.offsetWidth,
-        pageHeight: pageEl.offsetHeight,
+        pageOffsetLeft,
+        pageOffsetTop,
+        pageWidth,
+        pageHeight,
         visibleOffsetX,
         visibleWidth: visibleContainer.clientWidth || viewportEl.clientWidth,
         visibleOffsetY,
@@ -495,18 +624,44 @@
       });
       targetScrollLeft = scrollOffsets.scrollLeft;
       targetScrollTop = scrollOffsets.scrollTop;
+
+      if (options?.targetTop !== undefined || options?.destY !== undefined) {
+        let unscaledH = 792;
+        try {
+          unscaledH = actions.service.document.getPageDimensions(pageIndex).heightPts || 792;
+        } catch {}
+        const scaleFactor = pageHeight / unscaledH;
+        const targetPt = options.targetTop !== undefined
+          ? options.targetTop
+          : Math.max(0, unscaledH - (options.destY ?? 0));
+        const targetPixelY = pageOffsetTop + targetPt * scaleFactor;
+        const visibleH = visibleContainer.clientHeight || viewportEl.clientHeight;
+        const targetCenterY = visibleOffsetY + visibleH / 2;
+        targetScrollTop = Math.max(0, targetPixelY - targetCenterY);
+      }
     }
+
+    const isPageUnmounted = !pageEl || !pageRect || pageRect.width === 0 || pageRect.height === 0;
+    const effectiveBehavior = options?.behavior ?? (isPageUnmounted ? 'instant' : behavior);
 
     isCentering = true;
     viewportEl.scrollTo({
       left: Math.round(targetScrollLeft),
       top: Math.round(targetScrollTop),
-      behavior,
+      behavior: effectiveBehavior,
     });
+
+    if (effectiveBehavior === 'instant' && viewportEl.scrollTop !== Math.round(targetScrollTop)) {
+      viewportEl.scrollTop = Math.round(targetScrollTop);
+      viewportEl.scrollLeft = Math.round(targetScrollLeft);
+    }
+
+    updateVisiblePageRange();
 
     if (typeof requestAnimationFrame === 'function') {
       requestAnimationFrame(() => {
         isCentering = false;
+        updateVisiblePageRange();
       });
     } else {
       isCentering = false;
@@ -562,7 +717,18 @@
 
     observer.observe(visibleContainer);
 
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      if (wheelRafId !== null) {
+        cancelAnimationFrame(wheelRafId);
+        wheelRafId = null;
+      }
+    };
+  });
+
+  $effect(() => {
+    void store.currentPageIndex;
+    untrack(() => updateVisiblePageRange());
   });
 
   $effect(() => {
@@ -570,14 +736,13 @@
     void store.pageCount;
     void store.renderVersion;
     invalidatePageOffsetsCache();
+    untrack(() => updateVisiblePageRange());
   });
-
-
 
   function handleWindowResize(): void {
     cachedDropPageMetrics = null;
-    cachedPageLayouts = null;
     invalidatePageOffsetsCache();
+    updateVisiblePageRange();
     if (!store.isDocumentLoaded || !viewportEl || store.pageCount === 0 || store.showOrganizerView || canvasStore.dragState || store.isZooming) return;
     centerPage(store.currentPageIndex, 'instant');
   }
@@ -586,10 +751,14 @@
   let pendingWheelDy = 0;
   let lastWheelEvent: WheelEvent | null = null;
 
+  /**
+   * Handles wheel zoom gestures using calibrated smooth zoom scaling
+   * and zero-reflow focal point scroll offset calculation.
+   */
   function handleWheel(e: WheelEvent): void {
-    if (e.ctrlKey) {
+    if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
-      if (!viewportEl) return;
+      if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0) return;
 
       let dy = e.deltaY;
       if (e.deltaMode === 1) dy *= 33;
@@ -600,7 +769,7 @@
 
       if (wheelRafId !== null) return;
 
-      wheelRafId = requestAnimationFrame(async () => {
+      wheelRafId = requestAnimationFrame(() => {
         wheelRafId = null;
         if (!lastWheelEvent || !viewportEl) return;
 
@@ -610,50 +779,40 @@
         lastWheelEvent = null;
 
         const currentZoom = store.zoom;
-        const zoomFactor = Math.pow(2, -dyToApply / 140);
+        const zoomFactor = Math.max(0.75, Math.min(1.35, calculateSmoothZoomFactor(dyToApply, 600)));
         const newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, currentZoom * zoomFactor));
 
         if (newZoom === currentZoom) return;
 
-        let anchorEl = document.elementFromPoint(targetEvent.clientX, targetEvent.clientY)?.closest('[data-page-index]') as HTMLElement | null;
+        const viewportRect = viewportEl.getBoundingClientRect();
+        const pointerViewportX = targetEvent.clientX - viewportRect.left;
+        const pointerViewportY = targetEvent.clientY - viewportRect.top;
 
-        if (!anchorEl) {
-          const pageEls = Array.from(viewportEl.querySelectorAll('[data-page-index]')) as HTMLElement[];
-          let minDistance = Infinity;
-          for (const el of pageEls) {
-            const r = el.getBoundingClientRect();
-            const cy = r.top + r.height / 2;
-            const dist = Math.abs(cy - targetEvent.clientY);
-            if (dist < minDistance) {
-              minDistance = dist;
-              anchorEl = el;
-            }
-          }
-        }
+        const paddingLeft = typeof window !== 'undefined'
+          ? Math.round(window.innerWidth * 0.5)
+          : Math.round(viewportEl.clientWidth / 2);
+        const paddingTop = typeof window !== 'undefined'
+          ? Math.round(window.innerHeight * 0.2)
+          : Math.round(viewportEl.clientHeight * 0.2);
 
-        if (!anchorEl) return;
-
-        const anchorIdx = anchorEl.getAttribute('data-page-index');
-        const rect = anchorEl.getBoundingClientRect();
-        const percentX = (targetEvent.clientX - rect.left) / rect.width;
-        const percentY = (targetEvent.clientY - rect.top) / rect.height;
+        const newOffsets = calculateZoomScrollOffsets({
+          currentZoom,
+          newZoom,
+          scrollLeft: viewportEl.scrollLeft,
+          scrollTop: viewportEl.scrollTop,
+          pointerViewportX,
+          pointerViewportY,
+          paddingLeft,
+          paddingTop,
+        });
 
         invalidatePageOffsetsCache();
-        actions.setZoom(newZoom);
-        await tick();
+        actions.setZoom(newZoom, true);
 
-        // Guard against component unmount during the tick.
-        if (!viewportEl) return;
+        viewportEl.scrollLeft = newOffsets.scrollLeft;
+        viewportEl.scrollTop = newOffsets.scrollTop;
 
-        const newAnchorEl = viewportEl.querySelector(`[data-page-index="${anchorIdx}"]`) as HTMLElement | null;
-        if (newAnchorEl) {
-          const newRect = newAnchorEl.getBoundingClientRect();
-          const currentPointX = newRect.left + (newRect.width * percentX);
-          const currentPointY = newRect.top + (newRect.height * percentY);
-
-          viewportEl.scrollLeft += (currentPointX - targetEvent.clientX);
-          viewportEl.scrollTop += (currentPointY - targetEvent.clientY);
-        }
+        updateVisiblePageRange();
       });
     }
   }
@@ -774,7 +933,8 @@
       current.y === roundedY &&
       current.width === w &&
       current.height === h &&
-      current.kind === payload.kind
+      current.kind === payload.kind &&
+      current.payload === payload
     ) {
       return;
     }
@@ -787,6 +947,7 @@
       height: h,
       kind: payload.kind,
       label: payload.label ?? payload.text ?? payload.kind,
+      payload,
     });
   }
 
@@ -956,6 +1117,7 @@
 
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div
     bind:this={viewportEl}
     class="flex-1 min-h-0 w-full relative transition-colors no-scrollbars {store.showOrganizerView ? 'overflow-hidden' : 'overflow-auto bg-background'} {store.isDraggingOver ? 'bg-primary/10' : ''}"
@@ -973,6 +1135,7 @@
     }}
     role="region"
     aria-label="PDF Document Viewport"
+    tabindex="0"
   >
     {#if store.isDraggingOver}
       <div class="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm pointer-events-none border-2 border-dashed border-primary">
@@ -985,7 +1148,7 @@
     {#if !store.isDocumentLoaded}
       <div class="flex h-full w-full items-center justify-center">
         <div class="flex flex-col items-center justify-center gap-3 text-muted-foreground max-w-md text-center p-4">
-          <FileText class="h-12 w-12 stroke-[1.5]" />
+          <FileText aria-hidden="true" class="h-12 w-12 stroke-[1.5]" />
           <h2 class="text-lg font-semibold text-foreground">No Document Loaded</h2>
           <p class="text-xs text-muted-foreground">
             Open a local PDF file, convert office documents, spreadsheets, and markdown to PDF, merge multiple files, or choose from industry-standard compliance test suites.
@@ -998,24 +1161,27 @@
             </div>
           {/if}
 
-          <div class="flex flex-wrap items-center justify-center gap-2 mt-1">
+          <div class="flex flex-col items-stretch gap-2 mt-2 w-full max-w-xs text-foreground">
             {#if featureFlags.isEnabled('workspace.open')}
-            <Button size="sm" onclick={() => actions.triggerFileOpen()}>Open PDF File</Button>
-            {/if}
-            {#if featureFlags.isEnabled('conversion')}
-            <Button variant="outline" size="sm" onclick={() => actions.openConvertDialog()} class="gap-1.5">
-              <FileType class="w-3.5 h-3.5 text-primary" />
-              Convert to PDF...
+            <Button size="sm" onclick={() => actions.triggerFileOpen()} class="w-full justify-start gap-2">
+              <FolderOpen class="w-3.5 h-3.5" />
+              Open File(s)
             </Button>
             {/if}
-            {#if featureFlags.isEnabled('merge')}
-            <Button variant="outline" size="sm" onclick={() => actions.triggerMergeFiles()} class="gap-1.5">
+            {#if featureFlags.isEnabled('conversion') && featureFlags.isEnabled('workspace.convert') && featureFlags.isEnabled('workspace.quick-convert')}
+            <Button variant="outline" size="sm" onclick={() => actions.triggerQuickConvert()} class="w-full justify-start gap-2">
+              <FileType class="w-3.5 h-3.5 text-primary" />
+              Quick Convert to PDF
+            </Button>
+            {/if}
+            {#if featureFlags.isEnabled('merge') && featureFlags.isEnabled('workspace.merge')}
+            <Button variant="outline" size="sm" onclick={() => actions.triggerMergeFiles()} class="w-full justify-start gap-2">
               <Files class="w-3.5 h-3.5 text-primary" />
               Merge Files...
             </Button>
             {/if}
-            {#if featureFlags.isEnabled('workspace.compliance')}
-            <Button variant="outline" size="sm" onclick={() => store.openUrlDialog()} class="gap-1.5">
+            {#if featureFlags.isEnabled('workspace.compliance') && featureFlags.isEnabled('compliance')}
+            <Button variant="outline" size="sm" onclick={() => store.openUrlDialog()} class="w-full justify-start gap-2">
               <Globe class="w-3.5 h-3.5 text-primary" />
               Compliance Suites / URL...
             </Button>
@@ -1044,18 +1210,54 @@
         }}
         role="presentation"
       >
-        {#each Array.from({ length: store.pageCount }, (_, i) => i) as pageIdx (`${store.activeWorkspaceFileId ?? store.fileName}_${pageIdx}`)}
+        {#if topSpacerHeight > 0}
+          <div aria-hidden="true" style="height: {topSpacerHeight}px; width: 1px; shrink: 0;"></div>
+        {/if}
+        {#each windowedPageIndices as pageIdx (`${store.activeWorkspaceFileId ?? store.fileName}_${pageIdx}`)}
           {@const layout = getPageLayout(pageIdx)}
           <div
             data-page-index={pageIdx}
             class="flex items-center justify-center relative shrink-0 transition-none"
             style="width: {layout.width}px; height: {layout.height}px; margin-bottom: {layout.spacing}px;"
           >
-            <PdfPageView
-              pageIndex={pageIdx}
-            />
+            {#if shouldMountPage(pageIdx)}
+              <PdfPageView
+                pageIndex={pageIdx}
+              />
+            {:else}
+              <div
+                data-page-element="true"
+                data-page-index={pageIdx}
+                class="relative inline-block bg-transparent outline-none rounded-none p-0 my-0 cursor-pointer"
+                onclick={() => {
+                  actions.setCurrentPageFromScroll(pageIdx);
+                  actions.goToPage(pageIdx);
+                }}
+                role="button"
+                tabindex="0"
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') {
+                    actions.setCurrentPageFromScroll(pageIdx);
+                    actions.goToPage(pageIdx);
+                  }
+                }}
+                aria-label="PDF Page {pageIdx + 1}"
+              >
+                <div
+                  class="relative bg-white shadow-md border border-border/80 overflow-hidden rounded-none flex items-center justify-center"
+                  style="width: {layout.width}px; height: {layout.height}px;"
+                >
+                  <span class="text-xs text-muted-foreground/30 font-sans select-none">
+                    Page {pageIdx + 1}
+                  </span>
+                </div>
+              </div>
+            {/if}
           </div>
         {/each}
+        {#if bottomSpacerHeight > 0}
+          <div aria-hidden="true" style="height: {bottomSpacerHeight}px; width: 1px; shrink: 0;"></div>
+        {/if}
       </div>
     {/if}
   </div>
