@@ -43,7 +43,7 @@
   }
 </script>
 
-<section class={cn("sidebar-section pt-1.5 gap-1.5", (collapsible && !isExpanded) ? "pb-1.5" : "pb-3.5", borderBottom && "sidebar-divider", customClass)}>
+<section class={cn("sidebar-section", (collapsible && !isExpanded) ? "sidebar-section-collapsed" : "sidebar-section-expanded", borderBottom && "sidebar-divider", customClass)}>
   {#if collapsible}
     <div
       class={cn(sidebarSectionHeaderVariants({ collapsible: true }), headerClass)}

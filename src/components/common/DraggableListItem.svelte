@@ -2,7 +2,38 @@
   let globalDragOverId = $state<string | null>(null);
   let globalDropPosition = $state<'top' | 'bottom'>('top');
   let globalDragGroup = $state<string | null>(null);
+  let globalDragIndices = $state<number[]>([]);
+  let globalDragPayload = $state<Record<string, string>>({});
   let lastDragEndTime = 0;
+
+  export function getDragOverId(): string | null {
+    return globalDragOverId;
+  }
+
+  export function getDropPosition(): 'top' | 'bottom' {
+    return globalDropPosition;
+  }
+
+  export function getDragGroup(): string | null {
+    return globalDragGroup;
+  }
+
+  export function getDragIndices(): number[] {
+    return globalDragIndices;
+  }
+
+  export function getDragPayloadData(): Record<string, string> {
+    return globalDragPayload;
+  }
+
+  export function setDragOverState(id: string | null, position: 'top' | 'bottom' = 'top'): void {
+    globalDragOverId = id;
+    globalDropPosition = position;
+  }
+
+  export function clearDragOverState(): void {
+    globalDragOverId = null;
+  }
 </script>
 
 <script lang="ts">
@@ -13,14 +44,42 @@
     id: string;
     index: number;
     group: string;
+    acceptGroups?: string[];
     children: Snippet;
     getDragIndices?: () => number[];
+    getDragPayload?: () => Record<string, string>;
+    canDrop?: (sourceGroup: string, indices: number[], payload: Record<string, string>) => boolean;
     onReorder?: (fromIndices: number[], toIndex: number) => void;
+    onDropFromGroup?: (sourceGroup: string, indices: number[], targetIndex: number, payload: Record<string, string>) => void;
+    draggable?: boolean;
   }
 
-  let { id, index, group, children, getDragIndices, onReorder, class: className, onclick, ondragstart, ondragover, ondragleave, ondrop, ondragend, ...rest }: Props = $props();
+  let {
+    id,
+    index,
+    group,
+    acceptGroups,
+    children,
+    getDragIndices,
+    getDragPayload,
+    canDrop,
+    onReorder,
+    onDropFromGroup,
+    draggable = true,
+    class: className,
+    onclick,
+    ondragstart,
+    ondragover,
+    ondragleave,
+    ondrop,
+    ondragend,
+    ...rest
+  }: Props = $props();
 
-  let isDragTarget = $derived(globalDragOverId === id && globalDragGroup === group);
+  let isDragTarget = $derived(
+    globalDragOverId === id &&
+    (globalDragGroup === group || (acceptGroups !== undefined && globalDragGroup !== null && acceptGroups.includes(globalDragGroup)))
+  );
 </script>
 
 <div class="relative flex flex-col">
@@ -29,7 +88,7 @@
   {/if}
 
   <div
-    draggable="true"
+    draggable={draggable}
     class={className}
     onclick={(e) => {
       // Suppress click events that fire immediately after a drag finishes
@@ -42,17 +101,29 @@
       onclick?.(e);
     }}
     ondragstart={(e) => {
+      if (!draggable) {
+        e.preventDefault();
+        return;
+      }
       let indices = getDragIndices ? getDragIndices() : [index];
       
       // If the item being dragged is not in the selection, just drag this single item
       if (!indices.includes(index)) {
         indices = [index];
       }
+
+      const payload = getDragPayload ? getDragPayload() : {};
       
       if (e.dataTransfer) {
-        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.effectAllowed = 'all';
         e.dataTransfer.setData(`application/x-drag-group-${group}`, JSON.stringify(indices));
+        e.dataTransfer.setData('application/x-drag-group', group);
+        for (const [key, val] of Object.entries(payload)) {
+          e.dataTransfer.setData(key, val);
+        }
         globalDragGroup = group;
+        globalDragIndices = indices;
+        globalDragPayload = payload;
         
         if (indices.length > 1) {
           const ghost = document.createElement('div');
@@ -71,10 +142,18 @@
       ondragstart?.(e);
     }}
     ondragover={(e) => {
-      if (globalDragGroup !== group) return;
+      const isAcceptedGroup =
+        globalDragGroup === group ||
+        (acceptGroups !== undefined && globalDragGroup !== null && acceptGroups.includes(globalDragGroup));
+      if (!isAcceptedGroup || !globalDragGroup) return;
+
+      if (canDrop && !canDrop(globalDragGroup, globalDragIndices, globalDragPayload)) {
+        return;
+      }
+
       e.preventDefault();
-      if (e.dataTransfer?.types.includes(`application/x-drag-group-${group}`)) {
-        e.dataTransfer.dropEffect = 'move';
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = globalDragGroup === group ? 'move' : 'copy';
         const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
         const y = e.clientY - rect.top;
         globalDropPosition = y < rect.height / 2 ? 'top' : 'bottom';
@@ -83,45 +162,102 @@
       ondragover?.(e);
     }}
     ondragleave={(e) => {
+      if (e.currentTarget && (e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) {
+        return;
+      }
       if (globalDragOverId === id) {
         globalDragOverId = null;
       }
       ondragleave?.(e);
     }}
     ondrop={(e) => {
-      if (globalDragGroup !== group) return;
+      const sourceGroup =
+        globalDragGroup ||
+        (e.dataTransfer?.types.includes('application/x-drag-group')
+          ? e.dataTransfer.getData('application/x-drag-group')
+          : null);
+      const isAcceptedGroup =
+        sourceGroup === group ||
+        (acceptGroups !== undefined && sourceGroup !== null && acceptGroups.includes(sourceGroup));
+      if (!isAcceptedGroup || !sourceGroup) return;
+
       e.preventDefault();
+      e.stopPropagation();
       const dropPos = globalDropPosition;
+      let currentIndices = [...globalDragIndices];
+      const currentPayload = { ...globalDragPayload };
+
+      if (e.dataTransfer) {
+        for (const type of e.dataTransfer.types) {
+          if (!currentPayload[type]) {
+            try {
+              const val = e.dataTransfer.getData(type);
+              if (val) currentPayload[type] = val;
+            } catch {
+              // Ignore dataTransfer access restrictions
+            }
+          }
+        }
+        if (currentIndices.length === 0) {
+          const groupIndicesStr = e.dataTransfer.getData(`application/x-drag-group-${sourceGroup}`);
+          if (groupIndicesStr) {
+            try {
+              const parsed = JSON.parse(groupIndicesStr);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                currentIndices = parsed;
+              }
+            } catch {
+              // Ignore parse failure
+            }
+          }
+        }
+      }
+
       globalDragOverId = null;
       globalDragGroup = null;
+      globalDragIndices = [];
+      globalDragPayload = {};
       
-      const draggedIndicesStr = e.dataTransfer?.getData(`application/x-drag-group-${group}`);
-      if (draggedIndicesStr) {
-        try {
-          const draggedIndices: number[] = JSON.parse(draggedIndicesStr);
-          if (Array.isArray(draggedIndices) && draggedIndices.length > 0) {
-            const originalTargetIndex = dropPos === 'bottom' ? index + 1 : index;
-            
-            // Adjust target index by subtracting the number of dragged items that 
-            // originally appeared BEFORE the target index, since they will be removed.
-            const shift = draggedIndices.filter(i => i < originalTargetIndex).length;
-            const targetIndex = originalTargetIndex - shift;
-            
-            // Optimization: skip if dragging a single item exactly back to its own spot
-            if (draggedIndices.length === 1 && draggedIndices[0] === targetIndex) {
-               return;
+      if (sourceGroup === group) {
+        const draggedIndicesStr = e.dataTransfer?.getData(`application/x-drag-group-${group}`);
+        let draggedIndices = currentIndices;
+        if (draggedIndicesStr) {
+          try {
+            const parsed = JSON.parse(draggedIndicesStr);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              draggedIndices = parsed;
             }
-            
-            onReorder?.(draggedIndices, targetIndex);
+          } catch {
+            // Fallback to active in-memory indices
           }
-        } catch (err) {
-          console.error('Failed to parse drag data', err);
         }
+        if (draggedIndices.length > 0) {
+          const originalTargetIndex = dropPos === 'bottom' ? index + 1 : index;
+          
+          // Adjust target index by subtracting the count of dragged items that
+          // originally appeared before the target index, as they are removed from the same list
+          const shift = draggedIndices.filter(i => i < originalTargetIndex).length;
+          const targetIndex = originalTargetIndex - shift;
+          
+          // Optimisation: skip if dragging a single item back to its existing location
+          if (draggedIndices.length === 1 && draggedIndices[0] === targetIndex) {
+             return;
+          }
+          
+          onReorder?.(draggedIndices, targetIndex);
+        }
+      } else {
+        const originalTargetIndex = dropPos === 'bottom' ? index + 1 : index;
+        onDropFromGroup?.(sourceGroup, currentIndices, originalTargetIndex, currentPayload);
       }
       ondrop?.(e);
     }}
     ondragend={(e) => {
       lastDragEndTime = Date.now();
+      globalDragOverId = null;
+      globalDragGroup = null;
+      globalDragIndices = [];
+      globalDragPayload = {};
       ondragend?.(e);
     }}
     {...rest}
