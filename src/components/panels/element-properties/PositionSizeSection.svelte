@@ -1,6 +1,7 @@
 <script lang="ts">
   import { useCanvasStore } from '../../../stores/canvas.svelte';
   import { useCanvasActions } from '../../../stores/canvas-actions';
+  import { useEditorStore } from '../../../stores/editor.svelte';
   import SidebarSection from '../../common/SidebarSection.svelte';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
@@ -9,8 +10,12 @@
 
   const canvasStore = useCanvasStore();
   const canvasActions = useCanvasActions();
+  const editorStore = useEditorStore();
+
+  const isReadOnlyMode = $derived(editorStore.isReadOnly);
 
   function updateProp(propName: string, value: number): void {
+    if (isReadOnlyMode) return;
     const selected = canvasStore.selectedElementId;
     if (selected && !Number.isNaN(value)) {
       canvasActions.updateElementProperties(selected, { [propName]: value });
@@ -18,6 +23,7 @@
   }
 
   function handleNumberChange(e: Event, propName: string, min?: number): void {
+    if (isReadOnlyMode) return;
     const target = e.target as HTMLInputElement;
     const parsed = parseFloat(target.value);
     if (Number.isNaN(parsed)) return;
@@ -32,6 +38,7 @@
   }
 
   function rotateStep(delta: number): void {
+    if (isReadOnlyMode) return;
     const element = canvasStore.selectedElement;
     if (!element) return;
     const current = Math.round(element.rotation || 0);
@@ -55,6 +62,7 @@
             onkeydown={(e) => handleKeydown(e, 'x')}
             class="field-input" 
             step="0.5"
+            disabled={isReadOnlyMode}
           />
           <Input 
             type="number" 
@@ -64,6 +72,7 @@
             onkeydown={(e) => handleKeydown(e, 'y')}
             class="field-input" 
             step="0.5"
+            disabled={isReadOnlyMode}
           />
         </div>
       </div>
@@ -79,6 +88,7 @@
             class="field-input" 
             min="1"
             step="0.5"
+            disabled={isReadOnlyMode}
           />
           <Input 
             type="number" 
@@ -89,17 +99,19 @@
             class="field-input" 
             min="1"
             step="0.5"
+            disabled={isReadOnlyMode}
           />
         </div>
       </div>
       <div class="field-group col-span-2">
         <div class="flex items-center justify-between">
           <Label class="field-label">Rotation (°)</Label>
-          {#if Math.round(element.rotation || 0) !== 0}
+          {#if Math.round(element.rotation || 0) !== 0 && !isReadOnlyMode}
             <button
               type="button"
-              class="text-[10px] text-muted-foreground hover:text-foreground hover:underline cursor-pointer"
+              class="text-[10px] text-muted-foreground hover:text-foreground hover:underline cursor-pointer rounded-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               onclick={() => updateProp('rotation', 0)}
+              aria-label="Reset rotation to 0 degrees"
             >
               Reset (0°)
             </button>
@@ -115,21 +127,26 @@
             min="0"
             max="360"
             step="1"
+            disabled={isReadOnlyMode}
           />
           <ButtonGroup variant="outline" size="sm" class="shrink-0">
             <Button 
-              class="h-8 px-2" 
+              size="icon-sm" 
               onclick={() => rotateStep(-90)}
               title="Rotate 90° Counter-Clockwise"
+              aria-label="Rotate 90° Counter-Clockwise"
+              disabled={isReadOnlyMode}
             >
-              <RotateCcw class="h-3.5 w-3.5" />
+              <RotateCcw class="h-3.5 w-3.5" aria-hidden="true" />
             </Button>
             <Button 
-              class="h-8 px-2" 
+              size="icon-sm" 
               onclick={() => rotateStep(90)}
               title="Rotate 90° Clockwise"
+              aria-label="Rotate 90° Clockwise"
+              disabled={isReadOnlyMode}
             >
-              <RotateCw class="h-3.5 w-3.5" />
+              <RotateCw class="h-3.5 w-3.5" aria-hidden="true" />
             </Button>
           </ButtonGroup>
         </div>
