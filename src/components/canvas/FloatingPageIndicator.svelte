@@ -51,7 +51,7 @@
   {#if visible && store.isDocumentLoaded}
     <div
       transition:fade={{ duration: 200 }}
-      class="text-muted-foreground text-xs font-medium tracking-wide pointer-events-none select-none"
+      class="text-muted-foreground text-xs font-medium tracking-wide tabular-nums pointer-events-none select-none"
     >
       Page {store.currentPageIndex + 1} of {store.pageCount}
     </div>
