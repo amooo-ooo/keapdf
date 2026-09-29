@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { EditableSpan, EditableTextSpan, EditableImageSpan, EditableShapeSpan, EditableFormFieldSpan, PageCharacter, HighlightRect, TextLine, TextWord, AnnotationItem, PageCropInfo } from '../../core/types';
+  import type { EditableSpan, EditableTextSpan, EditableImageSpan, EditableShapeSpan, EditableFormFieldSpan, PageCharacter, HighlightRect, TextLine, TextWord, AnnotationItem, PageCropInfo, ColorRgba } from '../../core/types';
   import { CheckSquare, Circle, ChevronDown, PenTool, ScanText, Loader2 } from 'lucide-svelte';
   import { getUnifiedPageCharacters, findUnifiedCharacterAt, findClosestUnifiedCharacter, calculateUnifiedHighlightRects } from '../../services/pdf/unified-text-provider';
   import { ocrResultToSpans } from '../../services/ocr/ocr-span-converter';
@@ -16,6 +16,7 @@
   import { extractBaseFontFamily } from '../../services/pdf/font-charset-index';
   import { getCssFontFamily } from '../../services/font-loader';
   import { sanitizePdfText, parseColor } from '../../services/pdf/utils';
+  import { computeLineLayoutStyle, computeSpanFallbackLayoutStyle } from '../../services/pdf/text-layer-layout';
   import CropOverlay from './CropOverlay.svelte';
   import {
     isInspectorControlTarget,
@@ -143,7 +144,8 @@
     };
   });
 
-  const showOverlays = $derived(!store.showOrganizerView && (store.activeTool === 'select' || store.activeTool === 'text' || store.activeTool === 'highlight' || store.activeTool === 'pen' || store.activeTool === 'redact' || store.activeTool === 'note' || store.activeTool === 'eraser') && isVisible);
+  const showTextLayer = $derived(store.isReadOnly && !store.showOrganizerView && isVisible);
+  const showOverlays = $derived(!store.isReadOnly && !store.showOrganizerView && (store.activeTool === 'select' || store.activeTool === 'text' || store.activeTool === 'highlight' || store.activeTool === 'pen' || store.activeTool === 'redact' || store.activeTool === 'note' || store.activeTool === 'eraser') && isVisible);
 
   const unifiedCharacters = $derived(
     (store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'pen') && isVisible
@@ -576,34 +578,16 @@
           return;
         }
 
-        if (child instanceof HTMLSpanElement) {
+        if (child instanceof HTMLElement) {
           const spanEl = child;
-          const wordText = sanitizePdfText(spanEl.textContent || '');
-          if (wordText.length === 0) return;
-          const rawFSize = spanEl.dataset.fontSize ? parseFloat(spanEl.dataset.fontSize) : (origLine?.fontSize ?? span.fontSize);
-          const fSize = !isNaN(rawFSize) && rawFSize > 0 ? rawFSize : (origLine?.fontSize ?? span.fontSize);
-          const candidateWord = origLine?.words?.[words.length];
-          let origWord = candidateWord && candidateWord.text === wordText
-            ? candidateWord
-            : origLine?.words?.find((w) => w.text === wordText);
-          if (!origWord && span.lines) {
-            for (const otherLine of span.lines) {
-              const match = otherLine.words?.find((w) => w.text === wordText);
-              if (match) {
-                origWord = match;
-                break;
-              }
-            }
-          }
-
-          const isUnderline = spanEl.style.textDecoration.includes('underline');
-          const isStrike = spanEl.style.textDecoration.includes('line-through');
+          const rawTextContent = spanEl.textContent || '';
+          const isUnderline = spanEl.style.textDecoration.includes('underline') || spanEl.tagName === 'U';
+          const isStrike = spanEl.style.textDecoration.includes('line-through') || spanEl.tagName === 'S' || spanEl.tagName === 'STRIKE';
           const nodeBg = spanEl.style.backgroundColor;
           const hasValidBg = Boolean(nodeBg && nodeBg !== 'transparent');
           const isCleared = nodeBg === 'transparent';
-          const bgCol = isCleared ? undefined : (hasValidBg ? nodeBg : origWord?.backgroundColor);
-
-          let parsedColor = origWord?.color ?? span.color;
+          
+          let parsedColor: ColorRgba | undefined = undefined;
           if (spanEl.style.color) {
             try {
               const col = parseColor(spanEl.style.color);
@@ -612,23 +596,16 @@
               // keep existing
             }
           }
-
-          let fw = origWord?.fontWeight ?? (span.fontWeight || 'normal');
-          if (spanEl.style.fontWeight === 'bold' || spanEl.style.fontWeight === '700') {
-            fw = 'bold';
-          } else if (spanEl.style.fontWeight === 'normal' || spanEl.style.fontWeight === '400') {
-            fw = 'normal';
-          }
-
-          let fs = origWord?.fontStyle ?? (span.fontStyle || 'normal');
-          if (spanEl.style.fontStyle === 'italic') {
-            fs = 'italic';
-          } else if (spanEl.style.fontStyle === 'normal') {
-            fs = 'normal';
-          }
-
-          let hasPrecedingSpace = pendingTextNodeSpace;
-          if (!hasPrecedingSpace) {
+          
+          let fw = spanEl.style.fontWeight === 'bold' || spanEl.style.fontWeight === '700' || spanEl.tagName === 'B' || spanEl.tagName === 'STRONG' ? 'bold' : (spanEl.style.fontWeight === 'normal' || spanEl.style.fontWeight === '400' ? 'normal' : undefined);
+          let fs = spanEl.style.fontStyle === 'italic' || spanEl.tagName === 'I' || spanEl.tagName === 'EM' ? 'italic' : (spanEl.style.fontStyle === 'normal' ? 'normal' : undefined);
+          
+          const rawFSize = spanEl.dataset.fontSize ? parseFloat(spanEl.dataset.fontSize) : (origLine?.fontSize ?? span.fontSize);
+          const fSize = !isNaN(rawFSize) && rawFSize > 0 ? rawFSize : (origLine?.fontSize ?? span.fontSize);
+          const elementFontFamily = spanEl.dataset.fontFamily || (spanEl.style.fontFamily ? spanEl.style.fontFamily.replace(/["']/g, '') : undefined);
+          
+          let hasPrecedingSpaceGlobal = pendingTextNodeSpace;
+          if (!hasPrecedingSpaceGlobal) {
             let prevNode = spanEl.previousSibling;
             while (prevNode) {
               if (prevNode instanceof HTMLElement && prevNode.getAttribute('contenteditable') === 'false') {
@@ -638,7 +615,7 @@
               if (prevNode.nodeType === 3) {
                 const txt = prevNode.textContent || '';
                 if (/[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/.test(txt)) {
-                  hasPrecedingSpace = true;
+                  hasPrecedingSpaceGlobal = true;
                 }
                 break;
               }
@@ -648,54 +625,94 @@
               prevNode = prevNode.previousSibling;
             }
           }
-          if (!hasPrecedingSpace && spanEl.dataset.hasPrecedingSpace === 'true') {
-            hasPrecedingSpace = true;
+          if (!hasPrecedingSpaceGlobal && spanEl.dataset.hasPrecedingSpace === 'true') {
+            hasPrecedingSpaceGlobal = true;
           }
-          if (!hasPrecedingSpace && origWord && Boolean(origWord.hasPrecedingSpace)) {
-            hasPrecedingSpace = true;
-          }
-          if (!hasPrecedingSpace && words.length > 0 && UNICODE_LEADING_WS_REGEX.test(spanEl.textContent || '')) {
-            hasPrecedingSpace = true;
-          }
-
-          const approxCharWidth = fSize * 0.52;
-          const wordWidth = origWord?.width && origWord.width > 0 ? origWord.width : wordText.length * approxCharWidth;
-          const prevWord = words.length > 0 ? words[words.length - 1] : null;
-          const spaceOffset = hasPrecedingSpace ? fSize * 0.25 : 0;
-          let wordLeft: number;
-          if (origWord && (!prevWord || origWord.left >= prevWord.right - 0.5)) {
-            wordLeft = origWord.left;
-          } else if (prevWord) {
-            wordLeft = prevWord.right + spaceOffset;
+          
+          if (/[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]$/.test(rawTextContent)) {
+            pendingTextNodeSpace = true;
           } else {
-            wordLeft = isBulletSpan && lineIdx === 0 ? firstLineTextLeft : (origLine?.left ?? span.left);
+            pendingTextNodeSpace = false;
           }
-          const wordRight = wordLeft + wordWidth;
-
-          words.push({
-            text: wordText,
-            left: wordLeft,
-            top: origWord?.top ?? span.top,
-            right: wordRight,
-            bottom: origWord?.bottom ?? (span.top + span.height),
-            width: wordWidth,
-            height: origWord?.height ?? fSize,
-            fontSize: fSize,
-            baselineY: origWord?.baselineY ?? span.baselineY,
-            charStartIndex: 0,
-            charCount: wordText.length,
-            fontFamily: origWord?.fontFamily ?? span.fontFamily,
-            rawFontFamily: origWord?.rawFontFamily ?? span.rawFontFamily,
-            matchedFontFamily: origWord?.matchedFontFamily ?? span.matchedFontFamily,
-            color: parsedColor,
-            fontWeight: fw,
-            fontStyle: fs,
-            underline: isUnderline || origWord?.underline,
-            strikethrough: isStrike || origWord?.strikethrough,
-            backgroundColor: bgCol,
-            hasPrecedingSpace,
-          });
-          pendingTextNodeSpace = false;
+          
+          const tokens = rawTextContent.split(/([\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+)/);
+          
+          for (let i = 0; i < tokens.length; i++) {
+            const token = tokens[i];
+            if (!token) continue;
+            if (/^[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+$/.test(token)) {
+              hasPrecedingSpaceGlobal = true;
+              continue;
+            }
+            const wordText = sanitizePdfText(token);
+            if (wordText.length === 0) continue;
+            
+            const candidateWord = origLine?.words?.[words.length];
+            let origWord = candidateWord && candidateWord.text === wordText
+              ? candidateWord
+              : origLine?.words?.find((w) => w.text === wordText);
+            if (!origWord && span.lines) {
+              for (const otherLine of span.lines) {
+                const match = otherLine.words?.find((w) => w.text === wordText);
+                if (match) {
+                  origWord = match;
+                  break;
+                }
+              }
+            }
+            
+            let hasPrecedingSpace = hasPrecedingSpaceGlobal;
+            if (!hasPrecedingSpace && origWord && Boolean(origWord.hasPrecedingSpace)) {
+              hasPrecedingSpace = true;
+            }
+            if (!hasPrecedingSpace && words.length > 0 && i === 0 && UNICODE_LEADING_WS_REGEX.test(rawTextContent)) {
+              hasPrecedingSpace = true;
+            }
+            
+            const bgCol = isCleared ? undefined : (hasValidBg ? nodeBg : origWord?.backgroundColor);
+            const finalColor = parsedColor ?? origWord?.color ?? span.color;
+            const finalFw = fw ?? origWord?.fontWeight ?? (span.fontWeight || 'normal');
+            const finalFs = fs ?? origWord?.fontStyle ?? (span.fontStyle || 'normal');
+            
+            const approxCharWidth = fSize * 0.52;
+            const wordWidth = origWord?.width && origWord.width > 0 ? origWord.width : wordText.length * approxCharWidth;
+            const prevWord = words.length > 0 ? words[words.length - 1] : null;
+            const spaceOffset = hasPrecedingSpace ? fSize * 0.25 : 0;
+            let wordLeft: number;
+            if (origWord && (!prevWord || origWord.left >= prevWord.right - 0.5)) {
+              wordLeft = origWord.left;
+            } else if (prevWord) {
+              wordLeft = prevWord.right + spaceOffset;
+            } else {
+              wordLeft = isBulletSpan && lineIdx === 0 ? firstLineTextLeft : (origLine?.left ?? span.left);
+            }
+            const wordRight = wordLeft + wordWidth;
+            
+            words.push({
+              text: wordText,
+              left: wordLeft,
+              top: origWord?.top ?? span.top,
+              right: wordRight,
+              bottom: origWord?.bottom ?? (span.top + span.height),
+              width: wordWidth,
+              height: origWord?.height ?? fSize,
+              fontSize: fSize,
+              baselineY: origWord?.baselineY ?? span.baselineY,
+              charStartIndex: 0,
+              charCount: wordText.length,
+              fontFamily: elementFontFamily || origWord?.fontFamily || span.fontFamily,
+              rawFontFamily: origWord?.rawFontFamily ?? span.rawFontFamily,
+              matchedFontFamily: origWord?.matchedFontFamily ?? span.matchedFontFamily,
+              color: finalColor,
+              fontWeight: finalFw,
+              fontStyle: finalFs,
+              underline: isUnderline ? true : undefined,
+              strikethrough: isStrike ? true : undefined,
+              backgroundColor: bgCol,
+              hasPrecedingSpace,
+            });
+            hasPrecedingSpaceGlobal = false;
+          }
         }
       });
 
@@ -828,7 +845,7 @@
   }
 
   function extractOverlaySpansIfNeeded(): void {
-    if (!showOverlays) {
+    if (!showOverlays && !showTextLayer) {
       return;
     }
     const currentVer = store.renderVersion;
@@ -968,7 +985,7 @@
 
   $effect(() => {
     const isTextAwareAnnotation = store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'pen';
-    if (showOverlays && isVisible) {
+    if ((showOverlays || showTextLayer) && isVisible) {
       if (isTextAwareAnnotation && pageCharacters.length === 0) {
         extractOverlaySpansIfNeeded();
       } else {
@@ -1140,14 +1157,18 @@
       target?.closest('.canvas-element-container') ||
       target?.closest('.selection-overlay-container') ||
       target?.closest('.inline-editor-input') ||
-      target?.closest('[contenteditable="true"]')
+      target?.closest('[contenteditable="true"]') ||
+      target?.closest('.pdf-text-layer') ||
+      target?.closest('[data-text-layer="true"]')
     ) {
       return;
     }
     actions.setCurrentPageFromScroll(pageIndex);
     actions.clearSelection(true);
     canvasStore.selectElement(null);
-    selection.select(`page_${pageIndex}`, e.ctrlKey || e.metaKey, e.shiftKey);
+    if (!store.isReadOnly && store.canSelectElements) {
+      selection.select(`page_${pageIndex}`, e.ctrlKey || e.metaKey, e.shiftKey);
+    }
   }
 
   let isSubmittingInlineEdit = $state(false);
@@ -1655,6 +1676,7 @@
   }
 
   function handleSpanPointerDown(e: PointerEvent, span: EditableSpan) {
+    if (store.isReadOnly || !store.canSelectElements) return;
     if (store.selectedSpan?.id === span.id) {
         if (store.activeTool === 'text' && span.type === 'text') return;
 
@@ -1672,6 +1694,7 @@
             const dy = Math.abs(me.clientY - startY);
             if (dx > 8 || dy > 8) {
                 cleanup();
+                if (!store.canMoveElements) return;
                 if (span.type === 'text' || span.type === 'image' || span.type === 'shape' || span.type === 'form-field') {
                     const newId = await actions.extractObjectToCanvas(span.type, span, canvasStore);
                     if (newId) {
@@ -1772,7 +1795,9 @@
     if (e.key === 'Enter') {
       actions.setCurrentPageFromScroll(pageIndex);
       actions.clearSelection(true);
-      selection.select(`page_${pageIndex}`, e.ctrlKey || e.metaKey, e.shiftKey);
+      if (!store.isReadOnly && store.canSelectElements) {
+        selection.select(`page_${pageIndex}`, e.ctrlKey || e.metaKey, e.shiftKey);
+      }
     }
   }}
   role="button"
@@ -1780,7 +1805,7 @@
   aria-label="PDF Page {pageIndex + 1}"
 >
   <div
-    class="relative bg-background overflow-hidden rounded-none"
+    class="relative bg-white shadow-md border border-border/80 overflow-hidden rounded-none"
     style="width: {Math.round(widthPts * visualScale)}px; height: {Math.round(heightPts * visualScale)}px; contain: layout style paint;"
   >
     <div 
@@ -1799,6 +1824,36 @@
         </div>
       </div>
     {/each}
+
+    <!-- Text Selection Layer (Viewing Mode: Chrome / Firefox PDF viewer parity) -->
+    {#if showTextLayer && !isPageCropping && (featureFlags ? featureFlags.isEnabled('view-mode.viewing.text-selection') : true)}
+      <div
+        class="pdf-text-layer absolute inset-0 pointer-events-auto select-text z-10 overflow-hidden leading-none"
+        data-text-layer="true"
+        data-page-index={pageIndex}
+        role="presentation"
+      >
+        {#each editableSpans as span (span.id)}
+          {@const spanFont = getCssFontFamily(span.rawFontFamily || span.matchedFontFamily || span.fontFamily, extractBaseFontFamily)}
+          {#if span.lines && span.lines.length > 0}
+            {#each span.lines as line}
+              {@const lineFont = getCssFontFamily(line.rawFontFamily || line.matchedFontFamily || span.rawFontFamily || span.matchedFontFamily || span.fontFamily, extractBaseFontFamily)}
+              {@const layout = computeLineLayoutStyle(line, visualScale, lineFont)}
+              <span
+                class="pdf-text-line absolute cursor-text whitespace-pre text-transparent select-text selection:bg-selection/30 selection:text-transparent"
+                style={layout.styleString}
+              >{line.text}</span>
+            {/each}
+          {:else}
+            {@const layout = computeSpanFallbackLayoutStyle(span, visualScale, spanFont)}
+            <span
+              class="pdf-text-line absolute cursor-text whitespace-pre text-transparent select-text selection:bg-selection/30 selection:text-transparent"
+              style={layout.styleString}
+            >{span.text}</span>
+          {/if}
+        {/each}
+      </div>
+    {/if}
 
     {#if showOverlays && !isPageCropping}
       <div 
@@ -1892,6 +1947,14 @@
               }}
               ondblclick={async (e) => {
                 e.stopPropagation();
+                if (span.type === 'form-field') {
+                  if (!store.canEditValues) return;
+                  if (featureFlags ? featureFlags.isEnabled('canvas-elements') : true) {
+                    await actions.extractObjectToCanvas(span.type, span, canvasStore);
+                  }
+                  return;
+                }
+                if (store.isReadOnly || !store.canEditContent) return;
                 if (span.type === 'text') {
                   if (featureFlags ? featureFlags.isEnabled('text-editing') : true) {
                     actions.setCurrentPageFromScroll(pageIndex);
@@ -1910,13 +1973,17 @@
               onkeydown={async (e) => {
                 if (e.key === 'Enter' || (span.type !== 'text' && e.key === ' ')) {
                   e.stopPropagation();
-                  if (span.type === 'text') {
-                    if (featureFlags ? featureFlags.isEnabled('text-editing') : true) {
+                  if (span.type === 'form-field') {
+                    if (store.canEditValues && (featureFlags ? featureFlags.isEnabled('canvas-elements') : true)) {
+                      await actions.extractObjectToCanvas(span.type, span, canvasStore);
+                    }
+                  } else if (span.type === 'text') {
+                    if (!store.isReadOnly && store.canEditContent && (featureFlags ? featureFlags.isEnabled('text-editing') : true)) {
                       actions.setCurrentPageFromScroll(pageIndex);
                       actions.startInlineEdit(span as EditableTextSpan);
                     }
                   } else {
-                    if (featureFlags ? featureFlags.isEnabled('canvas-elements') : true) {
+                    if (!store.isReadOnly && (featureFlags ? featureFlags.isEnabled('canvas-elements') : true)) {
                       await actions.extractObjectToCanvas(span.type, span, canvasStore);
                     }
                   }
@@ -1927,10 +1994,11 @@
                 {@const textSpan = span as EditableTextSpan}
                 {#if textSpan.isOcr}
                   <span
-                    class="absolute inset-0 select-text text-transparent selection:bg-primary/25 cursor-text overflow-hidden whitespace-pre pointer-events-auto"
+                    class="absolute inset-0 select-text text-transparent selection:bg-selection/30 selection:text-transparent cursor-text overflow-hidden whitespace-pre pointer-events-auto"
                     style="
                       font-size: {(textSpan.fontSize * renderScale).toFixed(1)}px;
-                      line-height: {((textSpan.lineHeight || textSpan.fontSize * 1.2) * renderScale).toFixed(1)}px;
+                      line-height: 1;
+                      height: 100%;
                       font-family: {textSpan.fontFamily || 'Helvetica'}, sans-serif;
                     "
                   >{textSpan.text}</span>
@@ -2082,7 +2150,7 @@
         {/each}
 
         <!-- Span Selection Overlay (Kept visible during inline edit for consistent selection borders and white square handles) -->
-        {#if store.selectedSpan?.pageIndex === pageIndex}
+        {#if store.selectedSpan?.pageIndex === pageIndex && !store.isReadOnly && store.canSelectElements}
           <div class="absolute inset-0 pointer-events-none z-20">
             <SelectionOverlay 
               element={{ 
@@ -2200,7 +2268,7 @@
     <CanvasElementLayer {pageIndex} zoom={visualScale} />
   {/if}
 
-  {#if selection.isSelected(`page_${pageIndex}`) && !isPageCropping}
+  {#if selection.isSelected(`page_${pageIndex}`) && !isPageCropping && !store.isReadOnly && store.canSelectElements}
     <div class="absolute inset-0 z-10 pointer-events-none">
       <SelectionOverlay 
         element={{ id: `page_${pageIndex}`, x: 0, y: 0, width: widthPts, height: heightPts, rotation: 0 }} 
@@ -2211,6 +2279,7 @@
       />
     </div>
   {/if}
+
 
   <!-- Scanned Document OCR Badge & Progress Indicator -->
   {#if (featureFlags ? featureFlags.isEnabled('ocr') : true) && store.scannedPages.has(pageIndex) && !store.pageOcrResults.has(pageIndex)}
