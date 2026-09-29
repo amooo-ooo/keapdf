@@ -1,6 +1,7 @@
 <script lang="ts">
   import { useCanvasStore } from '../../../stores/canvas.svelte';
   import { useCanvasActions } from '../../../stores/canvas-actions';
+  import { useEditorStore } from '../../../stores/editor.svelte';
   import type { FormFieldElement, FormFieldVariant } from '../../../stores/canvas-types';
   import type { ElementPanelProps } from '../../../core/element-registry';
   import SidebarSection from '../../common/SidebarSection.svelte';
@@ -20,6 +21,9 @@
 
   const canvasStore = useCanvasStore();
   const canvasActions = useCanvasActions();
+  const editorStore = useEditorStore();
+
+  const isReadOnlyMode = $derived(editorStore.isReadOnly);
 
   const formEl = $derived(
     element ?? (canvasStore.selectedElement?.kind === 'form-field' ? (canvasStore.selectedElement as FormFieldElement) : null)
@@ -75,6 +79,7 @@
   ];
 
   function updateProp(propName: keyof FormFieldElement, value: unknown): void {
+    if (isReadOnlyMode || !editorStore.canEditValues) return;
     const targetId = formEl?.id ?? canvasStore.selectedElementId;
     if (targetId) {
       canvasActions.updateElementProperties(targetId, { [propName]: value });
@@ -123,7 +128,7 @@
             if (val) updateProp('variant', val as FormFieldVariant);
           }}
         >
-          <Select.Trigger class="h-8 text-xs w-full font-normal">
+          <Select.Trigger class="h-8 text-xs w-full font-normal" disabled={isReadOnlyMode}>
             {FIELD_VARIANTS.find((v) => v.value === formEl.variant)?.label || formEl.variant}
           </Select.Trigger>
           <Select.Content>
@@ -146,24 +151,26 @@
             oninput={(e) => handleStringChange(e, 'sourceFieldName')}
             placeholder="e.g. radio_group_1"
             class="h-8 text-xs w-full" 
+            disabled={isReadOnlyMode}
           />
           <span class="text-[10px] text-muted-foreground">Radio buttons sharing this group name are mutually exclusive.</span>
         </div>
 
         <!-- Option Label -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Option Label</Label>
           <Input 
             type="text" 
             value={formEl.label} 
             oninput={(e) => handleStringChange(e, 'label')}
             placeholder="e.g. Option 1"
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
         <!-- Export Value -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Export Value</Label>
           <Input 
             type="text" 
@@ -173,7 +180,8 @@
               updateProp('options', val ? [val] : []);
             }}
             placeholder="e.g. option_1"
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
@@ -182,6 +190,7 @@
           <ControlRow label="Selected by Default" size="sm">
             <Switch
               checked={formEl.value === 'true' || (Boolean(formEl.options?.[0]) && formEl.value === formEl.options?.[0])}
+              disabled={formEl.readOnly || isReadOnlyMode || !editorStore.canEditValues}
               onCheckedChange={(checked) => {
                 const activeVal = formEl.options?.[0] || 'true';
                 updateProp('value', checked ? activeVal : 'false');
@@ -204,13 +213,14 @@
 
       {:else if formEl.variant === 'checkbox'}
         <!-- Checkbox Label -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Field Name / Label</Label>
           <Input 
             type="text" 
             value={formEl.label} 
             oninput={(e) => handleStringChange(e, 'label')}
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
@@ -219,6 +229,7 @@
           <ControlRow label="Checked by Default" size="sm">
             <Switch
               checked={formEl.value === 'true' || (formEl.value as unknown) === true || formEl.value === 'checked' || formEl.value === '1' || formEl.value === 'yes'}
+              disabled={formEl.readOnly || isReadOnlyMode || !editorStore.canEditValues}
               onCheckedChange={(checked) => updateProp('value', checked ? 'true' : 'false')}
               aria-label="Checked by Default"
             />
@@ -227,18 +238,19 @@
 
       {:else if formEl.variant === 'dropdown'}
         <!-- Dropdown Label -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Field Name / Label</Label>
           <Input 
             type="text" 
             value={formEl.label} 
             oninput={(e) => handleStringChange(e, 'label')}
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
         <!-- Dropdown Options -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Options (comma separated)</Label>
           <Input 
             type="text" 
@@ -247,65 +259,71 @@
             onblur={commitOptions}
             onkeydown={(e) => { if (e.key === 'Enter') commitOptions(); }}
             placeholder="Option 1, Option 2, Option 3..."
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
         <!-- Default Selected Value -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Default Selected Value</Label>
           <Input 
             type="text" 
             value={formEl.value ?? ''} 
             oninput={(e) => handleStringChange(e, 'value')}
             placeholder="Initial selected value..."
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={formEl.readOnly || isReadOnlyMode || !editorStore.canEditValues}
           />
         </div>
 
         <!-- Placeholder -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Placeholder</Label>
           <Input 
             type="text" 
             value={formEl.placeholder ?? ''} 
             oninput={(e) => handleStringChange(e, 'placeholder')}
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
       {:else if formEl.variant === 'text-input'}
         <!-- Text Input Label -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Field Name / Label</Label>
           <Input 
             type="text" 
             value={formEl.label} 
             oninput={(e) => handleStringChange(e, 'label')}
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
         <!-- Initial Value -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Field Value</Label>
           <Input 
             type="text" 
             value={formEl.value ?? ''} 
             oninput={(e) => handleStringChange(e, 'value')}
             placeholder="Initial or current value..."
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={formEl.readOnly || isReadOnlyMode || !editorStore.canEditValues}
           />
         </div>
 
         <!-- Placeholder -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Placeholder</Label>
           <Input 
             type="text" 
             value={formEl.placeholder ?? ''} 
             oninput={(e) => handleStringChange(e, 'placeholder')}
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
@@ -314,6 +332,7 @@
           <ControlRow label="Multiline Text" size="sm">
             <Switch
               checked={Boolean(formEl.multiline)}
+              disabled={isReadOnlyMode}
               onCheckedChange={(checked) => updateProp('multiline', checked)}
               aria-label="Multiline Text"
             />
@@ -325,6 +344,7 @@
           <ControlRow label="Password Field" size="sm">
             <Switch
               checked={Boolean(formEl.password)}
+              disabled={isReadOnlyMode}
               onCheckedChange={(checked) => updateProp('password', checked)}
               aria-label="Password Field"
             />
@@ -333,19 +353,20 @@
 
       {:else if formEl.variant === 'signature'}
         <!-- Signature Field Name -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Field Name</Label>
           <Input 
             type="text" 
             value={formEl.sourceFieldName || formEl.label} 
             oninput={(e) => handleStringChange(e, 'sourceFieldName')}
             placeholder="e.g. Signature1"
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
         <!-- Signer Prompt -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Signer Prompt</Label>
           <Input 
             type="text" 
@@ -355,44 +376,48 @@
               handleStringChange(e, 'label');
             }}
             placeholder="e.g. Sign here"
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
       {:else if formEl.variant === 'button'}
         <!-- Button Label -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Button Label</Label>
           <Input 
             type="text" 
             value={formEl.label} 
             oninput={(e) => handleStringChange(e, 'label')}
             placeholder="e.g. Submit"
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
         <!-- Button Field Name -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Field Name</Label>
           <Input 
             type="text" 
             value={formEl.sourceFieldName ?? ''} 
             oninput={(e) => handleStringChange(e, 'sourceFieldName')}
             placeholder="e.g. btn_submit"
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
 
       {:else}
         <!-- Attachment Field -->
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Field Name / Label</Label>
           <Input 
             type="text" 
             value={formEl.label} 
             oninput={(e) => handleStringChange(e, 'label')}
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
+            disabled={isReadOnlyMode}
           />
         </div>
       {/if}
@@ -412,7 +437,7 @@
             if (val) updateProp('fontFamily', val);
           }}
         >
-          <Select.Trigger class="h-8 text-xs w-full font-normal">
+          <Select.Trigger class="h-8 text-xs w-full font-normal" disabled={isReadOnlyMode}>
             {getDisplayFontName(formEl.fontFamily || 'Helvetica', extractBaseFontFamily)}
           </Select.Trigger>
           <Select.Content>
@@ -433,9 +458,10 @@
             type="number" 
             value={formEl.fontSize ?? 13} 
             oninput={(e) => handleNumberChange(e, 'fontSize')}
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
             min="6"
             max="72"
+            disabled={isReadOnlyMode}
           />
         </div>
 
@@ -444,6 +470,7 @@
           <ColorPicker
             value={formEl.color || '#111827'}
             presets={TEXT_COLOR_SWATCHES}
+            disabled={isReadOnlyMode}
             onValueChange={(c) => updateProp('color', c)}
             onInteractingChange={setInspectorInteracting}
           />
@@ -458,6 +485,7 @@
             variant={(formEl.textAlign || 'left') === 'left' ? 'default' : 'outline'}
             size="sm"
             class="flex-1 h-8 p-0"
+            disabled={isReadOnlyMode}
             onclick={() => updateProp('textAlign', 'left')}
             title="Align Left"
             aria-label="Align Left"
@@ -469,6 +497,7 @@
             variant={formEl.textAlign === 'center' ? 'default' : 'outline'}
             size="sm"
             class="flex-1 h-8 p-0"
+            disabled={isReadOnlyMode}
             onclick={() => updateProp('textAlign', 'center')}
             title="Align Center"
             aria-label="Align Center"
@@ -480,6 +509,7 @@
             variant={formEl.textAlign === 'right' ? 'default' : 'outline'}
             size="sm"
             class="flex-1 h-8 p-0"
+            disabled={isReadOnlyMode}
             onclick={() => updateProp('textAlign', 'right')}
             title="Align Right"
             aria-label="Align Right"
@@ -503,6 +533,7 @@
           presets={BG_COLOR_SWATCHES}
           allowNone={true}
           noneValue="transparent"
+          disabled={isReadOnlyMode}
           onValueChange={(c) => updateProp('backgroundColor', c)}
           onInteractingChange={setInspectorInteracting}
         />
@@ -516,33 +547,36 @@
           presets={BORDER_COLOR_SWATCHES}
           allowNone={true}
           noneValue="transparent"
+          disabled={isReadOnlyMode}
           onValueChange={(c) => updateProp('borderColor', c)}
           onInteractingChange={setInspectorInteracting}
         />
       </div>
 
       <!-- Border Width & Border Radius -->
-      <div class="grid grid-cols-2 gap-2 mt-0.5">
-        <div class="flex flex-col gap-1">
+      <div class="field-grid-2 mt-0.5">
+        <div class="field-group-sm">
           <Label class="field-label">Border Width (pt)</Label>
           <Input 
             type="number" 
             value={formEl.borderWidth ?? 1} 
             oninput={(e) => handleNumberChange(e, 'borderWidth')}
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
             min="0"
             max="12"
+            disabled={isReadOnlyMode}
           />
         </div>
-        <div class="flex flex-col gap-1">
+        <div class="field-group-sm">
           <Label class="field-label">Corner Radius (px)</Label>
           <Input 
             type="number" 
             value={formEl.borderRadius ?? 4} 
             oninput={(e) => handleNumberChange(e, 'borderRadius')}
-            class="h-8 text-xs w-full" 
+            class="field-input w-full" 
             min="0"
             max="24"
+            disabled={isReadOnlyMode}
           />
         </div>
       </div>
@@ -557,7 +591,7 @@
             if (val) updateProp('borderStyle', val as FormFieldElement['borderStyle']);
           }}
         >
-          <Select.Trigger class="h-8 text-xs w-full font-normal">
+          <Select.Trigger class="h-8 text-xs w-full font-normal" disabled={isReadOnlyMode}>
             {BORDER_STYLES.find((s) => s.value === (formEl.borderStyle || 'solid'))?.label || 'Solid'}
           </Select.Trigger>
           <Select.Content>
@@ -578,6 +612,7 @@
       <ControlRow label="Required Field" size="sm">
         <Switch
           checked={Boolean(formEl.required)}
+          disabled={isReadOnlyMode}
           onCheckedChange={(checked) => updateProp('required', checked)}
           aria-label="Required Field"
         />
@@ -591,6 +626,7 @@
         {/snippet}
         <Switch
           checked={Boolean(formEl.readOnly)}
+          disabled={isReadOnlyMode}
           onCheckedChange={(checked) => updateProp('readOnly', checked)}
           aria-label="Read Only"
         />
