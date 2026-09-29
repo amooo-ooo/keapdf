@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useCanvasActions } from '../../stores/canvas-actions';
@@ -30,8 +31,11 @@
     Stamp,
     Layers,
     Paperclip,
-    StickyNote,
     RectangleHorizontal,
+    Video,
+    Volume2,
+    Box,
+    QrCode,
   } from 'lucide-svelte';
 
   const store = useEditorStore();
@@ -58,9 +62,70 @@
     actions.triggerImageImport();
   }
 
+  function handleEmbedVideo(): void {
+    actions.triggerVideoImport();
+  }
+
+  function handleEmbedAudio(): void {
+    actions.triggerAudioImport();
+  }
+
+  function handleEmbed3D(): void {
+    actions.trigger3DImport();
+  }
+
+  function handleAttachFile(): void {
+    actions.triggerAttachmentImport();
+  }
+
+  function handleAddQrBarcode(): void {
+    actions.openQrBarcodeModal();
+  }
+
   function triggerTool(toolName: string): void {
     store.activeMockupTool = toolName;
   }
+
+  let activeDragBadge: HTMLDivElement | null = null;
+  let activeDragOverHandler: ((e: DragEvent) => void) | null = null;
+  let transparentDragImage: HTMLImageElement | null = null;
+
+  function getTransparentDragImage(): HTMLImageElement | null {
+    if (!transparentDragImage && typeof document !== 'undefined') {
+      transparentDragImage = new Image();
+      transparentDragImage.src =
+        'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+    }
+    return transparentDragImage;
+  }
+
+  function cleanupDragBadge(): void {
+    if (activeDragBadge) {
+      if (activeDragBadge.parentNode) {
+        activeDragBadge.parentNode.removeChild(activeDragBadge);
+      }
+      activeDragBadge = null;
+    }
+    if (activeDragOverHandler && typeof window !== 'undefined') {
+      window.removeEventListener('dragover', activeDragOverHandler);
+      activeDragOverHandler = null;
+    }
+  }
+
+  $effect(() => {
+    // Hide draggable badge when preview component is active on the page
+    if (activeDragBadge) {
+      if (canvasStore.dropPreview) {
+        activeDragBadge.style.display = 'none';
+      } else {
+        activeDragBadge.style.display = 'flex';
+      }
+    }
+  });
+
+  onDestroy(() => {
+    cleanupDragBadge();
+  });
 
   function handleDragStart(e: DragEvent, payload: ElementDropPayload): void {
     if (!e.dataTransfer) return;
@@ -70,23 +135,50 @@
     e.dataTransfer.effectAllowed = 'copy';
     e.dataTransfer.dropEffect = 'copy';
 
-    // Create a compact custom drag image badge
-    const label = payload.label || payload.text || payload.kind;
-    const ghost = document.createElement('div');
-    ghost.className =
-      'fixed -top-96 -left-96 pointer-events-none z-[99999] px-2.5 py-1 rounded-md bg-background border border-primary/40 text-xs font-medium text-foreground flex items-center gap-1.5';
-    ghost.innerText = label;
-    document.body.appendChild(ghost);
-    e.dataTransfer.setDragImage(ghost, 20, 14);
-
-    setTimeout(() => {
-      if (ghost.parentNode) {
-        ghost.parentNode.removeChild(ghost);
+    // Suppress browser default drag snapshot using transparent image
+    if (typeof document !== 'undefined' && e.dataTransfer.setDragImage) {
+      const transparentImg = getTransparentDragImage();
+      if (transparentImg) {
+        try {
+          e.dataTransfer.setDragImage(transparentImg, 0, 0);
+        } catch {
+          // Ignore environments that do not support custom drag images
+        }
       }
-    }, 0);
+    }
+
+    // Create floating drag badge following cursor outside the page
+    if (typeof document !== 'undefined' && document.body) {
+      cleanupDragBadge();
+
+      const label = payload.label || payload.text || payload.kind;
+      activeDragBadge = document.createElement('div');
+      activeDragBadge.className =
+        'fixed pointer-events-none z-[99999] px-2.5 py-1 rounded-md bg-background border border-primary/40 text-xs font-medium text-foreground flex items-center gap-1.5 transition-none select-none';
+      activeDragBadge.innerText = label;
+      activeDragBadge.style.left = `${e.clientX + 14}px`;
+      activeDragBadge.style.top = `${e.clientY + 14}px`;
+      document.body.appendChild(activeDragBadge);
+
+      activeDragOverHandler = (dragEvent: DragEvent) => {
+        if (!activeDragBadge) return;
+        activeDragBadge.style.left = `${dragEvent.clientX + 14}px`;
+        activeDragBadge.style.top = `${dragEvent.clientY + 14}px`;
+        if (canvasStore.dropPreview) {
+          activeDragBadge.style.display = 'none';
+        } else {
+          activeDragBadge.style.display = 'flex';
+        }
+      };
+
+      window.addEventListener('dragover', activeDragOverHandler, { passive: true });
+      window.addEventListener('dragend', cleanupDragBadge, { once: true });
+      window.addEventListener('drop', cleanupDragBadge, { once: true });
+    }
   }
 
   function handleDragEnd(): void {
+    cleanupDragBadge();
     canvasStore.clearDropState();
   }
 
@@ -125,20 +217,15 @@
   }
 </script>
 
-<div class="flex flex-col min-h-0 divide-y divide-border">
+<div class="panel-root">
   {#if featureFlags.isEnabled('components')}
-  <!-- Section 1: Text and Content -->
+  <!-- Text and content elements -->
   <SidebarSection title="Text & Content" borderBottom={true}>
-    <div class="flex flex-col gap-1.5">
-      <p class="text-[11px] text-muted-foreground px-0.5 mb-1">
-        Click to place at center or drag directly onto any page.
-      </p>
-
+    <div class="panel-action-stack-sm">
       {#if featureFlags.isEnabled('components.text')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('text', { text: 'Type here', fontSize: 14, width: 150, height: 30 })}
         draggable={store.isDocumentLoaded}
@@ -161,9 +248,8 @@
 
       {#if featureFlags.isEnabled('components.heading')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('text', {
             text: 'Heading',
@@ -193,9 +279,8 @@
 
       {#if featureFlags.isEnabled('components.body-text')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('text', {
             text: 'Body text paragraph',
@@ -221,53 +306,23 @@
       </Button>
       {/if}
 
-      {#if featureFlags.isEnabled('components.note')}
-      <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
-        onclick={() =>
-          placeAtCenter('note', {
-            text: '',
-            width: 140,
-            height: 100,
-            color: '#FFEB3B',
-          })}
-        draggable={store.isDocumentLoaded}
-        ondragstart={(e) =>
-          handleDragStart(e, {
-            kind: 'note',
-            text: '',
-            width: 140,
-            height: 100,
-            color: '#FFEB3B',
-            label: 'Sticky Note',
-          })}
-        ondragend={handleDragEnd}
-        disabled={!store.isDocumentLoaded}
-      >
-        <StickyNote class="h-3.5 w-3.5 mr-2 text-warning shrink-0" />
-        <span class="truncate">Sticky Note</span>
-      </Button>
-      {/if}
     </div>
   </SidebarSection>
   {/if}
 
   {#if featureFlags.isEnabled('forms')}
-  <!-- Section 2: Interactive Form Fields -->
+  <!-- Interactive form fields -->
   <SidebarSection title="Interactive Form Fields" borderBottom={true}>
-    <div class="flex flex-col gap-1.5">
+    <div class="panel-action-stack-sm">
       {#if featureFlags.isEnabled('components.forms.text-input')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'text-input',
             width: 160,
-            height: 26,
+            height: 28,
             label: 'Text Input',
           })}
         draggable={store.isDocumentLoaded}
@@ -276,7 +331,7 @@
             kind: 'form-field',
             variant: 'text-input',
             width: 160,
-            height: 26,
+            height: 28,
             label: 'Text Input',
           })}
         ondragend={handleDragEnd}
@@ -289,14 +344,13 @@
 
       {#if featureFlags.isEnabled('components.forms.checkbox')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'checkbox',
             width: 140,
-            height: 24,
+            height: 28,
             label: 'Checkbox',
           })}
         draggable={store.isDocumentLoaded}
@@ -305,7 +359,7 @@
             kind: 'form-field',
             variant: 'checkbox',
             width: 140,
-            height: 24,
+            height: 28,
             label: 'Checkbox',
           })}
         ondragend={handleDragEnd}
@@ -318,14 +372,13 @@
 
       {#if featureFlags.isEnabled('components.forms.radio')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'radio',
             width: 140,
-            height: 24,
+            height: 28,
             label: 'Option 1',
           })}
         draggable={store.isDocumentLoaded}
@@ -334,7 +387,7 @@
             kind: 'form-field',
             variant: 'radio',
             width: 140,
-            height: 24,
+            height: 28,
             label: 'Option 1',
           })}
         ondragend={handleDragEnd}
@@ -347,14 +400,13 @@
 
       {#if featureFlags.isEnabled('components.forms.dropdown')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'dropdown',
             width: 160,
-            height: 26,
+            height: 28,
             label: 'Dropdown',
           })}
         draggable={store.isDocumentLoaded}
@@ -363,7 +415,7 @@
             kind: 'form-field',
             variant: 'dropdown',
             width: 160,
-            height: 26,
+            height: 28,
             label: 'Dropdown',
           })}
         ondragend={handleDragEnd}
@@ -376,14 +428,13 @@
 
       {#if featureFlags.isEnabled('components.forms.signature')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'signature',
-            width: 180,
-            height: 48,
+            width: 160,
+            height: 36,
             label: 'Signature',
             placeholder: 'Sign here',
           })}
@@ -392,8 +443,8 @@
           handleDragStart(e, {
             kind: 'form-field',
             variant: 'signature',
-            width: 180,
-            height: 48,
+            width: 160,
+            height: 36,
             label: 'Signature',
             placeholder: 'Sign here',
           })}
@@ -407,9 +458,8 @@
 
       {#if featureFlags.isEnabled('components.forms.button')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'button',
@@ -436,14 +486,13 @@
 
       {#if featureFlags.isEnabled('components.forms.attachment')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'attachment',
             width: 160,
-            height: 32,
+            height: 36,
             label: 'Attachment',
           })}
         draggable={store.isDocumentLoaded}
@@ -452,7 +501,7 @@
             kind: 'form-field',
             variant: 'attachment',
             width: 160,
-            height: 32,
+            height: 36,
             label: 'Attachment',
           })}
         ondragend={handleDragEnd}
@@ -466,76 +515,14 @@
   </SidebarSection>
   {/if}
 
-  {#if featureFlags.isEnabled('components.media')}
-  <!-- Section 3: Images and Media -->
-  <SidebarSection title="Images & Media" borderBottom={true}>
-    <div class="flex flex-col gap-1.5">
-      {#if featureFlags.isEnabled('components.media.image-import')}
-      <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8"
-        onclick={handleImportImage}
-        disabled={!store.isDocumentLoaded}
-      >
-        <ImagePlus class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Import PNG / JPG Image...</span>
-      </Button>
-      {/if}
-
-      {#if featureFlags.isEnabled('components.media.image-placeholder')}
-      <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
-        onclick={() =>
-          placeAtCenter('image', {
-            src: '',
-            width: 200,
-            height: 150,
-          })}
-        draggable={store.isDocumentLoaded}
-        ondragstart={(e) =>
-          handleDragStart(e, {
-            kind: 'image',
-            src: '',
-            width: 200,
-            height: 150,
-            label: 'Image Element',
-          })}
-        ondragend={handleDragEnd}
-        disabled={!store.isDocumentLoaded}
-      >
-        <ImageIcon class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Image Placeholder</span>
-      </Button>
-      {/if}
-
-      {#if featureFlags.isEnabled('components.media.stamp')}
-      <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8"
-        onclick={() => triggerTool('Add Stamp to PDF')}
-        disabled={!store.isDocumentLoaded}
-      >
-        <Stamp class="h-3.5 w-3.5 mr-2 text-warning shrink-0" />
-        <span class="truncate">Add Stamp to PDF</span>
-      </Button>
-      {/if}
-    </div>
-  </SidebarSection>
-  {/if}
-
   {#if featureFlags.isEnabled('components.shapes')}
-  <!-- Section 4: Shapes and Vectors -->
+  <!-- Shapes and vectors -->
   <SidebarSection title="Shapes & Vectors" borderBottom={true}>
-    <div class="flex flex-col gap-1.5">
+    <div class="panel-action-stack-sm">
       {#if featureFlags.isEnabled('components.shapes.rectangle')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('shape', {
             variant: 'rectangle',
@@ -561,9 +548,8 @@
 
       {#if featureFlags.isEnabled('components.shapes.circle')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('shape', {
             variant: 'circle',
@@ -589,9 +575,8 @@
 
       {#if featureFlags.isEnabled('components.shapes.line')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('shape', {
             variant: 'line',
@@ -617,9 +602,8 @@
 
       {#if featureFlags.isEnabled('components.shapes.arrow')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 cursor-grab active:cursor-grabbing"
+        variant="panel"
+        class="w-full"
         onclick={() =>
           placeAtCenter('shape', {
             variant: 'arrow',
@@ -646,15 +630,132 @@
   </SidebarSection>
   {/if}
 
+  {#if featureFlags.isEnabled('components.media')}
+  <!-- Images and media -->
+  <SidebarSection title="Images & Media" borderBottom={true}>
+    <div class="panel-action-stack-sm">
+      {#if featureFlags.isEnabled('components.media.image-import')}
+      <Button
+        variant="panel"
+        class="w-full"
+        onclick={handleImportImage}
+        disabled={!store.isDocumentLoaded}
+      >
+        <ImagePlus class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
+        <span class="truncate">Import Image</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.media.image-placeholder')}
+      <Button
+        variant="panel"
+        class="w-full"
+        onclick={() =>
+          placeAtCenter('image', {
+            src: '',
+            width: 200,
+            height: 150,
+          })}
+        draggable={store.isDocumentLoaded}
+        ondragstart={(e) =>
+          handleDragStart(e, {
+            kind: 'image',
+            src: '',
+            width: 200,
+            height: 150,
+            label: 'Image Element',
+          })}
+        ondragend={handleDragEnd}
+        disabled={!store.isDocumentLoaded}
+      >
+        <ImageIcon class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
+        <span class="truncate">Image Placeholder</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.media.video')}
+      <Button
+        variant="panel"
+        class="w-full"
+        onclick={handleEmbedVideo}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Video class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
+        <span class="truncate">Embed Video</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.media.audio')}
+      <Button
+        variant="panel"
+        class="w-full"
+        onclick={handleEmbedAudio}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Volume2 class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
+        <span class="truncate">Embed Audio</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.media.3d')}
+      <Button
+        variant="panel"
+        class="w-full"
+        onclick={handleEmbed3D}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Box class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
+        <span class="truncate">Embed 3D</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.media.attachment')}
+      <Button
+        variant="panel"
+        class="w-full"
+        onclick={handleAttachFile}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Paperclip class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
+        <span class="truncate">Attach File</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.media.barcode')}
+      <Button
+        variant="panel"
+        class="w-full"
+        onclick={handleAddQrBarcode}
+        disabled={!store.isDocumentLoaded}
+      >
+        <QrCode class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
+        <span class="truncate">Add QR Code or Barcode</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.media.stamp')}
+      <Button
+        variant="panel"
+        class="w-full"
+        onclick={() => triggerTool('Add Stamp to PDF')}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Stamp class="h-3.5 w-3.5 mr-2 text-warning shrink-0" />
+        <span class="truncate">Add Stamp to PDF</span>
+      </Button>
+      {/if}
+    </div>
+  </SidebarSection>
+  {/if}
+
   {#if featureFlags.isEnabled('components.watermark')}
-  <!-- Section 5: Watermarks and Overlays -->
+  <!-- Watermarks and overlays -->
   <SidebarSection title="Watermarks & Overlays" borderBottom={false}>
-    <div class="flex flex-col gap-1.5">
+    <div class="panel-action-stack-sm">
       {#if featureFlags.isEnabled('components.watermark.add')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8"
+        variant="panel"
+        class="w-full"
         onclick={() => triggerTool('Add Watermark')}
         disabled={!store.isDocumentLoaded}
       >
@@ -665,9 +766,8 @@
 
       {#if featureFlags.isEnabled('components.watermark.overlay')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8"
+        variant="panel"
+        class="w-full"
         onclick={() => triggerTool('Overlay PDFs')}
         disabled={!store.isDocumentLoaded}
       >
@@ -680,7 +780,7 @@
   {/if}
 
   {#if featureFlags.isEnabled('components.apply')}
-  <!-- Section 6: Apply to PDF -->
+  <!-- Apply components to document -->
   <div class="p-3 mt-auto">
     <Button
       variant="default"
