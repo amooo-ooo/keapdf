@@ -35,11 +35,11 @@
 
     const isDragging = $derived(canvasStore.dragState?.mode === 'move');
     const isEditing = $derived(canvasStore.editingElementId === element.id || editorStore.inlineEdit?.spanId === element.id);
-    const pointerEventsClass = $derived(isDragging ? 'pointer-events-none' : 'pointer-events-auto');
-    const rotatePointerEventsClass = $derived(isDragging || isEditing || !showRotateCursor ? 'pointer-events-none' : 'pointer-events-auto');
+    const pointerEventsClass = $derived(isDragging || !editorStore.canResizeElements || editorStore.isReadOnly ? 'pointer-events-none' : 'pointer-events-auto');
+    const rotatePointerEventsClass = $derived(isDragging || isEditing || !showRotateCursor || !editorStore.canResizeElements || editorStore.isReadOnly ? 'pointer-events-none' : 'pointer-events-auto');
 
     function handlePointerDown(e: PointerEvent, handle: HandlePosition): void {
-        if (e.button !== 0) return;
+        if (e.button !== 0 || !editorStore.canResizeElements || editorStore.isReadOnly) return;
         if (e.detail > 1) return;
         e.stopPropagation();
         const target = e.target as HTMLElement;
@@ -54,7 +54,7 @@
     }
 
     function handleRotatePointerDown(e: PointerEvent): void {
-        if (e.button !== 0) return;
+        if (e.button !== 0 || !editorStore.canResizeElements || editorStore.isReadOnly) return;
         if (e.detail > 1) return;
         e.stopPropagation();
         const target = e.target as HTMLElement;
@@ -75,7 +75,15 @@
         }
         e.stopPropagation();
         const selectedEl = canvasStore.elements.find(el => el.id === element.id);
-        if (selectedEl && (selectedEl.kind === 'text' || selectedEl.kind === 'form-field')) {
+        if (selectedEl && selectedEl.kind === 'form-field') {
+            if (editorStore.isReadOnly || !editorStore.canEditValues) return;
+            canvasActions.endResize();
+            canvasActions.endDrag();
+            canvasStore.editingElementId = element.id;
+            return;
+        }
+        if (editorStore.isReadOnly || !editorStore.canEditContent) return;
+        if (selectedEl && selectedEl.kind === 'text') {
             canvasActions.endResize();
             canvasActions.endDrag();
             canvasStore.editingElementId = element.id;
@@ -87,6 +95,7 @@
 
     function handleKeyDown(e: KeyboardEvent): void {
         if ((e.key === 'Delete' || e.key === 'Backspace') && !isEditing && !isPage) {
+            if (!editorStore.canDeleteElements || editorStore.isReadOnly) return;
             e.preventDefault();
             e.stopPropagation();
             void editorActions.deleteSelected();
