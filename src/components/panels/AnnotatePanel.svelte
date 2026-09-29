@@ -47,44 +47,44 @@
   }
 </script>
 
-<div class="flex flex-col min-h-0 divide-y divide-border">
+<div class="panel-root">
   {#if featureFlags.isEnabled('annotations')}
   <SidebarSection title="Annotate" borderBottom={true}>
-    <p class="text-xs text-muted-foreground mb-2">Draw or highlight passages on the page. Hover over text to snap to lines.</p>
+    <p class="panel-description">Draw or highlight passages on the page. Hover over text to snap to lines.</p>
     
-    <div class="flex flex-col gap-2">
-      <div class="flex flex-col gap-2">
+    <div class="panel-action-stack">
+      <div class="panel-action-stack">
         {#if featureFlags.isEnabled('annotations.highlighter')}
         <Button
-          variant={store.activeTool === 'highlight' ? 'default' : 'outline'}
-          size="sm"
-          class="w-full justify-start text-xs h-8 px-2.5"
+          variant="panel"
+          class="w-full"
+          active={store.activeTool === 'highlight'}
           onclick={() => selectTool('highlight')}
           disabled={!store.isDocumentLoaded}
         >
-          <Highlighter class="h-3.5 w-3.5 mr-2 text-warning" /> Highlighter
+          <Highlighter class="panel-icon-sm text-warning" /> Highlighter
         </Button>
         {/if}
         {#if featureFlags.isEnabled('annotations.pen')}
         <Button
-          variant={store.activeTool === 'pen' ? 'default' : 'outline'}
-          size="sm"
-          class="w-full justify-start text-xs h-8 px-2.5"
+          variant="panel"
+          class="w-full"
+          active={store.activeTool === 'pen'}
           onclick={() => selectTool('pen')}
           disabled={!store.isDocumentLoaded}
         >
-          <Pencil class="h-3.5 w-3.5 mr-2 text-primary" /> Pen
+          <Pencil class="panel-icon-sm text-primary" /> Pen
         </Button>
         {/if}
         {#if featureFlags.isEnabled('annotations.eraser')}
         <Button
-          variant={store.activeTool === 'eraser' ? 'default' : 'outline'}
-          size="sm"
-          class="w-full justify-start text-xs h-8 px-2.5"
+          variant="panel"
+          class="w-full"
+          active={store.activeTool === 'eraser'}
           onclick={() => selectTool('eraser')}
           disabled={!store.isDocumentLoaded}
         >
-          <Eraser class="h-3.5 w-3.5 mr-2 text-destructive" /> Eraser
+          <Eraser class="panel-icon-sm text-destructive" /> Eraser
         </Button>
         {/if}
       </div>
@@ -183,42 +183,40 @@
 
   {#if featureFlags.isEnabled('redaction')}
   <SidebarSection title="Redaction & Privacy" borderBottom={true}>
-    <p class="text-xs text-muted-foreground mb-2">Permanently obscure sensitive content. Drag over text or blackout an area.</p>
+    <p class="panel-description">Permanently obscure sensitive content. Drag over text or blackout an area.</p>
     
-    <div class="flex flex-col gap-2">
+    <div class="panel-action-stack">
       {#if featureFlags.isEnabled('redaction.area')}
       <Button
-        variant={store.activeTool === 'redact' ? 'default' : 'outline'}
-        size="sm"
-        class="w-full justify-start text-xs h-8"
+        variant="panel"
+        class="w-full"
+        active={store.activeTool === 'redact'}
         onclick={() => selectTool('redact')}
         disabled={!store.isDocumentLoaded}
       >
-        <EyeOff class="h-3.5 w-3.5 mr-2 text-destructive" /> Redact (Text & Area)
+        <EyeOff class="panel-icon-sm text-destructive" /> Redact (Text & Area)
       </Button>
       {/if}
 
       {#if featureFlags.isEnabled('sanitization') || featureFlags.isEnabled('redaction.sanitize')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8"
+        variant="panel"
+        class="w-full"
         onclick={() => actions.openSanitizeDialog()}
         disabled={!store.isDocumentLoaded}
       >
-        <ShieldCheck class="h-3.5 w-3.5 mr-2 text-muted-foreground" /> Sanitize Document
+        <ShieldCheck class="panel-icon-sm text-muted-foreground" /> Sanitize Document
       </Button>
       {/if}
       
       {#if featureFlags.isEnabled('redaction.colors')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8"
+        variant="panel"
+        class="w-full"
         onclick={() => triggerTool('Adjust Colors / Contrast / Invert')}
         disabled={!store.isDocumentLoaded}
       >
-        <SlidersHorizontal class="h-3.5 w-3.5 mr-2 text-muted-foreground" /> Adjust Colors / Contrast
+        <SlidersHorizontal class="panel-icon-sm text-muted-foreground" /> Adjust Colors / Contrast
       </Button>
       {/if}
     </div>
@@ -227,18 +225,17 @@
 
   {#if featureFlags.isEnabled('signatures')}
   <SidebarSection title="Signatures & Verification" borderBottom={true}>
-    <p class="text-xs text-muted-foreground mb-2">Digital PKCS#12 certificates & signature validation.</p>
+    <p class="panel-description">Digital PKCS#12 certificates & signature validation.</p>
     
-    <div class="flex flex-col gap-2">
+    <div class="panel-action-stack">
       {#if featureFlags.isEnabled('signatures.esign')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 px-2.5 relative"
+        variant="panel"
+        class="w-full relative"
         onclick={() => actions.openEsignDialog('signatures')}
         disabled={!store.isDocumentLoaded}
       >
-        <PenTool class="h-3.5 w-3.5 mr-2 text-primary" /> Add E-Sign
+        <PenTool class="panel-icon-sm text-primary" /> Add E-Sign
         {#if savedCount > 0}
           <span class="ml-auto bg-primary/10 text-primary text-[10px] font-semibold px-1 rounded">
             {savedCount}
@@ -249,49 +246,45 @@
 
       {#if featureFlags.isEnabled('signatures.cert-sign')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 px-2.5"
+        variant="panel"
+        class="w-full"
         onclick={() => actions.openCertSignDialog()}
         disabled={!store.isDocumentLoaded}
       >
-        <ShieldCheck class="h-3.5 w-3.5 mr-2 text-primary" /> Cert Sign
+        <ShieldCheck class="panel-icon-sm text-primary" /> Cert Sign
       </Button>
       {/if}
 
       {#if featureFlags.isEnabled('signatures.validate')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 px-2.5"
+        variant="panel"
+        class="w-full"
         onclick={() => actions.openValidateSignaturesDialog()}
         disabled={!store.isDocumentLoaded}
       >
-        <CheckCircle2 class="h-3.5 w-3.5 mr-2 text-success" /> Validate
+        <CheckCircle2 class="panel-icon-sm text-success" /> Validate
       </Button>
       {/if}
 
       {#if featureFlags.isEnabled('signatures.timestamp')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 px-2.5"
+        variant="panel"
+        class="w-full"
         onclick={() => triggerTool('Timestamp PDF')}
         disabled={!store.isDocumentLoaded}
       >
-        <Clock class="h-3.5 w-3.5 mr-2 text-muted-foreground" /> Timestamp
+        <Clock class="panel-icon-sm text-muted-foreground" /> Timestamp
       </Button>
       {/if}
 
       {#if featureFlags.isEnabled('signatures.shared')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8 px-2.5"
+        variant="panel"
+        class="w-full"
         onclick={() => triggerTool('Shared Signing')}
         disabled={!store.isDocumentLoaded}
       >
-        <Users class="h-3.5 w-3.5 mr-2 text-primary" /> Shared Signing Workflow
+        <Users class="panel-icon-sm text-primary" /> Shared Signing Workflow
       </Button>
       {/if}
     </div>
@@ -300,30 +293,29 @@
 
   {#if featureFlags.isEnabled('annotations.note') || featureFlags.isEnabled('annotations.read-view')}
   <SidebarSection title="Notes & Review" borderBottom={false}>
-    <p class="text-xs text-muted-foreground mb-2">Sticky note comments and reader viewing mode.</p>
+    <p class="panel-description">Sticky note comments and reader viewing mode.</p>
     
-    <div class="flex flex-col gap-2">
+    <div class="panel-action-stack">
       {#if featureFlags.isEnabled('annotations.note')}
       <Button
-        variant={store.activeTool === 'note' ? 'default' : 'outline'}
-        size="sm"
-        class="w-full justify-start text-xs h-8"
+        variant="panel"
+        class="w-full"
+        active={store.activeTool === 'note'}
         onclick={() => selectTool('note')}
         disabled={!store.isDocumentLoaded}
       >
-        <StickyNote class="h-3.5 w-3.5 mr-2 text-warning" /> Sticky Note Comment
+        <StickyNote class="panel-icon-sm text-warning" /> Sticky Note Comment
       </Button>
       {/if}
 
       {#if featureFlags.isEnabled('annotations.read-view')}
       <Button
-        variant="outline"
-        size="sm"
-        class="w-full justify-start text-xs h-8"
+        variant="panel"
+        class="w-full"
         onclick={() => triggerTool('Read View Mode')}
         disabled={!store.isDocumentLoaded}
       >
-        <BookOpen class="h-3.5 w-3.5 mr-2 text-primary" /> Read View Mode
+        <BookOpen class="panel-icon-sm text-primary" /> Read View Mode
       </Button>
       {/if}
     </div>
