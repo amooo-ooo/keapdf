@@ -59,7 +59,7 @@
   <SidebarSection title="Shape Properties" borderBottom={true} collapsible={true} defaultExpanded={true}>
     <div class="flex flex-col gap-2">
       <!-- Shape Variant -->
-      <div class="flex flex-col gap-1">
+      <div class="field-group-sm">
         <Label class="field-label">Shape Type</Label>
         <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
           <Button
@@ -110,7 +110,7 @@
       </div>
 
       <!-- Fill Color & Presets -->
-      <div class="flex flex-col gap-1 mt-0.5 w-full">
+      <div class="field-group-sm mt-0.5 w-full">
         <Label class="field-label">Fill</Label>
         <ColorPicker
           value={shapeEl.fill || '#3b82f6'}
@@ -123,7 +123,7 @@
       </div>
 
       <!-- Stroke Color & Presets -->
-      <div class="flex flex-col gap-1 mt-0.5 w-full">
+      <div class="field-group-sm mt-0.5 w-full">
         <Label class="field-label">Stroke</Label>
         <ColorPicker
           value={shapeEl.stroke || '#1e293b'}
@@ -139,17 +139,17 @@
       </div>
 
       <!-- Stroke Width -->
-      <div class="flex flex-col gap-1 mt-0.5 w-full">
-        <div class="flex items-center justify-between">
+      <div class="field-group-sm mt-0.5 w-full">
+        <div class="field-header-row">
           <Label class="field-label">Stroke Width (pt)</Label>
-          <span class="text-[10px] text-muted-foreground font-sans">{shapeEl.strokeWidth} pt</span>
+          <span class="panel-slider-value">{shapeEl.strokeWidth} pt</span>
         </div>
         <div class="flex items-center gap-2">
           <Input
             type="number"
             value={shapeEl.strokeWidth}
             oninput={(e) => handleNumberChange(e, 'strokeWidth')}
-            class="h-8 text-xs flex-1"
+            class="field-input flex-1"
             min="0"
             max="48"
             step="0.5"
@@ -158,21 +158,21 @@
             <Button
               variant={shapeEl.strokeWidth === 1 ? 'default' : 'outline'}
               size="sm"
-              class="h-8 px-2 text-xs"
+              class="h-8 px-2 text-xs tabular-nums"
               onclick={() => updateProp('strokeWidth', 1)}
               aria-pressed={shapeEl.strokeWidth === 1}
             >1</Button>
             <Button
               variant={shapeEl.strokeWidth === 2 ? 'default' : 'outline'}
               size="sm"
-              class="h-8 px-2 text-xs"
+              class="h-8 px-2 text-xs tabular-nums"
               onclick={() => updateProp('strokeWidth', 2)}
               aria-pressed={shapeEl.strokeWidth === 2}
             >2</Button>
             <Button
               variant={shapeEl.strokeWidth === 4 ? 'default' : 'outline'}
               size="sm"
-              class="h-8 px-2 text-xs"
+              class="h-8 px-2 text-xs tabular-nums"
               onclick={() => updateProp('strokeWidth', 4)}
               aria-pressed={shapeEl.strokeWidth === 4}
             >4</Button>
@@ -181,10 +181,10 @@
       </div>
 
       <!-- Opacity with Slider -->
-      <div class="flex flex-col gap-1.5 mt-0.5 w-full">
-        <div class="flex items-center justify-between">
+      <div class="field-group mt-0.5 w-full">
+        <div class="field-header-row">
           <Label class="field-label">Opacity</Label>
-          <span class="text-[10px] text-muted-foreground font-sans">{Math.round((shapeEl.opacity ?? 1) * 100)}%</span>
+          <span class="panel-slider-value">{Math.round((shapeEl.opacity ?? 1) * 100)}%</span>
         </div>
         <Slider
           type="single"
