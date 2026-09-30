@@ -46,6 +46,7 @@
   }
 
   async function handleRotateSelected(): Promise<void> {
+    if (editorStore.isReadOnly) return;
     const targets = selectedIndices.length > 0 ? selectedIndices : [currentPageIndex];
     if (targets.length === 1) {
       actions.rotatePage(targets[0]);
@@ -57,6 +58,7 @@
   }
 
   async function handleDeleteSelected(): Promise<void> {
+    if (editorStore.isReadOnly) return;
     const targets = (
       selectedIndices.length > 0 ? [...selectedIndices] : [currentPageIndex]
     ).sort((a, b) => b - a);
@@ -81,6 +83,7 @@
   }
 
   async function handleDuplicateSelected(): Promise<void> {
+    if (editorStore.isReadOnly) return;
     const targets = (
       selectedIndices.length > 0 ? [...selectedIndices] : [currentPageIndex]
     ).sort((a, b) => b - a);
@@ -90,6 +93,7 @@
   }
 
   async function handleAddBlankPage(): Promise<void> {
+    if (editorStore.isReadOnly) return;
     const targetIdx =
       selectedIndices.length > 0
         ? Math.max(...selectedIndices)
@@ -99,6 +103,7 @@
   }
 
   async function handleMovePage(fromIndex: number, direction: 'up' | 'down'): Promise<void> {
+    if (editorStore.isReadOnly || !editorStore.canReorderPages) return;
     const toIndex = direction === 'up' ? fromIndex - 1 : fromIndex + 1;
     if (toIndex < 0 || toIndex >= pageCount) return;
     await actions.reorderPages([fromIndex], toIndex);
@@ -106,6 +111,10 @@
   }
 
   function handleDragStart(index: number, e: DragEvent): void {
+    if (editorStore.isReadOnly || !editorStore.canReorderPages) {
+      e.preventDefault();
+      return;
+    }
     dragSourceIndex = index;
     if (e.dataTransfer) {
       e.dataTransfer.effectAllowed = 'move';
@@ -114,6 +123,7 @@
   }
 
   function handleDragOver(e: DragEvent): void {
+    if (editorStore.isReadOnly || !editorStore.canReorderPages) return;
     e.preventDefault();
     if (e.dataTransfer) {
       e.dataTransfer.dropEffect = 'move';
@@ -122,6 +132,7 @@
 
   async function handleDrop(targetIndex: number, e: DragEvent): Promise<void> {
     e.preventDefault();
+    if (editorStore.isReadOnly || !editorStore.canReorderPages) return;
     if (dragSourceIndex !== null && dragSourceIndex !== targetIndex) {
       await actions.reorderPages([dragSourceIndex], targetIndex);
       dragSourceIndex = null;
@@ -130,6 +141,7 @@
   }
 
   function triggerMerge(): void {
+    if (editorStore.isReadOnly || !editorStore.canMergeFiles) return;
     const selection = useSelection();
     let fileIds = Array.from(selection.selectedIds).filter((id: string) => id.startsWith('file_'));
     
@@ -151,6 +163,7 @@
   }
 
   function handleMergeFileSelected(e: Event): void {
+    if (editorStore.isReadOnly || !editorStore.canMergeFiles) return;
     const target = e.target as HTMLInputElement;
     if (target.files && target.files.length > 0) {
       const files = Array.from(target.files);
@@ -167,10 +180,12 @@
   }
 
   function triggerImageImport(): void {
+    if (editorStore.isReadOnly) return;
     imageFileInputEl?.click();
   }
 
   function handleImageFileSelected(e: Event): void {
+    if (editorStore.isReadOnly) return;
     const target = e.target as HTMLInputElement;
     if (target.files && target.files.length > 0) {
       const files = Array.from(target.files);
@@ -209,11 +224,11 @@
   <div class="flex items-center justify-between p-3 border-b bg-card">
     <div class="flex items-center gap-2">
       <span class="font-semibold text-sm">Page Organizer</span>
-      <Badge variant="outline" class="text-xs">
+      <Badge variant="outline" class="text-xs tabular-nums">
         {pageCount} {pageCount === 1 ? 'page' : 'pages'}
       </Badge>
       {#if selectedIndices.length > 0}
-        <Badge variant="secondary" class="text-xs">
+        <Badge variant="secondary" class="text-xs tabular-nums">
           {selectedIndices.length} selected
         </Badge>
       {/if}
@@ -221,31 +236,31 @@
 
     <div class="flex items-center gap-1.5 flex-wrap">
       {#if featureFlags.isEnabled('page-actions.add-blank')}
-      <Button variant="outline" size="sm" onclick={handleAddBlankPage} title="Insert Blank Page">
+      <Button variant="outline" size="sm" onclick={handleAddBlankPage} title="Insert Blank Page" disabled={!editorStore.isDocumentLoaded || editorStore.isReadOnly}>
         <Plus class="h-4 w-4 mr-1" /> Blank
       </Button>
       {/if}
 
       {#if featureFlags.isEnabled('merge') && featureFlags.isEnabled('page-actions.merge')}
-      <Button variant="outline" size="sm" onclick={triggerMerge} title="Merge PDF files or images as new pages">
+      <Button variant="outline" size="sm" onclick={triggerMerge} title="Merge PDF files or images as new pages" disabled={!editorStore.isDocumentLoaded || editorStore.isReadOnly || !editorStore.canMergeFiles}>
         <FilePlus2 class="h-4 w-4 mr-1" /> Merge Files
       </Button>
       {/if}
 
       {#if featureFlags.isEnabled('page-actions.import-image')}
-      <Button variant="outline" size="sm" onclick={triggerImageImport} title="Import image as new page">
+      <Button variant="outline" size="sm" onclick={triggerImageImport} title="Import image as new page" disabled={!editorStore.isDocumentLoaded || editorStore.isReadOnly}>
         <ImagePlus class="h-4 w-4 mr-1" /> Import Image
       </Button>
       {/if}
 
       {#if featureFlags.isEnabled('page-actions.duplicate')}
-      <Button variant="outline" size="sm" onclick={handleDuplicateSelected} title="Duplicate Selected">
+      <Button variant="outline" size="sm" onclick={handleDuplicateSelected} title="Duplicate Selected" disabled={!editorStore.isDocumentLoaded || editorStore.isReadOnly || selectedIndices.length === 0}>
         <Copy class="h-4 w-4 mr-1" /> Duplicate
       </Button>
       {/if}
 
       {#if featureFlags.isEnabled('page-actions.rotate')}
-      <Button variant="outline" size="sm" onclick={handleRotateSelected} title="Rotate Selected 90 degrees">
+      <Button variant="outline" size="sm" onclick={handleRotateSelected} title="Rotate Selected 90 degrees" disabled={!editorStore.isDocumentLoaded || editorStore.isReadOnly || selectedIndices.length === 0}>
         Rotate
       </Button>
       {/if}
@@ -254,7 +269,7 @@
       <Button
         variant="destructive"
         size="sm"
-        disabled={pageCount <= 1}
+        disabled={pageCount <= 1 || editorStore.isReadOnly || selectedIndices.length === 0}
         onclick={handleDeleteSelected}
         title="Delete Selected"
       >
@@ -302,12 +317,12 @@
         {@const isCurrent = currentPageIndex === index}
 
         <div
-          class="group relative flex flex-col items-center p-2 rounded-lg border bg-card transition-all hover:shadow-md cursor-pointer select-none {isSelected ? 'ring-2 ring-primary border-primary bg-accent/20' : ''} {isCurrent && !isSelected ? 'border-primary/50' : ''}"
+          class="group relative flex flex-col items-center p-2 rounded-lg border bg-card transition-[box-shadow,border-color,background-color] duration-150 hover:shadow-elevation-2 cursor-pointer select-none {isSelected ? 'ring-2 ring-primary border-primary bg-accent/20' : ''} {isCurrent && !isSelected ? 'border-primary/50' : ''}"
           onclick={(e) => toggleSelectPage(index, e)}
           onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleSelectPage(index, e as unknown as MouseEvent); }}
           role="button"
           tabindex="0"
-          draggable={featureFlags.isEnabled('page-actions.reorder')}
+          draggable={featureFlags.isEnabled('page-actions.reorder') && !editorStore.isReadOnly && editorStore.canReorderPages}
           ondragstart={(e) => handleDragStart(index, e)}
           ondragover={handleDragOver}
           ondrop={(e) => handleDrop(index, e)}
@@ -317,7 +332,7 @@
           </div>
 
           <div class="flex items-center justify-between w-full mt-2 text-xs">
-            <span class="font-medium text-muted-foreground">
+            <span class="font-medium text-muted-foreground tabular-nums">
               Page {index + 1}
             </span>
 
@@ -327,23 +342,23 @@
                 variant="ghost"
                 size="icon"
                 class="h-6 w-6"
-                disabled={index === 0}
+                disabled={index === 0 || editorStore.isReadOnly || !editorStore.canReorderPages}
                 onclick={(e) => { e.stopPropagation(); handleMovePage(index, 'up'); }}
                 title="Move Up"
                 aria-label="Move page up"
               >
-                <ArrowUp class="h-3 w-3" />
+                <ArrowUp class="h-3 w-3" aria-hidden="true" />
               </Button>
               <Button
                 variant="ghost"
                 size="icon"
                 class="h-6 w-6"
-                disabled={index === pageCount - 1}
+                disabled={index === pageCount - 1 || editorStore.isReadOnly || !editorStore.canReorderPages}
                 onclick={(e) => { e.stopPropagation(); handleMovePage(index, 'down'); }}
                 title="Move Down"
                 aria-label="Move page down"
               >
-                <ArrowDown class="h-3 w-3" />
+                <ArrowDown class="h-3 w-3" aria-hidden="true" />
               </Button>
             </div>
             {/if}
