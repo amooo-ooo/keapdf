@@ -246,12 +246,13 @@
         </div>
         <button
           type="button"
-          class="flex items-center justify-between font-medium text-primary cursor-pointer hover:underline text-left"
+          class="flex items-center justify-between font-medium text-primary cursor-pointer hover:underline text-left rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onclick={() => widthInputEl?.focus()}
           title="Click to adjust crop width and height"
+          aria-label="Click to adjust crop width and height"
         >
           <span>Cropped:</span>
-          <span class="font-sans">{croppedWidth} x {croppedHeight} {activeUnit}</span>
+          <span class="font-sans tabular-nums">{croppedWidth} x {croppedHeight} {activeUnit}</span>
         </button>
       </div>
 
