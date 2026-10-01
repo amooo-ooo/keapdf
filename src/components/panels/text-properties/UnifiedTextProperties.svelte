@@ -330,7 +330,11 @@
       ? (partialStyle as Partial<TextSegment>).backgroundColor
       : (editBackgroundColor || undefined);
 
-    const updates: Partial<TextElement> = {
+    const updates: Partial<TextElement> = partialStyle ? {
+      ...partialStyle,
+      textAlign: editTextAlign,
+      letterSpacing: editLetterSpacing || undefined,
+    } : {
       fontFamily: editFontFamily,
       rawFontFamily: undefined,
       fontWeight: editFontWeight,
@@ -357,18 +361,18 @@
       if (activeCanvasElement.lines && activeCanvasElement.lines.length > 0) {
         updates.lines = activeCanvasElement.lines.map((l) => ({
           ...l,
-          fontSize: Math.max(1, Math.round((l.fontSize || oldSize) * scale * 10) / 10),
+          fontSize: validFontSize,
           lineHeight: l.lineHeight ? l.lineHeight * scale : undefined,
           segments: (l.segments ?? []).map((s) => ({
             ...s,
-            fontSize: Math.max(1, Math.round((s.fontSize || l.fontSize || oldSize) * scale * 10) / 10),
+            fontSize: validFontSize,
           })),
         }));
       }
       if (activeCanvasElement.segments && activeCanvasElement.segments.length > 0) {
         updates.segments = activeCanvasElement.segments.map((s) => ({
           ...s,
-          fontSize: Math.max(1, Math.round((s.fontSize || oldSize) * scale * 10) / 10),
+          fontSize: validFontSize,
         }));
       }
     }
@@ -377,7 +381,7 @@
       const textLines = editText.split(/\r?\n/);
       const updatedLines: TextElementLine[] = textLines.map((lineStr, idx) => {
         const originalLine = activeCanvasElement.lines && activeCanvasElement.lines[idx] ? activeCanvasElement.lines[idx] : undefined;
-        const lineFontSize = originalLine?.fontSize || updates.fontSize || activeCanvasElement.fontSize;
+        const lineFontSize = updates.lines?.[idx]?.fontSize || updates.fontSize || originalLine?.fontSize || activeCanvasElement.fontSize;
         let segments = originalLine?.segments && originalLine.segments.length > 0 ? originalLine.segments : undefined;
 
         if (segments && originalLine && originalLine.text !== lineStr) {
@@ -424,25 +428,27 @@
       updates.lines = updatedLines;
       updates.segments = updatedLines.flatMap((l) => l.segments ?? []);
     } else {
-      if (activeCanvasElement.segments) {
-        updates.segments = activeCanvasElement.segments.map((s) => ({
-          ...s,
-          fontFamily: editFontFamily,
-          rawFontFamily: undefined,
-          fontWeight: editFontWeight,
-          fontStyle: editFontStyle,
-          underline: editUnderline,
-          strikethrough: editStrikethrough,
-          color: editColorHex,
-          backgroundColor: targetBg,
-        }));
-      }
-      if (activeCanvasElement.lines) {
-        updates.lines = activeCanvasElement.lines.map((l) => ({
-          ...l,
-          underline: editUnderline,
-          strikethrough: editStrikethrough,
-          segments: (l.segments ?? []).map((s) => ({
+      if (partialStyle) {
+        if (activeCanvasElement.segments) {
+          updates.segments = activeCanvasElement.segments.map((s) => ({
+            ...s,
+            ...partialStyle,
+          }));
+        }
+        if (activeCanvasElement.lines) {
+          updates.lines = activeCanvasElement.lines.map((l) => ({
+            ...l,
+            ...(partialStyle.underline !== undefined ? { underline: partialStyle.underline } : {}),
+            ...(partialStyle.strikethrough !== undefined ? { strikethrough: partialStyle.strikethrough } : {}),
+            segments: (l.segments ?? []).map((s) => ({
+              ...s,
+              ...partialStyle,
+            })),
+          }));
+        }
+      } else {
+        if (activeCanvasElement.segments) {
+          updates.segments = activeCanvasElement.segments.map((s) => ({
             ...s,
             fontFamily: editFontFamily,
             rawFontFamily: undefined,
@@ -452,8 +458,26 @@
             strikethrough: editStrikethrough,
             color: editColorHex,
             backgroundColor: targetBg,
-          })),
-        }));
+          }));
+        }
+        if (activeCanvasElement.lines) {
+          updates.lines = activeCanvasElement.lines.map((l) => ({
+            ...l,
+            underline: editUnderline,
+            strikethrough: editStrikethrough,
+            segments: (l.segments ?? []).map((s) => ({
+              ...s,
+              fontFamily: editFontFamily,
+              rawFontFamily: undefined,
+              fontWeight: editFontWeight,
+              fontStyle: editFontStyle,
+              underline: editUnderline,
+              strikethrough: editStrikethrough,
+              color: editColorHex,
+              backgroundColor: targetBg,
+            })),
+          }));
+        }
       }
     }
 
@@ -542,14 +566,32 @@
 
         let words: TextWord[] = [];
         if (origLine?.words && origLine.text === newText) {
-          words = origLine.words.map((w) => ({
-            ...w,
-            fontFamily: editFontFamily,
-            fontWeight: editFontWeight,
-            fontStyle: editFontStyle,
-            color: hexToRgba(editColorHex),
-            fontSize: validFontSize ?? w.fontSize,
-          }));
+          words = origLine.words.map((w) => {
+            if (partialStyle) {
+              const updatedWord: TextWord = {
+                ...w,
+                fontFamily: partialStyle.fontFamily ?? w.fontFamily,
+                fontWeight: partialStyle.fontWeight ?? w.fontWeight,
+                fontStyle: partialStyle.fontStyle ?? w.fontStyle,
+                color: partialStyle.color !== undefined
+                  ? (typeof partialStyle.color === 'string' ? hexToRgba(partialStyle.color) : (partialStyle.color as unknown as ColorRgba))
+                  : w.color,
+                fontSize: partialStyle.fontSize ?? (validFontSize !== undefined && 'fontSize' in partialStyle ? validFontSize : w.fontSize),
+                underline: partialStyle.underline !== undefined ? partialStyle.underline : w.underline,
+                strikethrough: partialStyle.strikethrough !== undefined ? partialStyle.strikethrough : w.strikethrough,
+                backgroundColor: partialStyle.backgroundColor !== undefined ? partialStyle.backgroundColor : w.backgroundColor,
+              };
+              return updatedWord;
+            }
+            return {
+              ...w,
+              fontFamily: editFontFamily,
+              fontWeight: editFontWeight,
+              fontStyle: editFontStyle,
+              color: hexToRgba(editColorHex),
+              fontSize: validFontSize ?? w.fontSize,
+            };
+          });
         } else if (newText.trim().length > 0) {
           const rawTokens = newText.split(/([\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+)/);
           let currentX = origLine?.left ?? activePdfSpan.left;
@@ -578,13 +620,13 @@
               bottom: lTop + lineFs,
               width: wW,
               height: lineFs,
-              fontSize: lineFs,
+              fontSize: candidateWord?.fontSize ?? lineFs,
               baselineY: lBaseline,
               charStartIndex: 0,
               charCount: cleanToken.length,
-              fontFamily: editFontFamily,
-              rawFontFamily: editFontFamily,
-              color: hexToRgba(editColorHex),
+              fontFamily: candidateWord?.fontFamily ?? editFontFamily,
+              rawFontFamily: candidateWord?.rawFontFamily ?? editFontFamily,
+              color: candidateWord?.color ?? hexToRgba(editColorHex),
               fontWeight: candidateWord?.fontWeight || editFontWeight,
               fontStyle: candidateWord?.fontStyle || editFontStyle,
               hasPrecedingSpace,
@@ -603,15 +645,17 @@
           bottom: lTop + lH,
           width: origLine?.width ?? activePdfSpan.width,
           height: lH,
-          fontSize: validFontSize ?? origLine?.fontSize ?? activePdfSpan.fontSize,
+          fontSize: partialStyle?.fontSize ?? (validFontSize ?? origLine?.fontSize ?? activePdfSpan.fontSize),
           baselineY: lBaseline,
           lineHeight: lH,
           charStartIndex: 0,
           charCount: newText.length,
-          fontFamily: editFontFamily,
-          fontWeight: editFontWeight,
-          fontStyle: editFontStyle,
-          color: hexToRgba(editColorHex),
+          fontFamily: partialStyle?.fontFamily ?? (partialStyle ? (origLine?.fontFamily ?? activePdfSpan.fontFamily) : editFontFamily),
+          fontWeight: partialStyle?.fontWeight ?? (partialStyle ? (origLine?.fontWeight ?? activePdfSpan.fontWeight) : editFontWeight),
+          fontStyle: partialStyle?.fontStyle ?? (partialStyle ? (origLine?.fontStyle ?? activePdfSpan.fontStyle) : editFontStyle),
+          color: partialStyle?.color !== undefined
+            ? (typeof partialStyle.color === 'string' ? hexToRgba(partialStyle.color) : (partialStyle.color as unknown as ColorRgba))
+            : (partialStyle ? (origLine?.color ?? activePdfSpan.color) : hexToRgba(editColorHex)),
           words,
         };
       });
@@ -620,16 +664,18 @@
     actions.applyTextMutation(
       {
         text: editText,
-        fontSize: validFontSize,
-        fontFamily: editFontFamily,
-        fontWeight: editFontWeight,
-        fontStyle: editFontStyle,
-        underline: editUnderline,
-        strikethrough: editStrikethrough,
+        fontSize: partialStyle ? (partialStyle.fontSize ?? activePdfSpan.fontSize) : validFontSize,
+        fontFamily: partialStyle ? (partialStyle.fontFamily ?? activePdfSpan.fontFamily) : editFontFamily,
+        fontWeight: partialStyle ? (partialStyle.fontWeight ?? activePdfSpan.fontWeight) : editFontWeight,
+        fontStyle: partialStyle ? (partialStyle.fontStyle ?? activePdfSpan.fontStyle) : editFontStyle,
+        underline: partialStyle ? (partialStyle.underline ?? activePdfSpan.underline) : editUnderline,
+        strikethrough: partialStyle ? (partialStyle.strikethrough ?? activePdfSpan.strikethrough) : editStrikethrough,
         backgroundColor: targetBg,
         textAlign: editTextAlign,
         letterSpacing: editLetterSpacing || undefined,
-        color: hexToRgba(editColorHex),
+        color: partialStyle?.color !== undefined
+          ? (typeof partialStyle.color === 'string' ? hexToRgba(partialStyle.color) : (partialStyle.color as unknown as ColorRgba))
+          : hexToRgba(editColorHex),
         lineHeight: !isNaN(parsedLineHeight) && parsedLineHeight > 0 ? parsedLineHeight : undefined,
         lines: updatedLines,
         reflowParagraph: isMultiLine,
@@ -677,7 +723,7 @@
 </script>
 
 {#if activeCanvasElement || activePdfSpan}
-  <div class="flex flex-col w-full shrink-0">
+  <div class="flex flex-col w-full shrink-0 py-1">
     <SidebarSection title="Typography" borderBottom={true} collapsible={true} defaultExpanded={true}>
       <div class="flex flex-col gap-2">
         <!-- Text Content -->
@@ -707,7 +753,7 @@
             onValueChange={(val) => { 
               if (val) {
                 editFontFamily = val; 
-                applyChanges(); 
+                applyChanges({ fontFamily: val }); 
               }
             }}
           >
@@ -753,8 +799,8 @@
             <Input 
               type="number" 
               bind:value={editFontSize} 
-              onchange={() => applyChanges()}
-              onkeydown={(e) => e.key === 'Enter' && applyChanges()}
+              onchange={() => applyChanges({ fontSize: editFontSize })}
+              onkeydown={(e) => e.key === 'Enter' && applyChanges({ fontSize: editFontSize })}
               placeholder={hasMixedFontSize ? 'Mixed' : ''}
               class="h-8 text-xs w-full" 
               min="1"
@@ -777,7 +823,7 @@
                 aria-pressed={editFontWeight === 'bold'}
                 title="Bold (Ctrl+B)"
               >
-                <Bold class="h-3.5 w-3.5" />
+                <Bold class="h-3.5 w-3.5" aria-hidden="true" />
               </Button>
               <Button
                 variant={editFontStyle === 'italic' ? 'default' : 'outline'}
@@ -788,7 +834,7 @@
                 aria-pressed={editFontStyle === 'italic'}
                 title="Italic (Ctrl+I)"
               >
-                <Italic class="h-3.5 w-3.5" />
+                <Italic class="h-3.5 w-3.5" aria-hidden="true" />
               </Button>
               <Button
                 variant={editUnderline ? 'default' : 'outline'}
@@ -799,7 +845,7 @@
                 aria-pressed={editUnderline}
                 title="Underline (Ctrl+U)"
               >
-                <Underline class="h-3.5 w-3.5" />
+                <Underline class="h-3.5 w-3.5" aria-hidden="true" />
               </Button>
               <Button
                 variant={editStrikethrough ? 'default' : 'outline'}
@@ -810,7 +856,7 @@
                 aria-pressed={editStrikethrough}
                 title="Strikethrough"
               >
-                <Strikethrough class="h-3.5 w-3.5" />
+                <Strikethrough class="h-3.5 w-3.5" aria-hidden="true" />
               </Button>
             </ButtonGroup>
           </div>
