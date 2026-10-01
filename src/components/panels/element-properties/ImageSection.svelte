@@ -56,12 +56,10 @@
     <div class="flex flex-col gap-2">
       <div class="field-group">
         <Button
-          variant="outline"
-          size="sm"
-          class="w-full justify-start text-xs h-8"
+          variant="panel"
           onclick={handleReplaceClick}
         >
-          <ImageUp class="h-3.5 w-3.5 mr-2 shrink-0" />
+          <ImageUp class="panel-icon-sm" />
           <span>Replace Image...</span>
         </Button>
       </div>
@@ -81,9 +79,9 @@
       </div>
 
       <div class="field-group mt-1">
-        <div class="flex justify-between">
+        <div class="field-header-row">
           <Label class="field-label">Opacity</Label>
-          <span class="text-xs text-muted-foreground">{Math.round(imgEl.opacity * 100)}%</span>
+          <span class="panel-slider-value">{Math.round(imgEl.opacity * 100)}%</span>
         </div>
         <Slider
           type="single"
