@@ -13,7 +13,7 @@
 </script>
 
 {#if selectedElement}
-  <div class="flex flex-col w-full shrink-0">
+  <div class="flex flex-col w-full shrink-0 py-1">
     <PositionSizeSection />
     <TransformSection />
     {#if elementDef?.propertiesPanel}

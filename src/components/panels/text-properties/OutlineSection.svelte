@@ -11,7 +11,7 @@
     inferOutlineLevel,
     flattenOutlineTree,
     type OutlineItemFlat,
-  } from '../../../services/pdf/operations/outline-ops';
+  } from '../../../services/pdf/operations/outline-tree';
   import type { OutlineNode } from '../../../core/types';
 
   interface Props {
@@ -160,12 +160,12 @@
     </div>
 
     <!-- Target Page Display -->
-    <div class="flex items-center justify-between text-xs py-0.5">
+    <!-- <div class="flex items-center justify-between text-xs py-0.5">
       <span class="text-muted-foreground">Target Page</span>
       <span class="font-sans font-medium text-foreground">
         Page {targetPageIndex + 1}
       </span>
-    </div>
+    </div> -->
 
     <!-- Hierarchy Level Selection -->
     <div class="flex flex-col gap-1 mt-0.5">

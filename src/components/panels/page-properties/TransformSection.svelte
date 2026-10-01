@@ -45,6 +45,7 @@
   );
 
   function handleDimensionChange(prop: 'width' | 'height', e: Event): void {
+    if (store.isReadOnly) return;
     const target = e.target as HTMLInputElement;
     const parsed = parseFloat(target.value);
     if (Number.isNaN(parsed) || parsed < 10) return;
@@ -72,6 +73,7 @@
   }
 
   function resetScale(): void {
+    if (store.isReadOnly) return;
     const originTransform = { ...pageTransform };
     store.updatePageTransform(currentPageIdx, { scaleX: 1, scaleY: 1 });
     actions.pushCommand(
@@ -80,8 +82,8 @@
   }
 </script>
 
-<SidebarSection title="Transform" borderBottom={true} collapsible={true} defaultExpanded={true}>
-  {#if store.isDocumentLoaded}
+{#if store.isDocumentLoaded}
+  <SidebarSection title="Transform" borderBottom={true} collapsible={true} defaultExpanded={true}>
     <div class="flex flex-col gap-2.5">
       <!-- Dimensions Grid (Width & Height in points) -->
       {#if featureFlags.isEnabled('page-actions.scale')}
@@ -96,7 +98,7 @@
             class="field-input text-xs font-sans"
             min="10"
             step="0.5"
-            disabled={store.isCropping}
+            disabled={store.isCropping || store.isReadOnly}
           />
         </div>
         <div class="field-group">
@@ -109,18 +111,20 @@
             class="field-input text-xs font-sans"
             min="10"
             step="0.5"
-            disabled={store.isCropping}
+            disabled={store.isCropping || store.isReadOnly}
           />
         </div>
       </div>
 
       {#if hasScale}
         <div class="flex items-center justify-between text-xs text-muted-foreground px-0.5">
-          <span>Scale: {Math.round((pageTransform.scaleX || 1) * 100)}% × {Math.round((pageTransform.scaleY || 1) * 100)}%</span>
+          <span class="tabular-nums">Scale: {Math.round((pageTransform.scaleX || 1) * 100)}% × {Math.round((pageTransform.scaleY || 1) * 100)}%</span>
           <button
             type="button"
-            class="text-[10px] text-primary hover:underline cursor-pointer"
+            class="text-[10px] text-primary hover:underline cursor-pointer rounded-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
             onclick={resetScale}
+            disabled={store.isReadOnly}
+            aria-label="Reset scale to 100%"
           >
             Reset (100%)
           </button>
@@ -131,25 +135,23 @@
       <div class="field-group">
         {#if featureFlags.isEnabled('page-actions.rotate')}
         <Button
-          variant="panel-action"
+          variant="panel"
           onclick={() => actions.rotatePage(store.currentPageIndex)}
-          disabled={store.isCropping}
+          disabled={store.isCropping || store.isReadOnly}
         >
           <RotateCw class="h-3.5 w-3.5 mr-2" /> Rotate
         </Button>
         {/if}
         {#if featureFlags.isEnabled('page-actions.scale')}
         <Button
-          variant="panel-action"
+          variant="panel"
           onclick={() => actions.openPageScaleDialog()}
-          disabled={store.isCropping || !store.isDocumentLoaded}
+          disabled={store.isCropping || !store.isDocumentLoaded || store.isReadOnly}
         >
           <Scaling class="h-3.5 w-3.5 mr-2" /> Scale / Size
         </Button>
         {/if}
       </div>
     </div>
-  {:else}
-    <div class="text-xs text-muted-foreground">No document loaded</div>
-  {/if}
-</SidebarSection>
+  </SidebarSection>
+{/if}
