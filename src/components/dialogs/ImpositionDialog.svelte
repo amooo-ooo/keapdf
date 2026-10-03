@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useCanvasStore } from '../../stores/canvas.svelte';
@@ -114,10 +115,14 @@
   let cutStackPageRange = $state('');
 
   $effect(() => {
-    activeMode = initialMode;
-    previewSheetIndex = 0;
-    errorMessage = '';
-    posterPageIndex = store.currentPageIndex;
+    if (open) {
+      untrack(() => {
+        activeMode = initialMode;
+        previewSheetIndex = 0;
+        errorMessage = '';
+        posterPageIndex = store.currentPageIndex;
+      });
+    }
   });
 
   // Calculate N-Up Grid
