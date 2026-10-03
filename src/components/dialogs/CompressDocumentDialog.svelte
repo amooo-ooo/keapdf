@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -72,22 +73,30 @@
     return { level: activePreset };
   }
 
-  // Inspect on modal open
+  async function runInspection(): Promise<void> {
+    isInspecting = true;
+    errorMessage = null;
+    try {
+      inspection = await actions.inspectDocumentForCompression();
+    } catch (err) {
+      console.warn('Failed to inspect document for compression:', err);
+      errorMessage = err instanceof Error ? err.message : 'Failed to inspect document for compression.';
+    } finally {
+      isInspecting = false;
+    }
+  }
+
   $effect(() => {
-    if (store.showCompressDialog && store.isDocumentLoaded) {
-      isInspecting = true;
-      summary = null;
-      errorMessage = null;
-      actions
-        .inspectDocumentForCompression()
-        .then((res) => {
-          inspection = res;
-          isInspecting = false;
-        })
-        .catch((err) => {
-          console.warn('Failed to inspect document for compression:', err);
-          isInspecting = false;
-        });
+    if (store.showCompressDialog) {
+      untrack(() => {
+        if (store.compressInitialPreset) {
+          activePreset = store.compressInitialPreset;
+        }
+        if (store.isDocumentLoaded) {
+          summary = null;
+          void runInspection();
+        }
+      });
     }
   });
 
@@ -110,7 +119,11 @@
     try {
       const result = await actions.compressCurrentDocument(getEffectiveOptions());
       summary = result;
-      inspection = await actions.inspectDocumentForCompression();
+      try {
+        inspection = await actions.inspectDocumentForCompression();
+      } catch {
+        // Non-fatal if re-inspection fails after successful compression
+      }
     } catch (err) {
       errorMessage = err instanceof Error ? err.message : 'Compression failed.';
     } finally {
@@ -146,9 +159,8 @@
   }
 </script>
 
-{#if store.showCompressDialog}
-  <Dialog.Root open={true} onOpenChange={handleOpenChange}>
-    <Dialog.Content class="sm:max-w-[580px] max-h-[92vh] flex flex-col p-0 gap-0 overflow-hidden font-sans">
+<Dialog.Root open={store.showCompressDialog} onOpenChange={handleOpenChange}>
+  <Dialog.Content class="sm:max-w-[580px] max-h-[92vh] flex flex-col p-0 gap-0 overflow-hidden font-sans">
       <!-- Header -->
       <Dialog.Header class="p-4 pb-3 border-b bg-card">
         <div class="flex items-center gap-2">
@@ -460,4 +472,3 @@
       </Dialog.Footer>
     </Dialog.Content>
   </Dialog.Root>
-{/if}
