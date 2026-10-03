@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -14,6 +15,7 @@
   import {
     validatePdfUrlSecurity,
   } from '../../services/url-document-loader';
+  import { useFeatureFlagStore } from '../../core/feature-flags';
   import {
     Globe,
     AlertCircle,
@@ -30,6 +32,14 @@
 
   const store = useEditorStore();
   const actions = useEditorActions();
+  const featureFlags = useFeatureFlagStore();
+
+  const canShowCompliance = $derived(
+    featureFlags.isEnabled('workspace.compliance.suites') && featureFlags.isEnabled('compliance.suites')
+  );
+  const canShowUrl = $derived(
+    featureFlags.isEnabled('workspace.compliance.url') && featureFlags.isEnabled('compliance.url')
+  );
 
   let activeTab = $state('compliance');
   let urlInput = $state('');
@@ -38,9 +48,19 @@
   const presets = getDemoPresetMetadataList();
 
   $effect(() => {
-    if (store.showOpenUrlDialog && store.openUrlDialogInitialUrl) {
-      urlInput = store.openUrlDialogInitialUrl;
-      activeTab = 'url';
+    if (store.showOpenUrlDialog) {
+      if (store.openUrlDialogInitialUrl) {
+        untrack(() => {
+          urlInput = store.openUrlDialogInitialUrl;
+          if (canShowUrl) {
+            activeTab = 'url';
+          }
+        });
+      } else if (!canShowCompliance && canShowUrl) {
+        untrack(() => {
+          activeTab = 'url';
+        });
+      }
     }
   });
 
@@ -122,6 +142,7 @@
     {/if}
 
     <Tabs.Root bind:value={activeTab} class="flex-1 flex flex-col min-h-0">
+      {#if canShowCompliance && canShowUrl}
       <Tabs.List class="grid grid-cols-2 mb-3 shrink-0">
         <Tabs.Trigger value="compliance" class="text-xs font-medium flex items-center gap-1.5">
           <Shield class="w-3.5 h-3.5" />
@@ -132,8 +153,24 @@
           Open from Remote URL
         </Tabs.Trigger>
       </Tabs.List>
+      {:else if canShowCompliance}
+      <Tabs.List class="grid grid-cols-1 mb-3 shrink-0">
+        <Tabs.Trigger value="compliance" class="text-xs font-medium flex items-center gap-1.5">
+          <Shield class="w-3.5 h-3.5" />
+          Industry Compliance Suites ({presets.length})
+        </Tabs.Trigger>
+      </Tabs.List>
+      {:else if canShowUrl}
+      <Tabs.List class="grid grid-cols-1 mb-3 shrink-0">
+        <Tabs.Trigger value="url" class="text-xs font-medium flex items-center gap-1.5">
+          <Globe class="w-3.5 h-3.5" />
+          Open from Remote URL
+        </Tabs.Trigger>
+      </Tabs.List>
+      {/if}
 
       <!-- TAB 1: Compliance Presets -->
+      {#if canShowCompliance}
       <Tabs.Content value="compliance" class="flex-1 overflow-y-auto pr-1 space-y-2.5 outline-none">
         <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5">
           {#each presets as preset (preset.id)}
@@ -181,8 +218,10 @@
           {/each}
         </div>
       </Tabs.Content>
+      {/if}
 
       <!-- TAB 2: Custom URL Input -->
+      {#if canShowUrl}
       <Tabs.Content value="url" class="flex-1 flex flex-col gap-4 outline-none pt-1">
         <div class="space-y-2">
           <Label for="pdf-url-input" class="text-xs font-medium">Public PDF Document URL</Label>
@@ -290,6 +329,7 @@
           </div>
         </div>
       </Tabs.Content>
+      {/if}
     </Tabs.Root>
 
     <Dialog.Footer class="shrink-0 pt-2 border-t flex justify-between sm:justify-between items-center">
