@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useCanvasStore } from '../../stores/canvas.svelte';
@@ -13,11 +13,9 @@
   import { Checkbox } from '$lib/components/ui/checkbox/index.js';
   import { Switch } from '$lib/components/ui/switch/index.js';
   import { downloadBytes } from '../../utils/download-utils';
-  import {
-    createSelfSignedCertificate,
-    parsePkcs12,
-    type DigitalIdentity,
-    type SignPdfOptions,
+  import type {
+    DigitalIdentity,
+    SignPdfOptions,
   } from '../../services/pdf/operations/signature-ops';
   import { getSavedSignatures, type SavedSignature } from '../../services/signature-storage';
   import {
@@ -101,11 +99,13 @@
 
   $effect(() => {
     if (store.showCertSignDialog) {
-      savedSignatures = getSavedSignatures();
-      targetPageIndex = store.currentPageIndex;
-      signSuccess = false;
-      signedPdfBytes = null;
-      signError = null;
+      untrack(() => {
+        savedSignatures = getSavedSignatures();
+        targetPageIndex = store.currentPageIndex;
+        signSuccess = false;
+        signedPdfBytes = null;
+        signError = null;
+      });
     }
   });
 
@@ -113,6 +113,7 @@
     if (!commonName.trim()) return;
     isGenerating = true;
     try {
+      const { createSelfSignedCertificate } = await import('../../services/pdf/operations/signature-ops');
       const id = await createSelfSignedCertificate({
         commonName: commonName.trim(),
         organization: organization.trim() || undefined,
@@ -137,6 +138,7 @@
     if (!importedP12File) return;
     importError = null;
     try {
+      const { parsePkcs12 } = await import('../../services/pdf/operations/signature-ops');
       const buffer = await importedP12File.arrayBuffer();
       const id = parsePkcs12(buffer, importPassword);
       activeIdentity = id;
@@ -234,7 +236,7 @@
 
 <Dialog.Root open={store.showCertSignDialog} onOpenChange={(open) => { if (!open) handleClose(); }}>
   <Dialog.Content class="sm:max-w-[660px] max-h-[90vh] flex flex-col p-0 overflow-hidden">
-    <Dialog.Header class="px-6 pt-5 pb-3 border-b border-border bg-card">
+    <Dialog.Header class="px-6 pt-5 pb-3 border-b border-border bg-card pr-12">
       <div class="flex items-center justify-between">
         <Dialog.Title class="flex items-center gap-2 text-base font-semibold">
           <ShieldCheck class="h-4 w-4 text-primary" />
@@ -322,7 +324,7 @@
             </Tabs.Trigger>
           </Tabs.List>
 
-          <!-- Step 1: Digital ID & Certificate -->
+          <!-- Digital ID and certificate selection -->
           <Tabs.Content value="cert" class="space-y-4">
             <div class="flex gap-2 p-1 bg-muted/40 rounded-lg border border-border">
               <button
@@ -438,7 +440,7 @@
             {/if}
           </Tabs.Content>
 
-          <!-- Step 2: Signature Metadata -->
+          <!-- Signature metadata and reasons -->
           <Tabs.Content value="details" class="space-y-4">
             {#if activeIdentity}
               <div class="bg-primary/5 border border-primary/20 rounded-lg p-3 space-y-1 text-xs">
@@ -557,7 +559,7 @@
             </div>
           </Tabs.Content>
 
-          <!-- Step 3: Visual Appearance -->
+          <!-- Visual appearance and placement -->
           <Tabs.Content value="appearance" class="space-y-4">
             <div class="flex items-center justify-between p-3 bg-muted/20 border border-border rounded-lg">
               <div>
@@ -609,6 +611,14 @@
                   </div>
                 </div>
 
+                <div class="flex items-center justify-between p-2.5 bg-muted/20 border border-border rounded-lg">
+                  <div>
+                    <div class="text-xs font-semibold">Include Signer Metadata Text</div>
+                    <div class="text-[11px] text-muted-foreground">Renders common name, signature date, and signing reason beside artwork.</div>
+                  </div>
+                  <Switch bind:checked={showTextDetails} aria-label="Include Signer Metadata Text" />
+                </div>
+
                 {#if savedSignatures.length > 0}
                   <div class="space-y-1.5">
                     <Label class="text-xs font-medium">Include Handwritten Signature Artwork (Optional)</Label>
@@ -645,14 +655,20 @@
                         </div>
                       {/if}
                     {/if}
-                    <div class="flex-1 text-[11px] leading-tight space-y-0.5 text-slate-800 dark:text-slate-200">
-                      <div class="text-[10px] text-muted-foreground">Digitally signed by:</div>
-                      <div class="font-bold text-slate-900 dark:text-slate-100">{activeIdentity?.subject.commonName || 'Signer Name'}</div>
-                      <div class="text-[10px] text-muted-foreground truncate">Date: {new Date().toLocaleDateString()} | Reason: {reason || 'Approved'}</div>
-                      {#if location}
-                        <div class="text-[10px] text-muted-foreground truncate">Location: {location}</div>
-                      {/if}
-                    </div>
+                    {#if showTextDetails}
+                      <div class="flex-1 text-[11px] leading-tight space-y-0.5 text-slate-800 dark:text-slate-200">
+                        <div class="text-[10px] text-muted-foreground">Digitally signed by:</div>
+                        <div class="font-bold text-slate-900 dark:text-slate-100">{activeIdentity?.subject.commonName || 'Signer Name'}</div>
+                        <div class="text-[10px] text-muted-foreground truncate">Date: {new Date().toLocaleDateString()} | Reason: {reason || 'Approved'}</div>
+                        {#if location}
+                          <div class="text-[10px] text-muted-foreground truncate">Location: {location}</div>
+                        {/if}
+                      </div>
+                    {:else if !selectedGraphicSigId}
+                      <div class="flex-1 text-[11px] text-muted-foreground italic">
+                        Enable metadata text or select a graphic signature to display on page.
+                      </div>
+                    {/if}
                   </div>
                 </div>
               </div>
@@ -673,7 +689,7 @@
             </div>
           </Tabs.Content>
 
-          <!-- Step 4: Review & Sign -->
+          <!-- Review and sign summary -->
           <Tabs.Content value="sign" class="space-y-4">
             <div class="bg-card border border-border rounded-lg p-4 space-y-3 text-xs">
               <div class="font-semibold text-foreground flex items-center gap-1.5 pb-2 border-b border-border">
