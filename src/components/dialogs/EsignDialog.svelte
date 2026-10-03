@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useCanvasStore } from '../../stores/canvas.svelte';
@@ -91,10 +91,12 @@
   let fileInputRef: HTMLInputElement | null = $state(null);
 
   function refreshSavedList(): void {
-    savedSignatures = getSavedSignatures();
-    if (savedSignatures.length === 0 && activeTab === 'signatures') {
-      activeTab = 'draw';
-    }
+    untrack(() => {
+      savedSignatures = getSavedSignatures();
+      if (savedSignatures.length === 0 && activeTab === 'signatures') {
+        activeTab = 'draw';
+      }
+    });
   }
 
   function setupCanvasDimensions(explicitWidth?: number, explicitHeight?: number): void {
@@ -125,13 +127,6 @@
     redrawCanvas();
   }
 
-  onMount(() => {
-    preloadSignatureFonts();
-    refreshSavedList();
-    if (store.esignInitialTab) {
-      activeTab = store.esignInitialTab;
-    }
-  });
 
   onDestroy(() => {
     cleanupPointerListeners();
@@ -543,7 +538,7 @@
           </Tabs.Trigger>
         </Tabs.List>
 
-        <!-- Tab 1: My Signatures -->
+        <!-- Saved signatures list -->
         <Tabs.Content value="signatures" class="space-y-4">
           {#if savedSignatures.length === 0}
             <div class="border border-dashed border-border rounded-lg p-8 text-center flex flex-col items-center justify-center gap-2">
@@ -613,7 +608,7 @@
           {/if}
         </Tabs.Content>
 
-        <!-- Tab 2: Draw -->
+        <!-- Draw signature canvas -->
         <Tabs.Content value="draw" class="space-y-4">
           <div class="space-y-2">
             <div class="flex items-center justify-between">
@@ -699,7 +694,7 @@
           </div>
         </Tabs.Content>
 
-        <!-- Tab 3: Type -->
+        <!-- Type signature typography -->
         <Tabs.Content value="type" class="space-y-4">
           <div class="space-y-1.5">
             <Label for="type-name-input" class="text-xs font-medium">Your Name or Initials</Label>
@@ -763,7 +758,7 @@
           </div>
         </Tabs.Content>
 
-        <!-- Tab 4: Upload -->
+        <!-- Upload signature artwork -->
         <Tabs.Content value="upload" class="space-y-4">
           <input
             bind:this={fileInputRef}
