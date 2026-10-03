@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -13,7 +14,6 @@
     ShieldAlert,
     Copy,
     Check,
-    Plus,
     Trash2,
     Save,
     Search,
@@ -56,8 +56,6 @@
     customFields: [],
   });
 
-  let newCustomKey = $state('');
-  let newCustomValue = $state('');
   let isSaving = $state(false);
   let saveSuccess = $state(false);
   let errorMessage = $state<string | null>(null);
@@ -65,8 +63,10 @@
   // Load extended metadata whenever dialog opens or document changes
   $effect(() => {
     if (store.showDocumentInfoDialog && store.isDocumentLoaded) {
-      loadMetadata();
-      loadSignatures();
+      untrack(() => {
+        loadMetadata();
+        loadSignatures();
+      });
     }
   });
 
@@ -139,24 +139,6 @@
     } catch {
       // Fallback
     }
-  }
-
-  function addCustomField(): void {
-    const cleanKey = newCustomKey.trim().replace(/^\//, '');
-    const cleanVal = newCustomValue.trim();
-    if (!cleanKey) return;
-
-    const existingIdx = editForm.customFields.findIndex(
-      (f) => f.key.toLowerCase() === cleanKey.toLowerCase()
-    );
-    if (existingIdx >= 0) {
-      editForm.customFields[existingIdx].value = cleanVal;
-    } else {
-      editForm.customFields.push({ key: cleanKey, value: cleanVal });
-    }
-
-    newCustomKey = '';
-    newCustomValue = '';
   }
 
   function removeCustomField(index: number): void {
@@ -237,11 +219,10 @@
   });
 </script>
 
-{#if store.showDocumentInfoDialog}
-  <Dialog.Root open={true} onOpenChange={handleOpenChange}>
-    <Dialog.Content class="sm:max-w-[680px] max-h-[88vh] flex flex-col p-0 overflow-hidden">
-      <!-- Header -->
-      <div class="px-6 pt-5 pb-3 border-b border-border bg-card">
+<Dialog.Root open={store.showDocumentInfoDialog} onOpenChange={handleOpenChange}>
+  <Dialog.Content class="sm:max-w-[680px] max-h-[88vh] flex flex-col p-0 overflow-hidden">
+    <!-- Header -->
+    <div class="px-6 pt-5 pb-3 border-b border-border bg-card pr-12">
         <div class="flex items-start justify-between">
           <div class="flex items-center gap-2.5">
             <div class="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary">
@@ -299,7 +280,7 @@
             </Tabs.List>
           </div>
 
-          <!-- Tab 1: Dynamic Metadata Fields -->
+          <!-- Dynamic metadata fields -->
           <Tabs.Content value="metadata" class="flex-1 flex flex-col min-h-0 p-6 overflow-hidden gap-3.5 m-0">
             {#if isEditing}
               <!-- Edit Metadata Mode -->
@@ -332,13 +313,13 @@
                 </div>
 
                 <!-- Custom Fields Management -->
-                <div class="border-t border-border pt-3 mt-1 flex flex-col gap-2">
-                  <div class="flex items-center justify-between">
-                    <span class="text-xs font-medium text-foreground">Custom Metadata Properties</span>
-                    <span class="text-[11px] text-muted-foreground">{editForm.customFields.length} custom tags</span>
-                  </div>
+                {#if editForm.customFields.length > 0}
+                  <div class="border-t border-border pt-3 mt-1 flex flex-col gap-2">
+                    <div class="flex items-center justify-between">
+                      <span class="text-xs font-medium text-foreground">Custom Metadata Properties</span>
+                      <span class="text-[11px] text-muted-foreground">{editForm.customFields.length} custom tags</span>
+                    </div>
 
-                  {#if editForm.customFields.length > 0}
                     <div class="flex flex-col gap-1.5 max-h-36 overflow-y-auto">
                       {#each editForm.customFields as field, idx}
                         <div class="flex items-center gap-2">
@@ -364,35 +345,8 @@
                         </div>
                       {/each}
                     </div>
-                  {:else}
-                    <p class="text-xs text-muted-foreground italic">No custom metadata tags added.</p>
-                  {/if}
-
-                  <!-- Add Custom Tag Row -->
-                  <div class="flex items-center gap-2 pt-1">
-                    <Input
-                      bind:value={newCustomKey}
-                      placeholder="New Key (e.g. Company)"
-                      class="h-7 text-xs w-1/3"
-                      onkeydown={(e) => { if (e.key === 'Enter') addCustomField(); }}
-                    />
-                    <Input
-                      bind:value={newCustomValue}
-                      placeholder="Value"
-                      class="h-7 text-xs flex-1"
-                      onkeydown={(e) => { if (e.key === 'Enter') addCustomField(); }}
-                    />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      class="h-7 px-2.5 text-xs shrink-0"
-                      onclick={addCustomField}
-                      disabled={!newCustomKey.trim()}
-                    >
-                      <Plus class="h-3 w-3 mr-1" /> Add
-                    </Button>
                   </div>
-                </div>
+                {/if}
               </div>
             {:else}
               <!-- View Dynamic Metadata List -->
@@ -486,7 +440,7 @@
             {/if}
           </Tabs.Content>
 
-          <!-- Tab 2: Overview & Technical Metrics -->
+          <!-- Overview and technical metrics -->
           <Tabs.Content value="overview" class="flex-1 min-h-0 p-6 overflow-y-auto space-y-4 m-0">
             <div class="grid grid-cols-2 gap-3">
               <div class="border border-border rounded-lg p-3 bg-muted/20 flex flex-col gap-1">
@@ -556,7 +510,7 @@
             {/if}
           </Tabs.Content>
 
-          <!-- Tab 3: Security & Access -->
+          <!-- Security and access -->
           <Tabs.Content value="security" class="flex-1 min-h-0 p-6 overflow-y-auto space-y-4 m-0">
             <SecurityComplianceSection
               {metadata}
@@ -573,7 +527,7 @@
             />
           </Tabs.Content>
 
-          <!-- Tab 4: Raw JSON & XMP Stream -->
+          <!-- Raw JSON and XMP stream -->
           <Tabs.Content value="raw" class="flex-1 flex flex-col min-h-0 p-6 overflow-hidden gap-3 m-0">
             <div class="flex items-center justify-between">
               <span class="text-xs text-muted-foreground font-medium">Raw Info Dictionary & XMP Stream</span>
@@ -601,11 +555,11 @@
               </div>
             </div>
 
-            <div class="flex-1 min-h-0 overflow-y-auto rounded-md bg-zinc-950 p-3 text-[11px] font-sans text-zinc-300 border border-border select-all">
+            <div class="flex-1 min-h-0 overflow-y-auto rounded-md bg-muted/40 p-3 text-[11px] font-sans text-foreground border border-border select-all">
               {#if metadata?.xmpString}
-                <div class="mb-3 pb-3 border-b border-zinc-800">
+                <div class="mb-3 pb-3 border-b border-border">
                   <span class="text-success font-semibold block mb-1">XMP Metadata XML Packet:</span>
-                  <pre class="whitespace-pre-wrap break-all text-[10px] text-zinc-400">{metadata.xmpString}</pre>
+                  <pre class="whitespace-pre-wrap break-all text-[10px] text-muted-foreground">{metadata.xmpString}</pre>
                 </div>
               {/if}
               <span class="text-info font-semibold block mb-1">Normalized Metadata Dictionary:</span>
@@ -681,4 +635,3 @@
       </div>
     </Dialog.Content>
   </Dialog.Root>
-{/if}
