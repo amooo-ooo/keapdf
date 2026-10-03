@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -8,13 +9,13 @@
   import { Checkbox } from '$lib/components/ui/checkbox/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Slider } from '$lib/components/ui/slider/index.js';
-  import {
-    documentConverter,
-    type DocumentConversionOptions,
-    type DocumentFormat,
-    type PageSizePreset,
-    type PageOrientation,
+  import type {
+    DocumentConversionOptions,
+    DocumentFormat,
+    PageSizePreset,
+    PageOrientation,
   } from '../../services/conversion';
+  import { isConvertibleDocumentFile, detectDocumentFormat } from '../../utils/file-type-utils';
   import {
     FileText,
     FileSpreadsheet,
@@ -52,7 +53,7 @@
   // Derived detected format
   const detectedFormat = $derived.by<DocumentFormat>(() => {
     if (!selectedFile) return 'unknown';
-    return documentConverter.detectFormat(selectedFile.name, undefined, selectedFile.type);
+    return detectDocumentFormat(selectedFile.name, selectedFile.type);
   });
 
   const isSpreadsheet = $derived(
@@ -65,8 +66,10 @@
 
   $effect(() => {
     if (store.showConvertDialog && store.convertInitialFile) {
-      selectedFile = store.convertInitialFile;
-      conversionError = null;
+      untrack(() => {
+        selectedFile = store.convertInitialFile;
+        conversionError = null;
+      });
     }
   });
 
@@ -135,7 +138,7 @@
     isDraggingFile = false;
     if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
       const file = e.dataTransfer.files[0];
-      if (documentConverter.isConvertible(file.name)) {
+      if (isConvertibleDocumentFile(file, file.name)) {
         selectedFile = file;
         conversionError = null;
       } else {
@@ -175,6 +178,7 @@
     conversionError = null;
 
     try {
+      const { documentConverter } = await import('../../services/conversion');
       const buffer = await selectedFile.arrayBuffer();
       const result = await documentConverter.convertDocument(
         { name: selectedFile.name, buffer, mimeType: selectedFile.type },
@@ -205,7 +209,7 @@
     conversionError = null;
 
     try {
-      await actions.loadDocumentFromFile(selectedFile, true);
+      await actions.convertAndLoadDocument(selectedFile, getEffectiveOptions(), true);
       store.closeConvertDialog();
     } catch (err) {
       conversionError = err instanceof Error ? err.message : 'Adding file failed.';
