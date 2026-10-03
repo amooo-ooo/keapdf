@@ -7,6 +7,7 @@
   import { Label } from '$lib/components/ui/label/index.js';
   import { downloadBlob, downloadBytes } from '../../utils/download-utils';
   import { createZipArchive } from '../../services/conversion/zip-utils';
+  import { AlertCircle, Loader2 } from 'lucide-svelte';
 
   interface Props {
     onClose: () => void;
@@ -21,16 +22,33 @@
   let exportTarget = $state<'current' | 'all'>('current');
   let exportScale = $state(2.0);
   let isExporting = $state(false);
+  let errorMessage = $state<string | null>(null);
 
   async function handleExportImages(): Promise<void> {
     isExporting = true;
+    errorMessage = null;
+
+    const originalBytes = actions.service.document.save();
+    const originalBuffer = originalBytes.buffer.slice(
+      originalBytes.byteOffset,
+      originalBytes.byteOffset + originalBytes.byteLength
+    ) as ArrayBuffer;
+
     try {
       if (actions.canvasStore && actions.canvasStore.elements.length > 0) {
         await actions.service.burnElementsToDocument(actions.canvasStore.elements);
-        actions.canvasStore.elements = [];
-        actions.canvasStore.clearDragState();
-        actions.canvasStore.selectElement(null);
-        actions.refreshDocument();
+      }
+
+      const hasTransforms = Object.values(store.pageTransforms).some(
+        t => t && (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1)
+      );
+      if (hasTransforms) {
+        const transformedBytes = await actions.service.document.saveAsync(store.pageTransforms);
+        const transformedBuffer = transformedBytes.buffer.slice(
+          transformedBytes.byteOffset,
+          transformedBytes.byteOffset + transformedBytes.byteLength
+        ) as ArrayBuffer;
+        actions.service.loadDocumentFromBuffer(transformedBuffer);
       }
 
       const baseName = store.fileName.replace(/\.[^/.]+$/, '');
@@ -57,7 +75,10 @@
       onClose();
     } catch (err) {
       console.error('Failed to export images:', err);
+      errorMessage = err instanceof Error ? err.message : 'Failed to export images.';
     } finally {
+      actions.service.loadDocumentFromBuffer(originalBuffer);
+      actions.refreshDocument();
       isExporting = false;
     }
   }
@@ -77,6 +98,13 @@
         Select export range, file format, and resolution scale. Multi-page exports are downloaded as a zip archive.
       </Dialog.Description>
     </Dialog.Header>
+
+    {#if errorMessage}
+      <div class="flex items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <AlertCircle class="h-4 w-4 shrink-0" />
+        <span>{errorMessage}</span>
+      </div>
+    {/if}
 
     <div class="grid gap-4 py-4">
       <div class="grid grid-cols-4 items-center gap-4">
@@ -136,7 +164,12 @@
         Cancel
       </Button>
       <Button disabled={isExporting} onclick={handleExportImages}>
-        {isExporting ? 'Exporting...' : 'Export Images'}
+        {#if isExporting}
+          <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" />
+          Exporting...
+        {:else}
+          Export Images
+        {/if}
       </Button>
     </Dialog.Footer>
   </Dialog.Content>
