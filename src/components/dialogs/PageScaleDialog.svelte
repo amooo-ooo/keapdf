@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useSelection } from '../../stores/selection.svelte';
@@ -59,14 +60,20 @@
   $effect(() => {
     if (preset !== 'custom') {
       const resolvedPts = resolvePaperDimensions(preset, orientation);
-      targetWidthInput = convertFromPoints(resolvedPts.width, unit);
-      targetHeightInput = convertFromPoints(resolvedPts.height, unit);
+      untrack(() => {
+        targetWidthInput = convertFromPoints(resolvedPts.width, unit);
+        targetHeightInput = convertFromPoints(resolvedPts.height, unit);
+      });
     }
   });
 
   $effect(() => {
-    if (selectedPageIndices.length <= 1 && scope === 'selected') {
-      scope = 'current';
+    if (selectedPageIndices.length <= 1) {
+      untrack(() => {
+        if (scope === 'selected') {
+          scope = 'current';
+        }
+      });
     }
   });
 
