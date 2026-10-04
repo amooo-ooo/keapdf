@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -40,35 +41,37 @@
   // Synchronise with current document permissions on open
   $effect(() => {
     if (store.showPermissionsDialog) {
-      errorMessage = null;
-      ownerPassword = '';
-      showPassword = false;
-      isSaving = false;
+      untrack(() => {
+        errorMessage = null;
+        ownerPassword = '';
+        showPassword = false;
+        isSaving = false;
 
-      if (store.isDocumentLoaded) {
-        actions
-          .getExtendedDocumentMetadata()
-          .then((metadata) => {
-            if (metadata && metadata.permissions !== undefined) {
-              const decoded = decodePermissionBitmask(metadata.permissions);
-              canPrint = decoded.canPrint;
-              canPrintHighQuality = decoded.canPrintHighQuality;
-              canCopy = decoded.canCopy;
-              canModify = decoded.canModify;
-              canAnnotate = decoded.canAnnotate;
-              canFillForms = decoded.canFillForms;
-              canExtractAccessibility = decoded.canExtractAccessibility;
-              canAssemble = decoded.canAssemble;
-            } else {
+        if (store.isDocumentLoaded) {
+          actions
+            .getExtendedDocumentMetadata()
+            .then((metadata) => {
+              if (metadata && metadata.permissions !== undefined) {
+                const decoded = decodePermissionBitmask(metadata.permissions);
+                canPrint = decoded.canPrint;
+                canPrintHighQuality = decoded.canPrintHighQuality;
+                canCopy = decoded.canCopy;
+                canModify = decoded.canModify;
+                canAnnotate = decoded.canAnnotate;
+                canFillForms = decoded.canFillForms;
+                canExtractAccessibility = decoded.canExtractAccessibility;
+                canAssemble = decoded.canAssemble;
+              } else {
+                applyPreset('unrestricted');
+              }
+            })
+            .catch(() => {
               applyPreset('unrestricted');
-            }
-          })
-          .catch(() => {
-            applyPreset('unrestricted');
-          });
-      } else {
-        applyPreset('unrestricted');
-      }
+            });
+        } else {
+          applyPreset('unrestricted');
+        }
+      });
     }
   });
 
@@ -285,15 +288,15 @@
         />
         <button
           type="button"
-          class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors p-1"
+          class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors p-1 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onclick={() => (showPassword = !showPassword)}
-          tabindex={-1}
+          tabindex={0}
           aria-label={showPassword ? 'Hide password' : 'Show password'}
         >
           {#if showPassword}
-            <EyeOff class="h-3.5 w-3.5" />
+            <EyeOff class="h-3.5 w-3.5" aria-hidden="true" />
           {:else}
-            <Eye class="h-3.5 w-3.5" />
+            <Eye class="h-3.5 w-3.5" aria-hidden="true" />
           {/if}
         </button>
       </div>
