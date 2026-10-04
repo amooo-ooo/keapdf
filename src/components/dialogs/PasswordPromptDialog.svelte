@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -16,9 +17,11 @@
 
   $effect(() => {
     if (store.showPasswordPromptDialog) {
-      password = '';
-      showPassword = false;
-      isSubmitting = false;
+      untrack(() => {
+        password = '';
+        showPassword = false;
+        isSubmitting = false;
+      });
     }
   });
 
@@ -90,15 +93,15 @@
         />
         <button
           type="button"
-          class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors p-1"
+          class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors p-1 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onclick={() => (showPassword = !showPassword)}
-          tabindex={-1}
+          tabindex={0}
           aria-label={showPassword ? 'Hide password' : 'Show password'}
         >
           {#if showPassword}
-            <EyeOff class="h-3.5 w-3.5" />
+            <EyeOff class="h-3.5 w-3.5" aria-hidden="true" />
           {:else}
-            <Eye class="h-3.5 w-3.5" />
+            <Eye class="h-3.5 w-3.5" aria-hidden="true" />
           {/if}
         </button>
       </div>
