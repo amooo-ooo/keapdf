@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -6,6 +7,8 @@
   import { Label } from '$lib/components/ui/label/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Checkbox } from '$lib/components/ui/checkbox/index.js';
+  import { parsePageRangeStrict } from '../../utils/page-range';
+  import { Loader2 } from 'lucide-svelte';
 
   interface Props {
     mode: 'split' | 'extract';
@@ -20,51 +23,23 @@
   let rangeInput = $state('');
   let autoDownload = $state(true);
   let errorMessage = $state('');
+  let isProcessing = $state(false);
 
   let initialized = false;
   $effect(() => {
-    if (!initialized || !rangeInput) {
-      rangeInput = `1-${store.pageCount}`;
-      initialized = true;
+    if (!initialized && store.pageCount > 0) {
+      untrack(() => {
+        rangeInput = `1-${store.pageCount}`;
+        initialized = true;
+      });
     }
   });
 
-  function parsePageRanges(input: string, maxPages: number): number[] {
-    const indices = new Set<number>();
-    const parts = input.split(',');
-
-    for (const part of parts) {
-      const trimmed = part.trim();
-      if (!trimmed) continue;
-
-      if (trimmed.includes('-')) {
-        const [startStr, endStr] = trimmed.split('-');
-        const start = parseInt(startStr.trim(), 10);
-        const end = parseInt(endStr.trim(), 10);
-
-        if (isNaN(start) || isNaN(end) || start < 1 || end > maxPages || start > end) {
-          throw new Error(`Invalid range specification: "${trimmed}"`);
-        }
-
-        for (let i = start - 1; i <= end - 1; i++) {
-          indices.add(i);
-        }
-      } else {
-        const val = parseInt(trimmed, 10);
-        if (isNaN(val) || val < 1 || val > maxPages) {
-          throw new Error(`Invalid page number: "${trimmed}"`);
-        }
-        indices.add(val - 1);
-      }
-    }
-
-    return Array.from(indices).sort((a, b) => a - b);
-  }
-
   function handleSplit(): void {
+    if (isProcessing) return;
     errorMessage = '';
     try {
-      const targetIndices = parsePageRanges(rangeInput, store.pageCount);
+      const targetIndices = parsePageRangeStrict(rangeInput, store.pageCount);
       if (targetIndices.length === 0) {
         errorMessage = 'Please specify at least one valid page.';
         return;
@@ -75,6 +50,7 @@
         return;
       }
 
+      isProcessing = true;
       actions.extractPages(targetIndices, mode, rangeInput, { autoDownload });
 
       onClose();
@@ -84,6 +60,8 @@
       } else {
         errorMessage = 'Failed to process document.';
       }
+    } finally {
+      isProcessing = false;
     }
   }
 
@@ -111,6 +89,13 @@
           type="text"
           bind:value={rangeInput}
           placeholder="1-3, 5"
+          disabled={isProcessing}
+          onkeydown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              handleSplit();
+            }
+          }}
         />
       </div>
 
@@ -133,11 +118,16 @@
     </div>
 
     <Dialog.Footer>
-      <Button variant="outline" onclick={onClose}>
+      <Button variant="outline" disabled={isProcessing} onclick={onClose}>
         Cancel
       </Button>
-      <Button onclick={handleSplit}>
-        {mode === 'split' ? 'Split Pages' : 'Extract Pages'}
+      <Button disabled={isProcessing} onclick={handleSplit}>
+        {#if isProcessing}
+          <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" />
+          Processing...
+        {:else}
+          {mode === 'split' ? 'Split Pages' : 'Extract Pages'}
+        {/if}
       </Button>
     </Dialog.Footer>
   </Dialog.Content>
