@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -118,19 +119,21 @@
 
   $effect(() => {
     if (store.showSanitizeDialog && store.isDocumentLoaded) {
-      isInspecting = true;
-      summary = null;
-      errorMessage = null;
-      actions
-        .inspectDocumentForSanitization()
-        .then((res) => {
-          inspection = res;
-          isInspecting = false;
-        })
-        .catch((err) => {
-          console.warn('Failed to inspect document for sanitization:', err);
-          isInspecting = false;
-        });
+      untrack(() => {
+        isInspecting = true;
+        summary = null;
+        errorMessage = null;
+        actions
+          .inspectDocumentForSanitization()
+          .then((res) => {
+            inspection = res;
+            isInspecting = false;
+          })
+          .catch((err) => {
+            console.warn('Failed to inspect document for sanitization:', err);
+            isInspecting = false;
+          });
+      });
     }
   });
 
@@ -154,7 +157,11 @@
       const result = await actions.sanitizeCurrentDocument(getCurrentOptions());
       summary = result;
       // Re-inspect updated document
-      inspection = await actions.inspectDocumentForSanitization();
+      try {
+        inspection = await actions.inspectDocumentForSanitization();
+      } catch {
+        // Non-fatal if re-inspection fails after successful sanitization
+      }
     } catch (err) {
       errorMessage = err instanceof Error ? err.message : 'Sanitization failed.';
     } finally {
@@ -190,10 +197,9 @@
   }
 </script>
 
-{#if store.showSanitizeDialog}
-  <Dialog.Root open={true} onOpenChange={handleOpenChange}>
-    <Dialog.Content class="sm:max-w-[560px] max-h-[90vh] flex flex-col p-0 gap-0 overflow-hidden">
-      <!-- Header -->
+<Dialog.Root open={store.showSanitizeDialog} onOpenChange={handleOpenChange}>
+  <Dialog.Content class="sm:max-w-[560px] max-h-[90vh] flex flex-col p-0 gap-0 overflow-hidden">
+    <!-- Header -->
       <Dialog.Header class="p-4 pb-3 border-b bg-card">
         <div class="flex items-center gap-2">
           <div class="p-1.5 rounded-md bg-primary/10 text-primary">
@@ -299,7 +305,7 @@
 
         <!-- Granular Options List -->
         <div class="flex flex-col gap-3">
-          <!-- Section 1: Metadata & Properties -->
+          <!-- Metadata and properties -->
           <div class="flex flex-col gap-1.5">
             <span class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
               Metadata & Document Properties
@@ -358,7 +364,7 @@
             </div>
           </div>
 
-          <!-- Section 2: Code & Attachments -->
+          <!-- Code and attachments -->
           <div class="flex flex-col gap-1.5">
             <span class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
               Security, Code & Files
@@ -400,7 +406,7 @@
             </div>
           </div>
 
-          <!-- Section 3: Interactive & Content Artifacts -->
+          <!-- Interactive and content artifacts -->
           <div class="flex flex-col gap-1.5">
             <span class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
               Interactive & Content Artifacts
@@ -559,4 +565,3 @@
       </Dialog.Footer>
     </Dialog.Content>
   </Dialog.Root>
-{/if}
