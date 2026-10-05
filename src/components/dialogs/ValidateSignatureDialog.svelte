@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -36,15 +36,11 @@
     }
   }
 
-  onMount(() => {
-    if (store.showValidateSignaturesDialog) {
-      runValidation();
-    }
-  });
-
   $effect(() => {
     if (store.showValidateSignaturesDialog) {
-      runValidation();
+      untrack(() => {
+        runValidation();
+      });
     }
   });
 
@@ -55,7 +51,7 @@
 
 <Dialog.Root open={store.showValidateSignaturesDialog} onOpenChange={(open) => { if (!open) handleClose(); }}>
   <Dialog.Content class="sm:max-w-[620px] max-h-[85vh] flex flex-col p-0 overflow-hidden">
-    <Dialog.Header class="px-6 pt-5 pb-3 border-b border-border bg-card">
+    <Dialog.Header class="px-6 pt-5 pb-3 border-b border-border bg-card pr-12">
       <div class="flex items-center justify-between">
         <Dialog.Title class="flex items-center gap-2 text-base font-semibold">
           <ShieldCheck class="h-4 w-4 text-primary" />
