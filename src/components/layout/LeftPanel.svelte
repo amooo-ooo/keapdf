@@ -3,10 +3,17 @@
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import type { OutlineNode } from '../../core/types';
-  import { flattenOutlineTree, type OutlineItemFlat } from '../../services/pdf/operations/outline-ops';
+  import { flattenOutlineTree, type OutlineItemFlat } from '../../services/pdf/operations/outline-tree';
   import PageThumbnailStrip from '../panels/PageThumbnailStrip.svelte';
   import PageThumbnailImage from '../common/PageThumbnailImage.svelte';
-  import DraggableListItem from '../common/DraggableListItem.svelte';
+  import DraggableListItem, {
+    getDragGroup,
+    getDragIndices,
+    getDragPayloadData,
+    setDragOverState,
+    clearDragOverState,
+  } from '../common/DraggableListItem.svelte';
+  import { formatPageRange } from '../../utils/page-range';
   import { useSelection } from '../../stores/selection.svelte';
   import { usePanelRegistry } from '../../core/panel-registry';
   import { useFeatureFlagStore } from '../../core/feature-flags';
@@ -49,6 +56,7 @@
   let isDraggingPagesDivider = $state(false);
   let isDraggingFilesDivider = $state(false);
   let mainContainerEl: HTMLElement | null = $state(null);
+  let filesContainerEl: HTMLElement | null = $state(null);
 
   $effect(() => {
     if (store.isDocumentLoaded) {
@@ -148,14 +156,125 @@
     window.removeEventListener('pointerup', stopFilesResize);
     window.removeEventListener('pointercancel', stopFilesResize);
   }
+
+  function canDropPageInFiles(sourceGroup: string, indices: number[], payload: Record<string, string>): boolean {
+    if (!store.canExtractPages || store.isReadOnly) return false;
+    if (sourceGroup === 'pages') {
+      const pageIndices = parseDroppedPageIndices(indices, payload);
+      const count = pageIndices.length > 0 ? pageIndices.length : indices.length;
+      return store.isDocumentLoaded && count > 0 && (store.isReadOnly || count < store.pageCount);
+    }
+    return false;
+  }
+
+  function parseDroppedPageIndices(indices: number[], payload: Record<string, string>): number[] {
+    const rawPayload = payload['application/x-page-indices'] || payload['application/x-workspace-page-indices'];
+    if (rawPayload) {
+      try {
+        const parsed = JSON.parse(rawPayload);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      } catch {
+        // Fallback to in-memory indices
+      }
+    }
+    return indices;
+  }
+
+  async function handleExtractPagesToWorkspace(pageIndices: number[], targetIndex: number): Promise<void> {
+    if (!store.canExtractPages || store.isReadOnly) return;
+    const sortedIndices = Array.from(new Set(pageIndices)).sort((a, b) => a - b);
+    if (sortedIndices.length === 0 || !store.isDocumentLoaded) return;
+    if (!store.isReadOnly && sortedIndices.length >= store.pageCount) return;
+    const rangeString = formatPageRange(sortedIndices);
+    // Non-destructive page extraction in viewing mode preserves source document state
+    const mode = store.isReadOnly ? 'extract' : 'split';
+    await actions.extractPages(sortedIndices, mode, rangeString, {
+      autoDownload: false,
+      targetFileIndex: targetIndex,
+    });
+  }
+
+  function handleDropFromGroupInFiles(sourceGroup: string, indices: number[], targetIndex: number, payload: Record<string, string>): void {
+    if (store.isReadOnly) return;
+    if (sourceGroup === 'pages') {
+      const pageIndices = parseDroppedPageIndices(indices, payload);
+      if (pageIndices.length > 0) {
+        void handleExtractPagesToWorkspace(pageIndices, targetIndex);
+      }
+    }
+  }
+
+  function handleFilesContainerDragOver(e: DragEvent): void {
+    if (store.isReadOnly) return;
+    const group = getDragGroup();
+    if (group !== 'pages' && group !== 'files') return;
+    if (store.workspaceFiles.length === 0) return;
+
+    if (group === 'pages') {
+      if (!store.canExtractPages) return;
+      const pageIndices = parseDroppedPageIndices(getDragIndices(), getDragPayloadData());
+      const count = pageIndices.length > 0 ? pageIndices.length : getDragIndices().length;
+      if (count === 0 || count >= store.pageCount) return;
+    }
+
+    if (filesContainerEl && filesContainerEl.children.length > 0) {
+      const lastChild = filesContainerEl.children[filesContainerEl.children.length - 1] as HTMLElement;
+      const lastRect = lastChild.getBoundingClientRect();
+      if (e.clientY >= lastRect.bottom) {
+        e.preventDefault();
+        if (e.dataTransfer) {
+          e.dataTransfer.dropEffect = group === 'files' ? 'move' : 'copy';
+        }
+        const lastFile = store.workspaceFiles[store.workspaceFiles.length - 1];
+        setDragOverState(`file_${lastFile.id}`, 'bottom');
+      }
+    }
+  }
+
+  function handleFilesContainerDragLeave(e: DragEvent): void {
+    if (filesContainerEl && e.relatedTarget && filesContainerEl.contains(e.relatedTarget as Node)) {
+      return;
+    }
+    clearDragOverState();
+  }
+
+  function handleFilesContainerDrop(e: DragEvent): void {
+    if (store.isReadOnly) return;
+    const group = getDragGroup();
+    if (group !== 'pages' && group !== 'files') return;
+    if (!filesContainerEl || store.workspaceFiles.length === 0) return;
+
+    const lastChild = filesContainerEl.children[filesContainerEl.children.length - 1] as HTMLElement;
+    const lastRect = lastChild.getBoundingClientRect();
+    if (e.clientY >= lastRect.bottom) {
+      e.preventDefault();
+      clearDragOverState();
+
+      if (group === 'pages') {
+        const payload = getDragPayloadData();
+        const pageIndices = parseDroppedPageIndices(getDragIndices(), payload);
+        if (pageIndices.length > 0) {
+          void handleExtractPagesToWorkspace(pageIndices, store.workspaceFiles.length);
+        }
+      } else if (group === 'files') {
+        const indices = getDragIndices();
+        if (indices.length > 0) {
+          actions.reorderWorkspaceFiles(indices, store.workspaceFiles.length);
+        }
+      }
+    }
+  }
 </script>
 
 <aside
-  class="h-full flex flex-col overflow-hidden select-none w-full py-[4px] pr-[4px]"
+  aria-label="Workspace sidebar"
+  class="h-full flex flex-col overflow-hidden select-none w-full bg-card"
   style={store.leftPanelCollapsed ? 'width: 0px; padding: 0;' : ''}
 >
   {#if !store.leftPanelCollapsed}
-    <div class="panel-container rounded-l-none border-l-0">
+    <div class="panel-container rounded-none border-0 shadow-none bg-card">
       <!-- Top Header: Document Title & Main Action -->
       <div class="panel-header">
       <div class="flex items-start justify-between">
@@ -171,13 +290,15 @@
               class="flex items-center gap-1 panel-title hover:text-primary truncate text-left group"
               title={store.fileName}
               onclick={() => {
-                if (store.isDocumentLoaded) store.showDocumentInfoDialog = true;
+                if (store.isDocumentLoaded && featureFlags.isEnabled('document-info')) {
+                  store.showDocumentInfoDialog = true;
+                }
               }}
             >
               <span class="truncate">{store.fileName}</span>
               <ChevronDown class="h-3.5 w-3.5 text-muted-foreground group-hover:text-foreground shrink-0" />
             </button>
-            <span class="panel-subtitle">
+            <span class="panel-subtitle tabular-nums">
               {store.isDocumentLoaded ? `${store.pageCount} ${store.pageCount === 1 ? 'page' : 'pages'}` : 'PDF Document'}
             </span>
           {/if}
@@ -210,50 +331,84 @@
       <!-- Resizable Split View Container (Files, Pages, Outline) -->
       <div
         bind:this={mainContainerEl}
-        class="flex-1 flex flex-col min-h-0 overflow-hidden relative"
+        class="flex-1 flex flex-col min-h-0 overflow-hidden relative py-1"
       >
         {#if featureFlags.isEnabled('workspace.files') && store.workspaceFiles.length > 0}
-          <!-- Section 0: Files (Independent Scrollable Container) -->
-          <div
-            class="flex flex-col min-h-0 shrink-0 py-1.5 gap-1.5 overflow-hidden"
+          <!-- Files container -->
+          <section
+            class="sidebar-section min-h-0 shrink-0"
             style="height: {filesPercent}%;"
           >
             <div class="sidebar-section-header">
               <span class="sidebar-section-title">Files</span>
-              {#if featureFlags.isEnabled('workspace.add')}
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-6 w-6 text-muted-foreground hover:text-foreground"
-                onclick={() => actions.triggerFileOpen(true)}
-                title="Add PDF to workspace"
-                aria-label="Add PDF to workspace"
-              >
-                <Plus class="h-3.5 w-3.5" />
-              </Button>
+              {#if featureFlags.isEnabled('workspace.add') && (!store.isReadOnly || store.canMergeFiles)}
+              <div class="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-6 w-6 text-muted-foreground hover:text-foreground"
+                  onclick={() => actions.triggerFileOpen(true)}
+                  title="Add PDF to workspace"
+                  aria-label="Add PDF to workspace"
+                >
+                  <Plus class="h-3.5 w-3.5" />
+                </Button>
+              </div>
               {/if}
             </div>
             
-            <div class="flex flex-col gap-0.5 px-1.5 py-1 pb-2 overflow-y-auto flex-1">
+            <div
+              bind:this={filesContainerEl}
+              class="flex flex-col gap-0.5 px-2.5 pb-2.5 overflow-y-auto flex-1"
+              ondragover={handleFilesContainerDragOver}
+              ondragleave={handleFilesContainerDragLeave}
+              ondrop={handleFilesContainerDrop}
+              role="region"
+              aria-label="Workspace files list"
+            >
               {#each store.workspaceFiles as file, fileIndex}
                 <DraggableListItem
                   id={`file_${file.id}`}
                   index={fileIndex}
                   group="files"
+                  acceptGroups={['pages']}
+                  canDrop={canDropPageInFiles}
+                  onDropFromGroup={handleDropFromGroupInFiles}
                   class="group flex items-center gap-2.5 p-1.5 rounded-md cursor-pointer transition-colors text-left text-xs [&>*]:pointer-events-none {selection.isSelected(`file_${file.id}`) || store.activeWorkspaceFileId === file.id ? 'bg-primary/10 text-foreground font-medium' : 'hover:bg-muted/60 text-foreground font-normal'}"
                   getDragIndices={() => {
-                    const ids = Array.from(selection.selectedIds);
-                    return ids
-                      .filter(id => id.startsWith('file_'))
-                      .map(id => {
-                         const fileId = id.replace('file_', '');
-                         return store.workspaceFiles.findIndex(f => f.id === fileId);
-                      })
-                      .filter(idx => idx !== -1)
-                      .sort((a, b) => a - b);
+                    const ids = new Set(
+                      Array.from(selection.selectedIds)
+                        .filter(id => id.startsWith('file_'))
+                        .map(id => id.replace('file_', ''))
+                    );
+                    const isSelected = ids.has(file.id);
+                    if (!isSelected) {
+                      return [fileIndex];
+                    }
+                    return store.workspaceFiles
+                      .map((f, i) => (ids.has(f.id) ? i : -1))
+                      .filter(i => i !== -1);
+                  }}
+                  getDragPayload={() => {
+                    const ids = new Set(
+                      Array.from(selection.selectedIds)
+                        .filter(id => id.startsWith('file_'))
+                        .map(id => id.replace('file_', ''))
+                    );
+                    const isSelected = ids.has(file.id);
+                    const targetFiles = isSelected
+                      ? store.workspaceFiles.filter(f => ids.has(f.id))
+                      : [file];
+                    return {
+                      'application/x-workspace-file-ids': JSON.stringify(targetFiles.map(f => f.id)),
+                    };
                   }}
                   onclick={(e) => {
                     const fileIds = store.workspaceFiles.map(f => `file_${f.id}`);
+                    if (e.shiftKey && !selection.lastSelectedId && store.activeWorkspaceFileId) {
+                      selection.lastSelectedId = `file_${store.activeWorkspaceFileId}`;
+                      selection.selectedIds.add(`file_${store.activeWorkspaceFileId}`);
+                    }
                     selection.select(
                       `file_${file.id}`,
                       e.ctrlKey || e.metaKey,
@@ -289,93 +444,91 @@
                 </DraggableListItem>
               {/each}
             </div>
-          </div>
+          </section>
 
           <!-- Resizable Horizontal Divider (Files <-> Pages) -->
           <div
-            class="relative border-b border-border !cursor-row-resize shrink-0 z-10"
+            class="relative !cursor-row-resize shrink-0 z-10"
             onpointerdown={startFilesResize}
             role="separator"
             aria-orientation="horizontal"
             aria-label="Resize Files and Pages panels"
           >
-            <div class="absolute -top-1.5 -bottom-1.5 left-0 right-0 !cursor-row-resize"></div>
+            <div class="absolute -top-2 -bottom-2 left-0 right-0 !cursor-row-resize"></div>
           </div>
         {/if}
 
         {#if featureFlags.isEnabled('workspace.pages')}
-        <!-- Section 1: Pages (Independent Scrollable Container) -->
-        <div
-          class="flex flex-col min-h-0 shrink-0 py-1.5 gap-1.5 overflow-hidden"
+        <!-- Pages container -->
+        <section
+          class="sidebar-section min-h-0 shrink-0"
           style="height: {featureFlags.isEnabled('outline') ? pagesPercent : (store.workspaceFiles.length > 0 && featureFlags.isEnabled('workspace.files') ? 100 - filesPercent : 100)}%;"
         >
           <div class="sidebar-section-header">
             <span class="sidebar-section-title">Pages</span>
             {#if featureFlags.isEnabled('page-actions.add-blank')}
-            <Button
-              variant="ghost"
-              size="icon"
-              class="h-6 w-6 text-muted-foreground hover:text-foreground"
-              disabled={!store.isDocumentLoaded}
-              onclick={() => actions.addBlankPage(store.currentPageIndex)}
-              title="Add blank page"
-              aria-label="Add blank page"
-            >
-              <Plus class="h-3.5 w-3.5" />
-            </Button>
+            <div class="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-6 w-6 text-muted-foreground hover:text-foreground"
+                disabled={!store.isDocumentLoaded || store.isReadOnly}
+                onclick={() => actions.addBlankPage(store.currentPageIndex)}
+                title="Add blank page"
+                aria-label="Add blank page"
+              >
+                <Plus class="h-3.5 w-3.5" />
+              </Button>
+            </div>
             {/if}
           </div>
 
-          <div class="flex-1 overflow-y-auto px-1.5 relative">
+          <div class="flex-1 overflow-y-auto px-2.5 pb-2.5 relative">
             {#if store.isDocumentLoaded}
               <PageThumbnailStrip />
-            {:else}
-              <div class="text-xs text-muted-foreground p-3 text-center">No document open.</div>
             {/if}
           </div>
-        </div>
+        </section>
 
         {#if featureFlags.isEnabled('outline')}
         <!-- Resizable Horizontal Divider (Pages <-> Outline) -->
         <div
-          class="relative border-b border-border !cursor-row-resize shrink-0 z-10"
+          class="relative !cursor-row-resize shrink-0 z-10"
           onpointerdown={startPagesResize}
           role="separator"
           aria-orientation="horizontal"
           aria-label="Resize Pages and Outline panels"
         >
-          <div class="absolute -top-1.5 -bottom-1.5 left-0 right-0 !cursor-row-resize"></div>
+          <div class="absolute -top-2 -bottom-2 left-0 right-0 !cursor-row-resize"></div>
         </div>
         {/if}
         {/if}
 
         {#if featureFlags.isEnabled('outline')}
-        <!-- Section 2: Outline (Independent Scrollable Container) -->
-        <div
-          class="flex flex-col min-h-0 flex-1 py-1.5 gap-1.5 overflow-hidden"
+        <!-- Outline container -->
+        <section
+          class="sidebar-section min-h-0 flex-1"
           style="height: {store.workspaceFiles.length > 0 && featureFlags.isEnabled('workspace.files') ? 100 - filesPercent - pagesPercent : 100 - pagesPercent}%;"
         >
           <div class="sidebar-section-header">
             <span class="sidebar-section-title">Outline</span>
-            <Button
-              variant="ghost"
-              size="icon"
-              class="h-6 w-6 text-muted-foreground hover:text-foreground"
-              disabled={!store.isDocumentLoaded}
-              onclick={() => actions.addTextToOutline()}
-              title="Add current selection or page to outline"
-              aria-label="Add text to outline"
-            >
-              <Plus class="h-3.5 w-3.5" />
-            </Button>
+            <div class="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-6 w-6 text-muted-foreground hover:text-foreground"
+                disabled={!store.isDocumentLoaded || store.isReadOnly}
+                onclick={() => actions.addTextToOutline()}
+                title="Add current selection or page to outline"
+                aria-label="Add text to outline"
+              >
+                <Plus class="h-3.5 w-3.5" />
+              </Button>
+            </div>
           </div>
 
-          <div class="flex-1 overflow-y-auto px-1.5">
-            {#if flatOutline.length === 0}
-              <div class="text-xs text-muted-foreground px-1 py-2 text-left">
-                No outline in document.
-              </div>
-            {:else}
+          <div class="flex-1 overflow-y-auto px-2.5 pb-2.5">
+            {#if flatOutline.length > 0}
               <div class="flex flex-col gap-0.5">
                 {#each flatOutline as item, itemIndex}
                   {@const isSelected = selection.isSelected(`outline_${item.title}_${itemIndex}`)}
@@ -422,7 +575,7 @@
                     }}
                     role="button"
                     tabindex={0}
-                    onReorder={(from, to) => actions.reorderOutline(from, to)}
+                    onReorder={(from, to) => { if (!store.isReadOnly) actions.reorderOutline(from, to); }}
                   >
                     {#if item.level === 1}
                       <Heading1 class="h-3.5 w-3.5 text-muted-foreground shrink-0" />
@@ -446,7 +599,7 @@
               </div>
             {/if}
           </div>
-        </div>
+        </section>
         {/if}
       </div>
     {/if}
