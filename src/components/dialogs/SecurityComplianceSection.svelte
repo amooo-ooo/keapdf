@@ -69,7 +69,7 @@
 </script>
 
 <div class="space-y-4">
-  <!-- 1. Document Encryption & Access Restrictions -->
+  <!-- Document encryption and access restrictions -->
   <div class="border border-border rounded-lg p-4 bg-muted/20 flex items-center justify-between">
     <div class="flex items-center gap-3">
       <div
@@ -99,7 +99,7 @@
     </Badge>
   </div>
 
-  <!-- 2. High-Level Metrics (Signatures & Attachments) -->
+  <!-- High-level metrics for signatures and attachments -->
   <div class="grid grid-cols-2 gap-3">
     <div class="border border-border rounded-lg p-3 bg-card flex items-center gap-2.5">
       <ShieldCheck class="h-4 w-4 text-primary shrink-0" />
@@ -122,7 +122,7 @@
     </div>
   </div>
 
-  <!-- 3. Digital Signatures & Standards Compliance Section -->
+  <!-- Digital signatures and standards compliance -->
   <div class="border border-border rounded-lg p-4 bg-card space-y-3.5">
     <div class="flex items-center justify-between pb-1 border-b border-border/60">
       <div class="flex items-center gap-2">
@@ -239,7 +239,7 @@
         </div>
       </div>
 
-      <!-- 4 Statutory Industry Standard Compliance Pillars -->
+      <!-- Statutory industry standard compliance pillars -->
       <div class="space-y-2">
         <span class="text-[11px] font-semibold text-foreground uppercase tracking-wider block">
           Statutory Verification Checks (Swiss ZertES / ESigA & ETSI)
@@ -351,7 +351,7 @@
     {/if}
   </div>
 
-  <!-- 4. Decoded Permission Bitflags -->
+  <!-- Decoded permission bitflags -->
   <div class="border border-border rounded-lg p-3.5 bg-card flex flex-col gap-2">
     <div class="flex items-center justify-between">
       <span class="text-xs font-semibold text-foreground">Standard Permission Flags</span>
