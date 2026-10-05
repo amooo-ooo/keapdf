@@ -1,21 +1,23 @@
 <script lang="ts">
   import type { Component } from 'svelte';
-  import { FileText, PanelLeftOpen, Globe, Files, FileType } from 'lucide-svelte';
+  import { FileText, PanelLeftOpen, Globe, Files, FileType, Download, Palette } from 'lucide-svelte';
   import { Button } from '$lib/components/ui/button';
-  import { Separator } from '$lib/components/ui/separator';
   import * as Tooltip from '$lib/components/ui/tooltip';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useFeatureFlagStore } from '../../core/feature-flags';
   import { usePanelRegistry } from '../../core/panel-registry';
+  import { usePwaStore } from '../../stores/pwa.svelte';
   import type { LeftPanelMode } from '../../stores/types';
   import type { FeatureFlag } from '../../core/feature-flags';
+  import { isTabAllowedInMode } from '../../core/document-mode';
 
   const store = useEditorStore();
   const actions = useEditorActions();
   const featureFlags = useFeatureFlagStore();
   const panelRegistry = usePanelRegistry();
+  const pwaStore = usePwaStore();
 
   const leftPanels = $derived(panelRegistry.getByPosition('left'));
 
@@ -31,7 +33,16 @@
     return flag ? featureFlags.isEnabled(flag) : true;
   }
 
-  const enabledLeftPanels = $derived(leftPanels.filter((panel) => isPanelEnabled(panel.id)));
+  const enabledLeftPanels = $derived(
+    leftPanels.filter((panel) => isPanelEnabled(panel.id) && isTabAllowedInMode(store.viewMode, panel.id))
+  );
+
+  // note: automatically synchronise active tab back to workspace if panel is restricted by view mode
+  $effect(() => {
+    if (!isTabAllowedInMode(store.viewMode, store.leftPanelMode)) {
+      store.leftPanelMode = 'workspace';
+    }
+  });
 
   function selectTab(mode: LeftPanelMode): void {
     if (store.leftPanelCollapsed) {
@@ -49,12 +60,14 @@
   }
 </script>
 
-<div class="h-full py-[4px] pl-[4px] {store.leftPanelCollapsed ? 'pr-[4px]' : ''}">
-  <div class="w-[40px] h-full bg-card flex flex-col items-center py-1 gap-1 select-none {store.leftPanelCollapsed ? 'border rounded-xl shadow-sm' : 'border-y border-l border-r rounded-l-xl shadow-sm'}">
+<div class="w-[40px] h-full bg-card flex flex-col items-center py-1 gap-1 select-none shrink-0">
   <!-- note: application brand icon and workspace file actions menu -->
   <DropdownMenu.Root>
     <DropdownMenu.Trigger>
       {#snippet child({ props })}
+        <!-- note: alternative default pill styling:
+             class="w-8 h-8 text-primary bg-primary/10 hover:text-primary/90 hover:bg-primary/10 dark:hover:bg-primary/10 aria-expanded:bg-primary/15"
+        -->
         <Button
           {...props}
           variant="ghost"
@@ -73,7 +86,7 @@
       </DropdownMenu.Item>
       {/if}
       {#if featureFlags.isEnabled('workspace.add')}
-      <DropdownMenu.Item class="text-xs" onclick={() => actions.triggerFileOpen(true)}>
+      <DropdownMenu.Item class="text-xs" disabled={store.isReadOnly} onclick={() => actions.triggerFileOpen(true)}>
         Add File to workspace...
       </DropdownMenu.Item>
       {/if}
@@ -84,22 +97,34 @@
         Convert to PDF...
       </DropdownMenu.Item>
       {/if}
-      {#if featureFlags.isEnabled('workspace.compliance')}
+      {#if featureFlags.isEnabled('workspace.compliance') && featureFlags.isEnabled('compliance')}
       <DropdownMenu.Item class="text-xs" onclick={() => store.openUrlDialog()}>
         <Globe class="w-3 h-3 mr-2 text-primary" />
         Compliance Suites / URL...
       </DropdownMenu.Item>
       {/if}
-      {#if featureFlags.isEnabled('merge')}
-      <DropdownMenu.Item class="text-xs" onclick={() => actions.triggerMergeFiles()}>
+      {#if featureFlags.isEnabled('merge') && featureFlags.isEnabled('workspace.merge')}
+      <DropdownMenu.Item class="text-xs" disabled={store.isReadOnly} onclick={() => actions.triggerMergeFiles()}>
         <Files class="w-3 h-3 mr-2 text-primary" />
         Merge Files...
       </DropdownMenu.Item>
       {/if}
+      {#if featureFlags.isEnabled('components.gallery')}
+      <DropdownMenu.Separator />
+      <DropdownMenu.Item class="text-xs" onclick={() => store.openComponentGalleryDialog()}>
+        <Palette class="w-3 h-3 mr-2 text-primary" />
+        UI Component Gallery...
+      </DropdownMenu.Item>
+      {/if}
+      {#if pwaStore?.canInstall}
+      <DropdownMenu.Separator />
+      <DropdownMenu.Item class="text-xs" onclick={() => pwaStore.promptInstall()}>
+        <Download class="w-3 h-3 mr-2 text-primary" />
+        Install Kea PDF App...
+      </DropdownMenu.Item>
+      {/if}
     </DropdownMenu.Content>
   </DropdownMenu.Root>
-
-  <Separator class="w-[14px] h-[1px] bg-border shrink-0" />
 
   <!-- note: dynamic left sidebar panels from registry -->
   {#each enabledLeftPanels as panel (panel.id)}
@@ -107,6 +132,9 @@
     <Tooltip.Root>
       <Tooltip.Trigger>
         {#snippet child({ props })}
+          <!-- note: alternative default pill styling:
+               class="w-8 h-8 {isTabActive(panel.id as LeftPanelMode) ? 'bg-primary text-primary-foreground aria-pressed:bg-primary aria-pressed:text-primary-foreground hover:bg-primary/90 aria-pressed:hover:bg-primary/90' : 'bg-muted dark:bg-muted/50 text-muted-foreground hover:text-foreground hover:bg-muted dark:hover:bg-muted/50'}"
+          -->
           <Button
             {...props}
             variant="ghost"
@@ -147,5 +175,4 @@
       <Tooltip.Content side="right">Expand Sidebar</Tooltip.Content>
     </Tooltip.Root>
   {/if}
-  </div>
 </div>
