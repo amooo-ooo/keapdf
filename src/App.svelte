@@ -41,7 +41,12 @@
   import PageScaleDialog from './components/dialogs/PageScaleDialog.svelte';
   import PasswordPromptDialog from './components/dialogs/PasswordPromptDialog.svelte';
   import PermissionsDialog from './components/dialogs/PermissionsDialog.svelte';
+  import QrBarcodeModal from './components/dialogs/QrBarcodeModal.svelte';
+  import ComponentGalleryDialog from './components/dialogs/ComponentGalleryDialog.svelte';
+  import { inspectFileInfo } from './utils/file-type-detector';
   import { WebMcpStore, provideWebMcpStore } from './stores/webmcp.svelte';
+  import { PwaStore, providePwaStore } from './stores/pwa.svelte';
+  import PwaNotification from './components/common/PwaNotification.svelte';
   import { WebMcpManager } from './core/webmcp/webmcp-manager';
   import {
     parseDocumentLoadRequest,
@@ -107,18 +112,31 @@
   providePluginManager(pluginManager);
   provideFeatureFlagStore(featureFlags);
 
+  const pwaStore = new PwaStore();
+  providePwaStore(pwaStore);
+
   let fileInputEl: HTMLInputElement | null = $state(null);
   let mergeFileInputEl: HTMLInputElement | null = $state(null);
   let imageFileInputEl: HTMLInputElement | null = $state(null);
   let imageAsPageFileInputEl: HTMLInputElement | null = $state(null);
+  let videoFileInputEl: HTMLInputElement | null = $state(null);
+  let audioFileInputEl: HTMLInputElement | null = $state(null);
+  let threeDFileInputEl: HTMLInputElement | null = $state(null);
+  let attachmentFileInputEl: HTMLInputElement | null = $state(null);
   let mergeFilesInputEl: HTMLInputElement | null = $state(null);
+  let quickConvertFileInputEl: HTMLInputElement | null = $state(null);
 
   onMount(() => {
     actions.fileInputEl = fileInputEl;
     actions.mergeFileInputEl = mergeFileInputEl;
     actions.imageFileInputEl = imageFileInputEl;
     actions.imageAsPageFileInputEl = imageAsPageFileInputEl;
+    actions.videoFileInputEl = videoFileInputEl;
+    actions.audioFileInputEl = audioFileInputEl;
+    actions.threeDFileInputEl = threeDFileInputEl;
+    actions.attachmentFileInputEl = attachmentFileInputEl;
     actions.mergeFilesInputEl = mergeFilesInputEl;
+    actions.quickConvertFileInputEl = quickConvertFileInputEl;
 
     actions.setTool('select');
     actions.setPluginManager(pluginManager);
@@ -143,19 +161,28 @@
 
     // note: register webmcp tools immediately so agents discover them without delay
     void webMcpManager.initialize();
+    void pwaStore.checkForUpdates();
 
-    actions.initializeEngine().then(async () => {
-      const currentUrlStr = typeof window !== 'undefined' ? window.location.href : '';
-      const req = parseDocumentLoadRequest(currentUrlStr);
-      if (req) {
+    const currentUrlStr = typeof window !== 'undefined' ? window.location.href : '';
+    const req = parseDocumentLoadRequest(currentUrlStr);
+    if (req) {
+      void actions.initializeEngine().then(async () => {
         if (req.kind === 'preset') {
           await actions.loadDemoDocument(req.presetId);
         } else if (req.kind === 'url') {
           await actions.loadDocumentFromUrl(req.url);
         }
         webMcpManager.rebuildSdg();
-      }
-    });
+      });
+    } else {
+      // note: defer background wasm engine initialisation to idle time so initial paint and critical assets are not blocked
+      const scheduleIdle = typeof window !== 'undefined' && 'requestIdleCallback' in window
+        ? (cb: () => void) => (window as Window).requestIdleCallback(cb, { timeout: 1500 })
+        : (cb: () => void) => setTimeout(cb, 1200);
+      scheduleIdle(() => {
+        void actions.initializeEngine();
+      });
+    }
 
     return () => {
       cleanupShortcuts();
@@ -163,6 +190,7 @@
       unsubLoaded();
       unsubClosed();
       webMcpManager.dispose();
+      pwaStore.dispose();
     };
   });
 
@@ -182,18 +210,97 @@
     target.value = '';
   }
 
-  function handleImageImportSelected(e: Event): void {
+  function handleMediaImportSelected(e: Event): void {
     const target = e.target as HTMLInputElement;
     if (target.files && target.files.length > 0) {
       const files = Array.from(target.files);
       for (const file of files) {
+        const info = inspectFileInfo(file);
         const objectUrl = URL.createObjectURL(file);
-        const centerX = 300;
-        const centerY = 400;
-        canvasActions.createElement('image', store.currentPageIndex, centerX, centerY, { src: objectUrl });
+
+        let defaultWidth = 200;
+        let defaultHeight = 150;
+        if (info.category === 'video') {
+          defaultWidth = 280;
+          defaultHeight = 180;
+        } else if (info.category === 'audio') {
+          defaultWidth = 240;
+          defaultHeight = 60;
+        } else if (info.category === '3d') {
+          defaultWidth = 220;
+          defaultHeight = 180;
+        } else if (info.category === 'attachment') {
+          defaultWidth = 180;
+          defaultHeight = 48;
+        }
+
+        let centerX = 300;
+        let centerY = 400;
+        try {
+          const dims = actions.service.document?.getPage(store.currentPageIndex)?.getDimensions();
+          if (dims) {
+            centerX = Math.max(0, (dims.widthPts - defaultWidth) / 2);
+            centerY = Math.max(0, (dims.heightPts - defaultHeight) / 2);
+          }
+        } catch {
+          // Fallback coordinates
+        }
+
+        if (info.category === 'image') {
+          canvasActions.createElement('image', store.currentPageIndex, centerX, centerY, {
+            src: objectUrl,
+            width: defaultWidth,
+            height: defaultHeight,
+          });
+        } else if (info.category === 'video') {
+          canvasActions.createElement('video', store.currentPageIndex, centerX, centerY, {
+            src: objectUrl,
+            fileName: info.fileName,
+            fileSize: info.fileSize,
+            mimeType: info.mimeType,
+            title: info.title,
+            width: defaultWidth,
+            height: defaultHeight,
+          });
+        } else if (info.category === 'audio') {
+          canvasActions.createElement('audio', store.currentPageIndex, centerX, centerY, {
+            src: objectUrl,
+            fileName: info.fileName,
+            fileSize: info.fileSize,
+            mimeType: info.mimeType,
+            title: info.title,
+            width: defaultWidth,
+            height: defaultHeight,
+          });
+        } else if (info.category === '3d') {
+          canvasActions.createElement('3d', store.currentPageIndex, centerX, centerY, {
+            src: objectUrl,
+            fileName: info.fileName,
+            fileSize: info.fileSize,
+            mimeType: info.mimeType,
+            modelFormat: info.modelFormat || 'u3d',
+            title: info.title,
+            width: defaultWidth,
+            height: defaultHeight,
+          });
+        } else {
+          canvasActions.createElement('attachment', store.currentPageIndex, centerX, centerY, {
+            src: objectUrl,
+            fileName: info.fileName,
+            fileSize: info.fileSize,
+            mimeType: info.mimeType,
+            description: info.description,
+            width: defaultWidth,
+            height: defaultHeight,
+          });
+        }
       }
     }
     target.value = '';
+  }
+
+  function handleImageImportSelected(e: Event): void {
+    handleMediaImportSelected(e);
   }
 
   function handleImageAsPageImportSelected(e: Event): void {
@@ -209,6 +316,14 @@
     const target = e.target as HTMLInputElement;
     if (target.files && target.files.length > 0) {
       void actions.mergeAndLoadFiles(Array.from(target.files));
+    }
+    target.value = '';
+  }
+
+  function handleQuickConvertFilesSelected(e: Event): void {
+    const target = e.target as HTMLInputElement;
+    if (target.files && target.files.length > 0) {
+      void actions.quickConvertFiles(Array.from(target.files));
     }
     target.value = '';
   }
@@ -236,8 +351,44 @@
   bind:this={imageFileInputEl}
   type="file"
   multiple
-  accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.svg"
+  accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.svg,.ico,.tiff"
   onchange={handleImageImportSelected}
+  class="hidden"
+/>
+
+<input
+  bind:this={videoFileInputEl}
+  type="file"
+  multiple
+  accept="video/*,.mp4,.webm,.mov,.mkv,.avi,.m4v"
+  onchange={handleMediaImportSelected}
+  class="hidden"
+/>
+
+<input
+  bind:this={audioFileInputEl}
+  type="file"
+  multiple
+  accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,.wma"
+  onchange={handleMediaImportSelected}
+  class="hidden"
+/>
+
+<input
+  bind:this={threeDFileInputEl}
+  type="file"
+  multiple
+  accept=".u3d,.prc,.obj,.stl,.gltf,.glb,.3ds,.dae,model/*"
+  onchange={handleMediaImportSelected}
+  class="hidden"
+/>
+
+<input
+  bind:this={attachmentFileInputEl}
+  type="file"
+  multiple
+  accept="*/*"
+  onchange={handleMediaImportSelected}
   class="hidden"
 />
 
@@ -256,6 +407,15 @@
   multiple
   accept=".pdf,application/pdf,image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.svg,.docx,.xlsx,.xls,.csv,.tsv,.pptx,.ppt,.txt,.md,.markdown,.json,.xml,.html,.rtf,.yaml,.yml,.log"
   onchange={handleMergeFilesSelected}
+  class="hidden"
+/>
+
+<input
+  bind:this={quickConvertFileInputEl}
+  type="file"
+  multiple
+  accept=".pdf,application/pdf,image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.svg,.docx,.xlsx,.xls,.csv,.tsv,.pptx,.ppt,.txt,.md,.markdown,.json,.xml,.html,.rtf,.yaml,.yml,.log"
+  onchange={handleQuickConvertFilesSelected}
   class="hidden"
 />
 
@@ -279,18 +439,18 @@
   </EditorShell>
 </TooltipProvider>
 
-{#if featureFlags.isEnabled('split') && store.splitDialogMode !== null}
+{#if (featureFlags.isEnabled('split') || featureFlags.isEnabled('extraction.pages')) && store.splitDialogMode !== null}
   <SplitPagesDialog mode={store.splitDialogMode} onClose={() => (store.splitDialogMode = null)} />
 {/if}
 
-{#if featureFlags.isEnabled('export-images') && store.showExportImagesDialog}
+{#if (featureFlags.isEnabled('export-images') || featureFlags.isEnabled('export.images') || featureFlags.isEnabled('extraction.images') || featureFlags.isEnabled('page-actions.extract-images')) && store.showExportImagesDialog}
   <ExportImagesDialog onClose={() => (store.showExportImagesDialog = false)} />
 {/if}
 
-{#if featureFlags.isEnabled('sanitization')}
+{#if featureFlags.isEnabled('sanitization') || featureFlags.isEnabled('redaction.sanitize') || featureFlags.isEnabled('page-actions.sanitize')}
   <SanitizeDocumentDialog />
 {/if}
-{#if featureFlags.isEnabled('compression')}
+{#if featureFlags.isEnabled('compression') || featureFlags.isEnabled('page-actions.compress')}
   <CompressDocumentDialog />
 {/if}
 {#if featureFlags.isEnabled('ocr')}
@@ -310,6 +470,12 @@
 {/if}
 
 <ToolMockupDialog />
+{#if featureFlags.isEnabled('components.gallery')}
+  <ComponentGalleryDialog />
+{/if}
+{#if featureFlags.isEnabled('components.media.barcode')}
+  <QrBarcodeModal />
+{/if}
 {#if featureFlags.isEnabled('signatures.esign')}
   <EsignDialog />
 {/if}
@@ -322,7 +488,7 @@
 {#if featureFlags.isEnabled('webmcp')}
   <WebMcpConfirmDialog />
 {/if}
-{#if featureFlags.isEnabled('workspace.compliance')}
+{#if featureFlags.isEnabled('workspace.compliance') && featureFlags.isEnabled('compliance')}
   <OpenUrlDialog />
 {/if}
 {#if featureFlags.isEnabled('conversion')}
@@ -331,9 +497,9 @@
 {#if featureFlags.isEnabled('page-actions.scale')}
   <PageScaleDialog />
 {/if}
-{#if featureFlags.isEnabled('security.password')}
-  <PasswordPromptDialog />
-{/if}
+<PasswordPromptDialog />
 {#if featureFlags.isEnabled('security.permissions')}
   <PermissionsDialog />
 {/if}
+
+<PwaNotification />
