@@ -2,26 +2,220 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Kea PDF</title>
-    <meta name="description" content="Kea PDF is a fast, privacy-focused, browser-native PDF editor built with Svelte 5 and PDFium WebAssembly." />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+
+    <!-- note: primary search engine optimisation tags -->
+    <title>Kea PDF - Free, Private Browser-Native PDF Editor</title>
+    <meta name="title" content="Kea PDF - Free, Private Browser-Native PDF Editor" />
+    <meta name="description" content="Edit text, fill forms, sign, annotate, and convert PDFs 100% locally in your browser. Zero server uploads, privacy-focused WebAssembly engine." />
+    <meta name="keywords" content="pdf editor, edit pdf online, free pdf editor, private pdf editor, browser pdf editor, fill pdf form, sign pdf online, edit pdf text, pdfium, webassembly pdf, local pdf editor, client-side pdf, pades pdf signature, ocr pdf online" />
+    <meta name="author" content="Kea PDF" />
+    <meta name="application-name" content="Kea PDF" />
+
+    <!-- note: search engine crawler and discovery directives -->
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1" />
+    <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1" />
+
+    <!-- note: canonical and language alternate tags -->
+    <link rel="canonical" href="https://keapdf.amorb.dev/" />
+    <link rel="alternate" hreflang="x-default" href="https://keapdf.amorb.dev/" />
+    <link rel="alternate" hreflang="en" href="https://keapdf.amorb.dev/" />
+
+    <!-- note: open graph social metadata -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://keapdf.amorb.dev/" />
+    <meta property="og:site_name" content="Kea PDF" />
+    <meta property="og:title" content="Kea PDF - Free, Private Browser-Native PDF Editor" />
+    <meta property="og:description" content="Edit text, fill forms, sign, annotate, and convert PDFs directly in your browser. 100% private client-side WebAssembly processing with zero server uploads." />
+    <meta property="og:image" content="https://keapdf.amorb.dev/cover.jpg" />
+    <meta property="og:image:secure_url" content="https://keapdf.amorb.dev/cover.jpg" />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Kea PDF interface preview displaying in-browser PDF editing and annotation tools" />
+    <meta property="og:locale" content="en_US" />
+
+    <!-- note: twitter and x social card metadata -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content="https://keapdf.amorb.dev/" />
+    <meta name="twitter:title" content="Kea PDF - Free, Private Browser-Native PDF Editor" />
+    <meta name="twitter:description" content="Edit text, fill forms, sign, annotate, and convert PDFs directly in your browser. 100% private client-side WebAssembly processing with zero server uploads." />
+    <meta name="twitter:image" content="https://keapdf.amorb.dev/cover.jpg" />
+    <meta name="twitter:image:alt" content="Kea PDF browser-native PDF editor" />
+
+    <!-- note: mobile web application icons and styling -->
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon-180x180.png" />
-    <meta name="theme-color" content="#ffffff" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon-180x180.png" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#090a0f" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Kea PDF" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <!-- note: typography and variable font preloads -->
     <link rel="preload" href="/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/fonts/inter.css" />
+
+    <!-- note: structured data graph schema -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "WebSite",
+          "@id": "https://keapdf.amorb.dev/#website",
+          "url": "https://keapdf.amorb.dev/",
+          "name": "Kea PDF",
+          "description": "Fast, privacy-focused, browser-native PDF editor built with Svelte 5 and PDFium WebAssembly.",
+          "publisher": {
+            "@id": "https://keapdf.amorb.dev/#organization"
+          },
+          "inLanguage": "en-US"
+        },
+        {
+          "@type": "Organization",
+          "@id": "https://keapdf.amorb.dev/#organization",
+          "name": "Kea PDF",
+          "url": "https://keapdf.amorb.dev/",
+          "logo": {
+            "@type": "ImageObject",
+            "url": "https://keapdf.amorb.dev/pwa-512x512.png",
+            "width": 512,
+            "height": 512
+          },
+          "sameAs": [
+            "https://github.com/amor-budiyanto/pdf-editor"
+          ]
+        },
+        {
+          "@type": ["WebApplication", "SoftwareApplication"],
+          "@id": "https://keapdf.amorb.dev/#app",
+          "name": "Kea PDF",
+          "alternateName": "Kea Browser PDF Editor",
+          "url": "https://keapdf.amorb.dev/",
+          "applicationCategory": "ProductivityApplication",
+          "applicationSubCategory": "PDF Editor and Form Filler",
+          "operatingSystem": "All (Web Browser, Chrome, Firefox, Safari, Edge)",
+          "browserRequirements": "Requires modern web browser with WebAssembly and HTML5 Canvas support",
+          "softwareVersion": "1.0.0",
+          "isAccessibleForFree": true,
+          "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD",
+            "availability": "https://schema.org/OnlineOnly"
+          },
+          "description": "Full-featured client-side PDF editor and form filler. Edit existing PDF text, add freehand ink, highlight, insert interactive form fields, sign documents cryptographically, and perform OCR entirely within your browser.",
+          "image": "https://keapdf.amorb.dev/cover.jpg",
+          "screenshot": "https://keapdf.amorb.dev/cover.jpg",
+          "featureList": [
+            "In-place text editing with automatic font metric detection and typography reflow",
+            "Zero server uploads with 100% private client-side processing via PDFium WebAssembly",
+            "Interactive AcroForm filling, creation, and field export",
+            "Cryptographic digital signatures compliant with PAdES standards",
+            "Annotation suite with highlighters, vector pen ink, shapes, and sticky notes",
+            "Client-side OCR for scanned documents using Tesseract WebAssembly",
+            "Document conversion from Word, Excel, PowerPoint, and Markdown to PDF",
+            "Page organization including reorder, rotate, split, merge, and crop pages",
+            "Password protection, owner permissions management, and form field security",
+            "Complete offline capability as an installable Progressive Web App"
+          ]
+        },
+        {
+          "@type": "FAQPage",
+          "@id": "https://keapdf.amorb.dev/#faq",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "Are my PDF files uploaded to a remote server when using Kea PDF?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. Kea PDF operates 100% locally on your machine using WebAssembly and client-side web technologies. Your files, edits, form inputs, and signatures never leave your browser."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Can I edit existing text in a PDF document?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. Kea PDF allows you to select, edit, and replace existing text spans directly on the PDF page while preserving fonts, weights, and layout reflow."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Can I use Kea PDF offline?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. Kea PDF is an installable Progressive Web App with complete service worker precaching of its WebAssembly engine and core assets. You can open and edit PDFs without an internet connection."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Is Kea PDF free to use?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. Kea PDF is free and open-source software under the AGPL-3.0 license. There are no subscriptions, paywalls, page limits, or watermarks."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does Kea PDF support digital signatures and form filling?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. Kea PDF supports interactive AcroForm form filling as well as cryptographic digital signing compliant with ISO 32000-1 and ETSI PAdES standards."
+              }
+            }
+          ]
+        },
+        {
+          "@type": "HowTo",
+          "@id": "https://keapdf.amorb.dev/#howto",
+          "name": "How to Edit a PDF Document Privately in Your Browser",
+          "description": "Instructions for editing, annotating, and saving a PDF file locally without server uploads.",
+          "totalTime": "PT2M",
+          "step": [
+            {
+              "@type": "HowToStep",
+              "name": "Open Kea PDF",
+              "text": "Navigate to https://keapdf.amorb.dev in any modern web browser.",
+              "position": 1
+            },
+            {
+              "@type": "HowToStep",
+              "name": "Load Your PDF File",
+              "text": "Click Open File(s) or drag and drop your PDF into the application. The file loads directly into browser memory.",
+              "position": 2
+            },
+            {
+              "@type": "HowToStep",
+              "name": "Edit, Annotate, or Fill",
+              "text": "Select existing text to modify wording, use the toolbar to highlight or draw, or click into AcroForm fields to fill in values.",
+              "position": 3
+            },
+            {
+              "@type": "HowToStep",
+              "name": "Save and Export",
+              "text": "Click Export or press Ctrl+S or Cmd+S to download the modified PDF directly to your device.",
+              "position": 4
+            }
+          ]
+        }
+      ]
+    }
+    </script>
+
     <script>
       (function () {
         var theme = 'system';
         try {
           theme = localStorage.getItem('kea_theme') || 'system';
         } catch (e) {
-          // Ignore storage access errors
+          // note: ignore storage access errors
         }
         var isDark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
         if (isDark) {
@@ -35,10 +229,19 @@
           try {
             current = localStorage.getItem('kea_theme') || 'system';
           } catch (err) {
-            // Ignore storage access errors
+            // note: ignore storage access errors
           }
           if (current === 'system') {
+            document.documentElement.classList.add('theme-transition-suppressed');
             document.documentElement.classList.toggle('dark', e.matches);
+            void document.documentElement.offsetHeight;
+            if (typeof window.requestAnimationFrame === 'function') {
+              window.requestAnimationFrame(function () {
+                document.documentElement.classList.remove('theme-transition-suppressed');
+              });
+            } else {
+              document.documentElement.classList.remove('theme-transition-suppressed');
+            }
           }
         });
       })();

@@ -1,14 +1,34 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { defineConfig, searchForWorkspaceRoot } from 'vite';
+import { defineConfig, searchForWorkspaceRoot, type Plugin } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
+
+// note: emit root markdown documents into build assets for direct crawler and llm agent discovery
+function copyDocFilesPlugin(): Plugin {
+  return {
+    name: 'copy-doc-files',
+    generateBundle() {
+      const docFiles = ['README.md', 'TOOLS.md', 'AGENTS.md'];
+      for (const fileName of docFiles) {
+        if (fs.existsSync(fileName)) {
+          this.emitFile({
+            type: 'asset',
+            fileName,
+            source: fs.readFileSync(fileName, 'utf8'),
+          });
+        }
+      }
+    },
+  };
+}
 
 export default defineConfig({
   plugins: [
     svelte(),
     tailwindcss(),
+    copyDocFilesPlugin(),
     VitePWA({
       registerType: 'prompt',
       injectRegister: 'auto',
@@ -18,6 +38,8 @@ export default defineConfig({
         'apple-touch-icon-180x180.png',
         'icons.svg',
         'robots.txt',
+        'sitemap.xml',
+        'cover.jpg',
         'sample.pdf',
         'llms.txt',
         'ai-catalog.json',
