@@ -243,7 +243,7 @@ canvas {
 }
 
 .figma-text-box.selected {
-  border: 1.5px solid var(--selection);
+  border: 1px solid var(--selection);
   background-color: var(--selection-subtle);
   z-index: 10;
 }
