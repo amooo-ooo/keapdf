@@ -1,2 +1,9 @@
 User-agent: *
 Allow: /
+
+# Agentic and AI Discovery
+Allow: /llms.txt
+Allow: /ai-catalog.json
+Allow: /.well-known/ai-catalog.json
+
+Sitemap: https://keapdf.amorb.dev/sitemap.xml
