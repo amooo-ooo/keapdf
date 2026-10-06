@@ -57,10 +57,12 @@
 	bind:this={ref}
 	role="group"
 	data-slot="button-group"
+	data-variant={variant ?? "default"}
 	data-orientation={orientation}
 	data-attached={attached ? "" : undefined}
 	data-shape={shape}
-	class={cn(buttonGroupVariants({ orientation, attached, shape }), className)}
+	data-size={size ?? "default"}
+	class={cn(buttonGroupVariants({ variant, orientation, attached, shape, size }), className)}
 	{...restProps}
 >
 	{@render children?.()}

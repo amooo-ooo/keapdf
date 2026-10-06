@@ -3,19 +3,39 @@ import { type VariantProps, tv } from "tailwind-variants";
 import type { ButtonVariant, ButtonSize } from "$lib/components/ui/button/index.js";
 
 export const buttonGroupVariants = tv({
-	base: "group/button-group inline-flex w-fit items-center",
+	base: "group/button-group inline-flex w-fit items-center bg-background border border-border rounded-2xl p-1",
 	variants: {
 		orientation: {
-			horizontal: "flex-row",
-			vertical: "flex-col items-stretch",
+			horizontal: "flex-row gap-1",
+			vertical: "flex-col items-stretch gap-1 !h-auto",
+		},
+		variant: {
+			default: "",
+			outline: "",
+			secondary: "",
+			ghost: "!bg-transparent !border-transparent !p-0 gap-0.5",
+			panel: "",
+			tile: "",
+			link: "",
 		},
 		attached: {
 			true: "",
-			false: "gap-1",
+			false: "!p-0 !border-transparent !bg-transparent !h-auto gap-1",
 		},
 		shape: {
 			default: "",
-			pill: "!rounded-full [&>[data-slot=button]:first-child]:!rounded-l-full [&>[data-slot=button]:last-child]:!rounded-r-full [&>[data-slot=button]:only-child]:!rounded-full [&>button:first-child]:!rounded-l-full [&>button:last-child]:!rounded-r-full [&>button:only-child]:!rounded-full",
+			pill: "!rounded-full [&>[data-slot=button]]:!rounded-full [&>button]:!rounded-full",
+		},
+		size: {
+			default: "h-8",
+			compact: "h-8",
+			sm: "h-8",
+			xs: "h-6",
+			lg: "h-9",
+			icon: "h-8",
+			"icon-xs": "h-6",
+			"icon-sm": "h-8",
+			"icon-lg": "h-9",
 		},
 	},
 	compoundVariants: [
@@ -23,19 +43,21 @@ export const buttonGroupVariants = tv({
 			orientation: "horizontal",
 			attached: true,
 			class:
-				"rounded-2xl [&>[data-slot=button]]:rounded-none [&>[data-slot=button]:first-child]:rounded-l-2xl [&>[data-slot=button]:last-child]:rounded-r-2xl [&>[data-slot=button]:only-child]:rounded-2xl [&>[data-slot=button]:not(:first-child)]:-ml-px [&>[data-slot=button]]:focus-visible:z-10 [&>[data-slot=button]:hover]:z-10 [&>[data-slot=button][aria-pressed=true]]:z-10 [&>[data-slot=button][data-active=true]]:z-10 [&>button]:rounded-none [&>button:first-child]:rounded-l-2xl [&>button:last-child]:rounded-r-2xl [&>button:only-child]:rounded-2xl [&>button:not(:first-child)]:-ml-px [&>button]:focus-visible:z-10 [&>button:hover]:z-10 [&>button[aria-pressed=true]]:z-10 [&>button[data-active=true]]:z-10 [&>[data-slot=button][aria-pressed=true]]:bg-input/50 [&>[data-slot=button][aria-pressed=true]]:text-foreground [&>[data-slot=button][data-active=true]]:bg-input/50 [&>[data-slot=button][data-active=true]]:text-foreground [&>[data-slot=button]:focus-visible]:bg-input/50 [&>button[aria-pressed=true]]:bg-input/50 [&>button[aria-pressed=true]]:text-foreground [&>button[data-active=true]]:bg-input/50 [&>button[data-active=true]]:text-foreground [&>button:focus-visible]:bg-input/50",
+				"shrink-0 [&>[data-slot=button]]:rounded-xl [&>[data-slot=button]]:border-0 [&>[data-slot=button]]:!h-full [&>[data-slot=button]]:self-stretch [&>[data-slot=button]]:py-0 [&>[data-slot=button]]:focus-visible:z-10 [&>[data-slot=button]:hover]:z-10 [&>[data-slot=button][aria-pressed=true]]:z-10 [&>[data-slot=button][data-active=true]]:z-10 [&>button]:rounded-xl [&>button]:border-0 [&>button]:!h-full [&>button]:self-stretch [&>button]:py-0 [&>button]:focus-visible:z-10 [&>button:hover]:z-10 [&>button[aria-pressed=true]]:z-10 [&>button[data-active=true]]:z-10 [&>[data-slot=button][aria-pressed=true]]:bg-secondary [&>[data-slot=button][aria-pressed=true]]:text-foreground [&>[data-slot=button][data-active=true]]:bg-secondary [&>[data-slot=button][data-active=true]]:text-foreground [&>[data-slot=button]:focus-visible]:bg-secondary [&>button[aria-pressed=true]]:bg-secondary [&>button[aria-pressed=true]]:text-foreground [&>button[data-active=true]]:bg-secondary [&>button[data-active=true]]:text-foreground [&>button:focus-visible]:bg-secondary",
 		},
 		{
 			orientation: "vertical",
 			attached: true,
 			class:
-				"rounded-2xl [&>[data-slot=button]]:rounded-none [&>[data-slot=button]:first-child]:rounded-t-2xl [&>[data-slot=button]:last-child]:rounded-b-2xl [&>[data-slot=button]:only-child]:rounded-2xl [&>[data-slot=button]:not(:first-child)]:-mt-px [&>[data-slot=button]]:focus-visible:z-10 [&>[data-slot=button]:hover]:z-10 [&>[data-slot=button][aria-pressed=true]]:z-10 [&>[data-slot=button][data-active=true]]:z-10 [&>button]:rounded-none [&>button:first-child]:rounded-t-2xl [&>button:last-child]:rounded-b-2xl [&>button:only-child]:rounded-2xl [&>button:not(:first-child)]:-mt-px [&>button]:focus-visible:z-10 [&>button:hover]:z-10 [&>button[aria-pressed=true]]:z-10 [&>button[data-active=true]]:z-10 [&>[data-slot=button][aria-pressed=true]]:bg-input/50 [&>[data-slot=button][aria-pressed=true]]:text-foreground [&>[data-slot=button][data-active=true]]:bg-input/50 [&>[data-slot=button][data-active=true]]:text-foreground [&>[data-slot=button]:focus-visible]:bg-input/50 [&>button[aria-pressed=true]]:bg-input/50 [&>button[aria-pressed=true]]:text-foreground [&>button[data-active=true]]:bg-input/50 [&>button[data-active=true]]:text-foreground [&>button:focus-visible]:bg-input/50",
+				"[&>[data-slot=button]]:rounded-xl [&>[data-slot=button]]:border-0 [&>[data-slot=button]]:!w-full [&>[data-slot=button]]:px-0 [&>[data-slot=button]]:focus-visible:z-10 [&>[data-slot=button]:hover]:z-10 [&>[data-slot=button][aria-pressed=true]]:z-10 [&>[data-slot=button][data-active=true]]:z-10 [&>button]:rounded-xl [&>button]:border-0 [&>button]:!w-full [&>button]:px-0 [&>button]:focus-visible:z-10 [&>button:hover]:z-10 [&>button[aria-pressed=true]]:z-10 [&>button[data-active=true]]:z-10 [&>[data-slot=button][aria-pressed=true]]:bg-secondary [&>[data-slot=button][aria-pressed=true]]:text-foreground [&>[data-slot=button][data-active=true]]:bg-secondary [&>[data-slot=button][data-active=true]]:text-foreground [&>[data-slot=button]:focus-visible]:bg-secondary [&>button[aria-pressed=true]]:bg-secondary [&>button[aria-pressed=true]]:text-foreground [&>button[data-active=true]]:bg-secondary [&>button[data-active=true]]:text-foreground [&>button:focus-visible]:bg-secondary",
 		},
 	],
 	defaultVariants: {
+		variant: "default",
 		orientation: "horizontal",
 		attached: true,
 		shape: "default",
+		size: "default",
 	},
 });
 
