@@ -34,12 +34,14 @@
 		cursor: pointer;
 	}
 
-	.figma-text-box:hover {
-		border: 1px solid var(--selection);
+	@media (hover: hover) {
+		.figma-text-box:hover {
+			border: 1px solid var(--selection);
+		}
 	}
 
 	.figma-text-box.selected {
-		border: 1.5px solid var(--selection);
+		border: 1px solid var(--selection);
 		z-index: 10;
 	}
 
@@ -81,6 +83,7 @@
 		background: transparent;
 		color: var(--color-foreground, #000000);
 		padding: 0;
+		font-family: inherit;
 		outline: none;
 		box-shadow: none;
 		border-radius: 0;
@@ -131,14 +134,16 @@
 		box-sizing: border-box;
 	}
 
-	.canvas-resize-handle:hover {
-		background: color-mix(in srgb, var(--selection) 15%, #ffffff);
+	@media (hover: hover) {
+		.canvas-resize-handle:hover {
+			background: color-mix(in srgb, var(--selection) 15%, #ffffff);
+		}
 	}
 
 	.canvas-drop-indicator {
 		position: absolute;
 		inset: 0;
-		border: 2px dashed var(--selection);
+		border: 1px dashed var(--selection);
 		background: var(--selection-subtle);
 		pointer-events: none;
 		z-index: 15;
@@ -185,6 +190,7 @@
 		background: var(--color-card, #ffffff);
 		padding: 2px 6px;
 		font-size: 11px;
+		font-family: var(--font-sans);
 		color: var(--muted-foreground);
 		overflow: hidden;
 	}

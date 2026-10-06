@@ -1,4 +1,4 @@
-/* Action buttons, draggable items, destructive modifiers, and button stacks */
+/* Action buttons, draggable items, and button stacks */
 
 @layer components {
 	.panel-action-stack {
@@ -10,15 +10,11 @@
 	}
 
 	.btn-action {
-		@apply w-full !justify-start px-2 h-8 !text-xs;
+		@apply w-full !justify-start px-2 h-8 !text-xs font-sans;
 	}
 
 	.btn-panel {
-		@apply w-full !justify-start px-2 h-8 !text-xs font-normal border-border bg-background hover:bg-muted hover:text-foreground dark:hover:bg-input/30 dark:bg-transparent;
-	}
-
-	.btn-panel-destructive {
-		@apply w-full !justify-start px-2 h-8 !text-xs font-normal border-border bg-background hover:bg-destructive/10 text-destructive hover:text-destructive dark:bg-transparent;
+		@apply w-full !justify-start px-2 h-8 !text-xs font-normal font-sans border border-border bg-card hover:bg-muted hover:text-foreground text-foreground;
 	}
 
 	.panel-icon-sm {
@@ -26,11 +22,20 @@
 	}
 
 	.panel-action-link {
-		@apply text-[10px] text-muted-foreground hover:text-foreground hover:underline cursor-pointer;
+		@apply text-[10px] text-muted-foreground cursor-pointer;
 	}
 
 	.panel-action-link-primary {
-		@apply text-[10px] text-primary hover:underline cursor-pointer;
+		@apply text-[10px] text-foreground font-medium cursor-pointer;
+	}
+
+	@media (hover: hover) {
+		.panel-action-link:hover {
+			@apply text-foreground underline;
+		}
+		.panel-action-link-primary:hover {
+			@apply underline;
+		}
 	}
 
 	.sidebar-drag-source {

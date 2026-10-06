@@ -10,11 +10,11 @@
 	}
 
 	.field-label {
-		@apply !text-[11px] text-muted-foreground font-medium select-none;
+		@apply !text-[11px] text-muted-foreground font-medium font-sans whitespace-nowrap select-none;
 	}
 
 	.field-input {
-		@apply h-8 !text-xs;
+		@apply h-8 !text-xs font-sans;
 	}
 
 	.field-grid-2 {
@@ -34,6 +34,12 @@
 	}
 
 	.panel-slider-value {
-		@apply text-[10px] text-muted-foreground font-sans tabular-nums;
+		@apply text-[10px] text-muted-foreground font-sans;
+	}
+
+	@container (max-width: 130px) {
+		.color-picker-opacity {
+			display: none !important;
+		}
 	}
 }

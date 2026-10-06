@@ -3,31 +3,31 @@
 @layer components {
 	/* Panel structural containers */
 	.panel-container {
-		@apply h-full w-full bg-card rounded-xl flex flex-col overflow-hidden shadow-sm relative;
+		@apply h-full w-full bg-card flex flex-col overflow-hidden relative;
 	}
 
 	.panel-header {
-		@apply px-2.5 flex flex-col gap-2 shrink-0 bg-card pb-1.5;
+		@apply px-3 py-1.5 h-10 min-h-10 max-h-10 box-border flex flex-col justify-center shrink-0 bg-card border-b border-border;
 	}
 
 	.panel-header-compact {
-		@apply px-[0.4rem] pt-2 pb-0 flex flex-col gap-2 shrink-0 bg-card w-full pb-1.5;
+		@apply px-1.5 py-1.5 h-10 min-h-10 max-h-10 box-border flex flex-col justify-center shrink-0 bg-card w-full border-b border-border;
 	}
 
 	.panel-title {
-		@apply text-xs font-medium text-foreground mb-0.5;
+		@apply text-xs font-medium text-foreground leading-tight text-balance;
 	}
 
 	.panel-subtitle {
-		@apply text-[11px] text-muted-foreground truncate;
+		@apply text-[11px] text-muted-foreground truncate leading-tight;
 	}
 
 	.panel-content {
-		@apply flex-1 overflow-y-auto min-h-0 flex flex-col pb-1;
+		@apply flex-1 overflow-y-auto min-h-0 flex flex-col pb-2;
 	}
 
 	.panel-root {
-		@apply flex flex-col min-h-0 overflow-auto;
+		@apply flex flex-col min-h-0;
 	}
 
 	.panel-inspector-root {
@@ -35,20 +35,65 @@
 	}
 
 	.panel-description {
-		@apply text-xs text-muted-foreground mb-2;
+		@apply text-xs text-muted-foreground text-pretty break-words;
+	}
+
+	/* Two-colour bordered property inspector primitives */
+	.property-section {
+		@apply flex flex-col w-full border-b border-border bg-card px-3.5 py-3 shrink-0;
+	}
+
+	.property-section-header {
+		@apply text-xs font-semibold text-foreground tracking-tight flex items-center justify-between select-none text-balance;
+	}
+
+	.property-section-content {
+		@apply flex flex-col gap-3 w-full;
+	}
+
+	.property-row {
+		@apply flex items-center justify-between gap-2 w-full min-h-8 text-xs select-none;
+	}
+
+	.property-row-label {
+		@apply text-xs text-muted-foreground font-normal shrink-0 w-24 truncate whitespace-nowrap select-none;
+	}
+
+	.property-row-control {
+		@apply flex-1 flex items-center justify-end min-w-0;
+	}
+
+	.property-card {
+		@apply flex items-center justify-between w-full h-8 px-2.5 rounded-md border border-border bg-card transition-colors select-none;
+	}
+
+	.property-card-interactive {
+		@apply flex items-center justify-between w-full h-8 px-2.5 rounded-md border border-border bg-card transition-colors cursor-pointer select-none;
+	}
+
+	.property-button-full {
+		@apply w-full h-8 px-3 rounded-md border border-border bg-card text-foreground text-xs font-medium flex items-center justify-center gap-2 transition-colors cursor-pointer select-none;
+	}
+
+	@media (hover: hover) {
+		.property-card:hover,
+		.property-card-interactive:hover,
+		.property-button-full:hover {
+			@apply bg-muted/40;
+		}
 	}
 
 	/* Inset sub cards and status banners */
 	.panel-card-inset {
-		@apply flex flex-col gap-2 rounded-lg border p-2.5 bg-muted/20;
+		@apply flex flex-col gap-2 rounded-md border border-border p-2.5 bg-card;
 	}
 
 	.panel-metric-banner {
-		@apply rounded-xl text-xs flex flex-col gap-1.5 /* bg-muted/40 p-2.5 */;
+		@apply text-xs flex flex-col gap-1.5 bg-card;
 	}
 
 	.panel-status-pill {
-		@apply rounded-md bg-primary/10 px-2.5 py-1.5 text-[11px] text-primary flex items-center gap-1.5 font-medium;
+		@apply rounded-md bg-secondary px-2.5 py-1.5 text-[11px] text-foreground flex items-center gap-1.5 font-medium border border-border;
 	}
 
 	.panel-error-pill {
@@ -61,10 +106,39 @@
 	}
 
 	.panel-key-label {
-		@apply text-muted-foreground truncate;
+		@apply text-muted-foreground truncate self-start text-left;
+	}
+
+	.panel-key-label:has(+ .panel-value-text:not(.flex-wrap) > [data-slot="badge"]) {
+		@apply self-center;
 	}
 
 	.panel-value-text {
-		@apply text-foreground truncate font-medium tabular-nums;
+		@apply text-foreground truncate font-medium;
+	}
+
+	/* Figma UI3 modal dialog layout primitives */
+	.dialog-body {
+		@apply p-4 flex flex-col gap-3 overflow-y-auto flex-1 min-h-0 text-xs;
+	}
+
+	.dialog-section {
+		@apply flex flex-col gap-2 w-full;
+	}
+
+	.dialog-section-header {
+		@apply text-[11px] font-semibold text-foreground tracking-tight flex items-center justify-between select-none text-balance;
+	}
+
+	.dialog-card {
+		@apply rounded-[var(--radius-card)] border border-border bg-card p-3 flex flex-col gap-2.5 text-xs;
+	}
+
+	.dialog-callout {
+		@apply rounded-[var(--radius-card-inner)] border border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground flex items-start gap-2 leading-relaxed;
+	}
+
+	.dialog-error {
+		@apply rounded-[var(--radius-card-inner)] border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive flex items-start gap-2 font-medium;
 	}
 }
