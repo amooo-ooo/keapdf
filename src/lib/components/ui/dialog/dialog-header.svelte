@@ -13,7 +13,7 @@
 <div
 	bind:this={ref}
 	data-slot="dialog-header"
-	class={cn("gap-1.5 flex flex-col", className)}
+	class={cn("px-4 py-3 pr-12 border-b border-border bg-card gap-1 flex flex-col shrink-0", className)}
 	{...restProps}
 >
 	{@render children?.()}

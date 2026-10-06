@@ -18,14 +18,14 @@
 <div
 	bind:this={ref}
 	data-slot="dialog-footer"
-	class={cn("flex flex-col-reverse gap-2 sm:flex-row sm:justify-end", className)}
+	class={cn("px-4 py-2.5 border-t border-border bg-card flex flex-row items-center justify-end gap-2 shrink-0", className)}
 	{...restProps}
 >
 	{@render children?.()}
 	{#if showCloseButton}
 		<DialogPrimitive.Close>
 			{#snippet child({ props })}
-				<Button variant="outline" {...props}>Close</Button>
+				<Button variant="outline" size="sm" class="h-8 text-xs" {...props}>Close</Button>
 			{/snippet}
 		</DialogPrimitive.Close>
 	{/if}
