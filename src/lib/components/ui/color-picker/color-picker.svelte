@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Pipette, X } from "lucide-svelte";
+	import { Pipette, X, Plus } from "lucide-svelte";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import * as Popover from "$lib/components/ui/popover/index.js";
 	import { cn } from "$lib/utils.js";
@@ -23,6 +23,8 @@
 		label?: string;
 		disabled?: boolean;
 		variant?: "default" | "circle" | "pill";
+		bordered?: boolean;
+		showPlus?: boolean;
 		class?: string;
 		onValueChange?: (color: string) => void;
 		onInteractingChange?: (isInteracting: boolean) => void;
@@ -36,10 +38,22 @@
 		label = "Color",
 		disabled = false,
 		variant = "default",
+		bordered = false,
+		showPlus = false,
 		class: className,
 		onValueChange,
 		onInteractingChange,
 	}: Props = $props();
+
+	const isBorderful = $derived(
+		bordered ||
+			(Boolean(className?.includes("border")) &&
+				!className?.includes("border-0") &&
+				!className?.includes("border-transparent"))
+	);
+	const surfaceClasses = $derived(
+		isBorderful ? "bg-background border border-border" : "bg-input border-0"
+	);
 
 	let isOpen = $state(false);
 
@@ -220,7 +234,7 @@
 				}
 			}
 		} catch {
-			// User canceled or EyeDropper rejected
+			// User cancelled or EyeDropper rejected
 		} finally {
 			onInteractingChange?.(false);
 		}
@@ -297,15 +311,19 @@
 			aria-label={label}
 			title={label}
 			class={cn(
-				"size-7 rounded-full p-0.5 border border-transparent shadow-2xs hover:scale-105 active:scale-95 transition-[color,box-shadow,transform] duration-150 ease-out outline-none focus-visible:border-ring focus-visible:ring-ring/30 focus-visible:ring-3 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer overflow-hidden relative bg-input/50 shrink-0",
+				"size-7 rounded-full p-0.5 border border-transparent hover:scale-105 active:scale-95 transition-[color,box-shadow,transform] duration-150 ease-out outline-none focus-visible:border-ring focus-visible:ring-ring/30 focus-visible:ring-3 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer overflow-hidden relative bg-input/50 shrink-0",
 				className
 			)}
 		>
-			<div class="size-full rounded-full overflow-hidden relative border border-border/40">
-				{#if isNone}
+			<div class="size-full rounded-full overflow-hidden relative">
+				{#if showPlus}
+					<div class="size-full rounded-full flex items-center justify-center bg-muted text-muted-foreground hover:text-foreground">
+						<Plus class="size-2.5" strokeWidth={2.5} />
+					</div>
+				{:else if isNone}
 					<div class="size-full bg-transparency-grid relative">
 						<div class="absolute inset-0 flex items-center justify-center">
-							<div class="w-full h-[1.5px] bg-red-500/80 -rotate-45"></div>
+							<div class="w-full h-[1.5px] bg-destructive/80 -rotate-45"></div>
 						</div>
 					</div>
 				{:else}
@@ -323,24 +341,22 @@
 			aria-label={label}
 			title={label}
 			class={cn(
-				"w-full bg-input/50 focus-visible:border-ring focus-visible:ring-ring/30 focus-visible:ring-3 border border-transparent transition-[color,box-shadow] duration-200 outline-none disabled:cursor-not-allowed disabled:opacity-50 text-left cursor-pointer hover:bg-input/70",
+				"w-full @container/color-trigger focus-visible:border-ring focus-visible:ring-ring/30 focus-visible:ring-3 transition-[color,box-shadow] duration-200 outline-none disabled:cursor-not-allowed disabled:opacity-50 text-left cursor-pointer hover:bg-input/80",
+				surfaceClasses,
 				variant === "pill"
 					? "h-8 px-2.5 flex items-center justify-between gap-2 rounded-full"
-					: "h-8 px-2 flex items-center justify-between gap-2 rounded-xl",
+					: "h-8 px-2 flex items-center justify-between gap-2 rounded-2xl",
 				className
 			)}
 		>
 			<div class="flex items-center gap-2 min-w-0">
 				<div
-					class={cn(
-						"size-4.5 border border-border/80 shadow-2xs relative shrink-0 overflow-hidden bg-card",
-						variant === "pill" ? "rounded-full" : "rounded-md"
-					)}
+					class="size-5 relative shrink-0 overflow-hidden bg-card rounded-full"
 				>
 					{#if isNone}
 						<div class="size-full bg-transparency-grid relative">
 							<div class="absolute inset-0 flex items-center justify-center">
-								<div class="w-full h-[1.5px] bg-red-500/80 -rotate-45"></div>
+								<div class="w-full h-[1.5px] bg-destructive/80 -rotate-45"></div>
 							</div>
 						</div>
 					{:else}
@@ -349,12 +365,12 @@
 						</div>
 					{/if}
 				</div>
-				<span class="text-xs font-sans font-medium text-foreground truncate uppercase">
+				<span class="text-xs font-sans font-medium text-foreground truncate uppercase" title={isNone ? "None" : hexDisplay}>
 					{isNone ? "None" : hexDisplay}
 				</span>
 			</div>
 			{#if !isNone}
-				<span class="text-[10px] text-muted-foreground font-sans tabular-nums shrink-0">
+				<span class="text-xs text-muted-foreground font-sans shrink-0 color-picker-opacity @max-[130px]/color-trigger:hidden">
 					{Math.round(currentA * 100)}%
 				</span>
 			{/if}
@@ -364,13 +380,14 @@
 	<Popover.Content
 		align="start"
 		sideOffset={6}
-		class="w-[250px] p-3 flex flex-col gap-3 rounded-2xl border border-border bg-card shadow-2xl z-50 select-none"
+		class="w-[250px] p-3 flex flex-col gap-3 rounded-xl border border-border bg-card z-50 select-none"
 	>
 		<!-- Header -->
 		<div class="flex items-center justify-between pb-0.5">
 			<span class="text-xs font-medium text-foreground">{label}</span>
 			<Popover.Close
-				class="rounded-md p-1 hover:bg-muted text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+				aria-label="Close colour picker"
+				class="size-6 flex items-center justify-center rounded-md p-1 hover:bg-muted text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
 			>
 				<X class="size-3.5" />
 			</Popover.Close>
@@ -378,7 +395,7 @@
 
 		<!-- 2D Saturation / Value Canvas -->
 		<div
-			class="relative w-full h-[140px] rounded-xl overflow-hidden cursor-crosshair touch-none select-none border border-border/60"
+			class="relative w-full h-[140px] rounded-md overflow-hidden cursor-crosshair touch-none select-none border border-border/60"
 			style="background-color: hsl({currentH}, 100%, 50%);"
 			onpointerdown={handle2DPointerDown}
 			role="presentation"
@@ -398,7 +415,7 @@
 
 			<!-- Draggable Circular Thumb -->
 			<div
-				class="absolute size-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-md pointer-events-none"
+				class="absolute size-4 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white pointer-events-none"
 				style="left: {currentS * 100}%; top: {(1 - currentV) * 100}%; background-color: {currentHex};"
 			></div>
 		</div>
@@ -412,6 +429,7 @@
 				class="size-8 p-0 shrink-0 rounded-xl"
 				onclick={handleEyeDropper}
 				title="Pick color from screen"
+				aria-label="Pick colour from screen"
 			>
 				<Pipette class="size-3.5" />
 			</Button>
@@ -425,7 +443,7 @@
 					role="presentation"
 				>
 					<div
-						class="size-3.5 -translate-x-1/2 -translate-y-1/2 absolute top-1/2 rounded-full border-2 border-white shadow-md pointer-events-none"
+						class="size-3.5 -translate-x-1/2 -translate-y-1/2 absolute top-1/2 rounded-full border border-white pointer-events-none"
 						style="left: {(currentH / 360) * 100}%; background-color: hsl({currentH}, 100%, 50%);"
 					></div>
 				</div>
@@ -441,7 +459,7 @@
 						style="background: linear-gradient(to right, transparent, {currentHex});"
 					></div>
 					<div
-						class="size-3.5 -translate-x-1/2 -translate-y-1/2 absolute top-1/2 rounded-full border-2 border-white shadow-md pointer-events-none"
+						class="size-3.5 -translate-x-1/2 -translate-y-1/2 absolute top-1/2 rounded-full border border-white pointer-events-none"
 						style="left: {currentA * 100}%; background-color: {currentHex};"
 					></div>
 				</div>
@@ -455,19 +473,22 @@
 			</span>
 			<input
 				type="text"
+				aria-label="Hex colour"
 				bind:value={hexInputText}
 				oninput={handleHexInput}
 				onblur={handleHexBlur}
-				class="h-7 px-2 text-xs font-sans uppercase flex-1 min-w-0 rounded-lg border border-border bg-input/40 outline-none focus:border-ring"
+				class="h-7 px-2 text-xs font-sans uppercase flex-1 min-w-0 rounded-lg bg-input outline-none focus-visible:ring-1 focus-visible:ring-ring"
 			/>
-			<div class="flex items-center gap-0.5 bg-input/40 border border-border rounded-lg px-1.5 h-7 shrink-0 w-15">
+			<div class="flex items-center gap-0.5 bg-input rounded-lg px-1.5 h-7 shrink-0 w-15">
 				<input
 					type="number"
+					inputmode="numeric"
+					aria-label="Opacity percentage"
 					min="0"
 					max="100"
 					bind:value={opacityPercent}
 					oninput={handleOpacityInput}
-					class="w-full text-xs font-sans tabular-nums bg-transparent outline-none text-right [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+					class="w-full text-xs font-sans bg-transparent outline-none text-right [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
 				/>
 				<span class="text-[10px] text-muted-foreground font-sans">%</span>
 			</div>
@@ -481,7 +502,7 @@
 						type="button"
 						class={cn(
 							"size-6 rounded-lg border border-border/80 cursor-pointer transition-transform hover:scale-105 relative overflow-hidden bg-card",
-							isNone ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : ""
+							isNone ? "ring-2 ring-ring ring-offset-1 ring-offset-background" : ""
 						)}
 						onclick={selectNone}
 						title="None / Transparent"
@@ -489,7 +510,7 @@
 					>
 						<div class="size-full bg-transparency-grid relative">
 							<div class="absolute inset-0 flex items-center justify-center">
-								<div class="w-full h-[1.5px] bg-red-500/80 -rotate-45"></div>
+								<div class="w-full h-[1.5px] bg-destructive/80 -rotate-45"></div>
 							</div>
 						</div>
 					</button>
@@ -500,7 +521,7 @@
 						type="button"
 						class={cn(
 							"size-6 rounded-lg border border-border/60 cursor-pointer transition-transform hover:scale-105 relative overflow-hidden",
-							isSelected ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : ""
+							isSelected ? "ring-2 ring-ring ring-offset-1 ring-offset-background" : ""
 						)}
 						style="background-color: {preset.color};"
 						onclick={() => selectPreset(preset.color)}
