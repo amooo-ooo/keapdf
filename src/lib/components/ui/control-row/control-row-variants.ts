@@ -1,7 +1,7 @@
 import { type VariantProps, tv } from "tailwind-variants";
 
 export const controlRowVariants = tv({
-	base: "relative flex w-full items-center justify-between gap-2 rounded-2xl border border-border/50 bg-muted/40 px-3 py-1.5 transition-colors hover:bg-muted/60 select-none",
+	base: "relative flex w-full items-center justify-between gap-2 rounded-2xl px-3 py-1.5 transition-colors select-none",
 	variants: {
 		size: {
 			default: "min-h-9",
@@ -9,9 +9,9 @@ export const controlRowVariants = tv({
 			compact: "min-h-7 px-2 py-0.5 text-xs",
 		},
 		variant: {
-			default: "",
-			ghost: "border-transparent bg-transparent hover:bg-muted/30",
-			card: "bg-card border-border shadow-2xs hover:bg-muted/20",
+			default: "border border-border bg-card hover:bg-muted/30",
+			ghost: "border border-transparent bg-transparent hover:bg-muted/30",
+			card: "border border-border bg-card hover:bg-muted/20",
 		},
 	},
 	defaultVariants: {
