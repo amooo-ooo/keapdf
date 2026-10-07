@@ -15,6 +15,7 @@ import SubContent from "./dropdown-menu-sub-content.svelte";
 import SubTrigger from "./dropdown-menu-sub-trigger.svelte";
 import GroupHeading from "./dropdown-menu-group-heading.svelte";
 import Portal from "./dropdown-menu-portal.svelte";
+import DropdownButton from "../dropdown-button/dropdown-button.svelte";
 
 export {
 	CheckboxGroup,
@@ -38,6 +39,8 @@ export {
 	SubTrigger as DropdownMenuSubTrigger,
 	Trigger as DropdownMenuTrigger,
 	GroupHeading as DropdownMenuGroupHeading,
+	DropdownButton,
+	DropdownButton as DropdownMenuButton,
 	Group,
 	GroupHeading,
 	Item,
@@ -52,3 +55,23 @@ export {
 	SubTrigger,
 	Trigger,
 };
+
+export type {
+	DropdownButtonProps,
+	DropdownButtonVariant,
+	DropdownButtonSize,
+	DropdownButtonFillColor,
+} from "../dropdown-button/dropdown-button.svelte";
+
+export {
+	MenuLevelCoordinator,
+	SubmenuController,
+	provideMenuLevelContext,
+	useMenuLevelContext,
+	provideSubmenuController,
+	useSubmenuController,
+	disengageAncestorSubContentIntent,
+	isTargetInsideSubContent,
+	type SubmenuEntry,
+	type SubmenuControllerOptions,
+} from "./dropdown-menu-sub-context.js";
