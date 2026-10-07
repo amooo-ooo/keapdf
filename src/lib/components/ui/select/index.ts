@@ -10,6 +10,11 @@ import ScrollUpButton from "./select-scroll-up-button.svelte";
 import GroupHeading from "./select-group-heading.svelte";
 import Portal from "./select-portal.svelte";
 
+export type {
+	SelectTriggerVariant,
+	SelectTriggerProps,
+} from "./select-trigger.svelte";
+
 export {
 	Root,
 	Group,
