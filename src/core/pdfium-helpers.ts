@@ -8,6 +8,7 @@
 
 import { PdfiumEngine, type ExtendedWrappedPdfiumModule } from './pdfium-engine';
 import type { PdfMatrix, StandardFontName, PageCropInfo } from './types';
+export type { StandardFontName };
 
 /**
  * Allocate WASM memory with null-pointer safety check.
@@ -203,6 +204,110 @@ export function getPageObjectMatrix(
  * @param ty Translation distance along the y-axis.
  * @return The constructed matrix.
  */
+/**
+ * Extracts a bitmap handle for an image page object at its native pixel dimensions
+ * while compositing any attached `/SMask` or `/Mask` transparency channel.
+ *
+ * `FPDFImageObj_GetBitmap` returns only the raw colour stream and discards soft masks,
+ * turning transparent backgrounds into opaque black. `FPDFImageObj_GetRenderedBitmap`
+ * composites the soft mask into a Format 4 (`FPDFBitmap_BGRA`) bitmap, and temporarily
+ * setting the image object matrix to `(pixelW, 0, 0, pixelH, 0, 0)` ensures 1:1 native
+ * pixel sampling without double-applying page rotation or display scaling.
+ *
+ * @param engine The PDFium engine instance.
+ * @param mod The extended WASM module instance.
+ * @param docHandle Handle to the parent PDF document.
+ * @param pageHandle Handle to the page containing the image object.
+ * @param objHandle Handle to the target image page object.
+ * @return A PDFium bitmap handle that the caller must release via `FPDFBitmap_Destroy`, or 0.
+ */
+export function extractImageObjectBitmap(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  docHandle: number,
+  pageHandle: number,
+  objHandle: number,
+): number {
+  if (!objHandle) return 0;
+
+  if (
+    docHandle &&
+    pageHandle &&
+    typeof mod.FPDFImageObj_GetRenderedBitmap === 'function'
+  ) {
+    let pixelW = 0;
+    let pixelH = 0;
+
+    if (
+      typeof mod.FPDFImageObj_GetImagePixelSize === 'function' &&
+      typeof engine?.getColorScratchBuffer === 'function' &&
+      mod.pdfium?.HEAPU32
+    ) {
+      try {
+        const { rPtr, gPtr } = engine.getColorScratchBuffer();
+        const ok = mod.FPDFImageObj_GetImagePixelSize(objHandle, rPtr, gPtr);
+        if (ok) {
+          pixelW = mod.pdfium.HEAPU32[rPtr >> 2];
+          pixelH = mod.pdfium.HEAPU32[gPtr >> 2];
+        }
+      } catch {
+        pixelW = 0;
+        pixelH = 0;
+      }
+    }
+
+    if (pixelW > 0 && pixelH > 0) {
+      const origMatrix = getPageObjectMatrix(engine, mod, objHandle);
+      if (origMatrix) {
+        try {
+          setPageObjectMatrix(engine, mod, objHandle, {
+            a: pixelW,
+            b: 0,
+            c: 0,
+            d: pixelH,
+            e: 0,
+            f: 0,
+          });
+          const rendered = mod.FPDFImageObj_GetRenderedBitmap(
+            docHandle,
+            pageHandle,
+            objHandle,
+          );
+          if (rendered) return rendered;
+        } catch {
+          // Fall through to raw bitmap extraction
+        } finally {
+          setPageObjectMatrix(engine, mod, objHandle, origMatrix);
+        }
+      } else {
+        try {
+          const rendered = mod.FPDFImageObj_GetRenderedBitmap(
+            docHandle,
+            pageHandle,
+            objHandle,
+          );
+          if (rendered) return rendered;
+        } catch {
+          // Fall through to raw bitmap extraction
+        }
+      }
+    }
+  }
+
+  if (typeof mod.FPDFImageObj_GetBitmap === 'function') {
+    return mod.FPDFImageObj_GetBitmap(objHandle);
+  }
+
+  return 0;
+}
+
+/**
+ * Creates an identity transformation matrix with x and y translation values.
+ *
+ * @param tx Translation distance along the x-axis.
+ * @param ty Translation distance along the y-axis.
+ * @return The constructed matrix.
+ */
 export function translationMatrix(tx: number, ty: number): PdfMatrix {
   return { a: 1, b: 0, c: 0, d: 1, e: tx, f: ty };
 }
@@ -339,6 +444,9 @@ const FONT_NAME_MAP: Record<string, StandardFontName> = {
   nimbusromno9lreg: 'Times-Roman',
   nimbusromno9lmedi: 'Times-Bold',
   nimbusromno9lmedm: 'Times-Bold',
+  nimbusromno9lreguital: 'Times-Italic',
+  nimbusromno9lmediital: 'Times-BoldItalic',
+  nimbusromno9lmedmital: 'Times-BoldItalic',
   nimbusromno9litai: 'Times-Italic',
   nimbusromno9lita: 'Times-Italic',
   nimbusromno9lbold: 'Times-Bold',
@@ -347,10 +455,14 @@ const FONT_NAME_MAP: Record<string, StandardFontName> = {
   nimbusroman: 'Times-Roman',
   nimbussanlregu: 'Helvetica',
   nimbussanlbold: 'Helvetica-Bold',
+  nimbussanlreguital: 'Helvetica-Oblique',
+  nimbussanlboldital: 'Helvetica-BoldOblique',
   nimbussan: 'Helvetica',
   nimbussans: 'Helvetica',
   nimbusmonlregu: 'Courier',
   nimbusmonlbold: 'Courier-Bold',
+  nimbusmonlreguobli: 'Courier-Oblique',
+  nimbusmonlboldobli: 'Courier-BoldOblique',
   nimbusmon: 'Courier',
   nimbusmono: 'Courier',
 };
@@ -364,28 +476,125 @@ const STANDARD_FONT_NAMES: ReadonlySet<string> = new Set<StandardFontName>([
 ]);
 
 /**
+ * Determines whether a font name, weight, or PDF font descriptor flag bitmask represents bold weight.
+ *
+ * @param fontName Raw or canonical font name.
+ * @param fontWeight Optional explicit weight ('bold', 'normal', or numeric weight).
+ * @param fontFlags Optional PDF font descriptor flags (bit 19 / 0x40000 is ForceBold).
+ * @return True if the font is bold.
+ */
+export function isBoldFontName(
+  fontName?: string,
+  fontWeight?: number | string,
+  fontFlags?: number
+): boolean {
+  if (fontWeight === 'bold') return true;
+  if (fontWeight === 'normal') return false;
+  if (typeof fontWeight === 'number' && fontWeight >= 600) return true;
+  if (fontFlags !== undefined && (fontFlags & 0x40000) !== 0) return true;
+  if (!fontName) return false;
+
+  const lower = cleanSubsetPrefix(fontName).toLowerCase();
+  return (
+    lower.includes('bold') ||
+    lower.includes('black') ||
+    lower.includes('heavy') ||
+    lower.includes('semibold') ||
+    lower.includes('demibold') ||
+    lower.includes('medi') ||
+    lower.includes('medm') ||
+    lower.includes('bx') ||
+    lower.startsWith('ptmb') ||
+    lower.startsWith('phvb') ||
+    lower.startsWith('pcrb') ||
+    lower.startsWith('pplb') ||
+    lower.startsWith('bchb') ||
+    lower.startsWith('putb') ||
+    lower.startsWith('pncb') ||
+    lower.startsWith('pbkd') ||
+    lower.startsWith('txb') ||
+    lower.startsWith('pxb')
+  );
+}
+
+/**
+ * Determines whether a font name, style, or PDF font descriptor flag bitmask represents italic/oblique style.
+ *
+ * @param fontName Raw or canonical font name.
+ * @param fontStyle Optional explicit style ('italic', 'oblique', or 'normal').
+ * @param fontFlags Optional PDF font descriptor flags (bit 7 / 0x40 is Italic).
+ * @return True if the font is italic or oblique.
+ */
+export function isItalicFontName(
+  fontName?: string,
+  fontStyle?: string,
+  fontFlags?: number
+): boolean {
+  if (fontStyle === 'italic' || fontStyle === 'oblique') return true;
+  if (fontStyle === 'normal') return false;
+  if (fontFlags !== undefined && (fontFlags & 0x40) !== 0) return true;
+  if (!fontName) return false;
+
+  const lower = cleanSubsetPrefix(fontName).toLowerCase();
+  return (
+    lower.includes('italic') ||
+    lower.includes('oblique') ||
+    lower.includes('ital') ||
+    lower.includes('obli') ||
+    lower.includes('slant') ||
+    /[-_,](it|ob|sl)$/i.test(lower) ||
+    lower.startsWith('cmti') ||
+    lower.startsWith('cmsl') ||
+    lower.startsWith('cmmi') ||
+    lower.startsWith('lmti') ||
+    lower.startsWith('lmsl') ||
+    lower.startsWith('lmmi') ||
+    lower.startsWith('cmssi') ||
+    lower.startsWith('lmsso') ||
+    lower.startsWith('ptmri') ||
+    lower.startsWith('ptmbi') ||
+    lower.startsWith('phvro') ||
+    lower.startsWith('phvbo') ||
+    lower.startsWith('pcrro') ||
+    lower.startsWith('pcrbo') ||
+    lower.startsWith('pplri') ||
+    lower.startsWith('pplbi') ||
+    lower.startsWith('bchri') ||
+    lower.startsWith('bchbi') ||
+    lower.startsWith('putri') ||
+    lower.startsWith('txi') ||
+    lower.startsWith('pxi')
+  );
+}
+
+/**
  * Maps a detected PDF font name to the closest standard PDF Type 1 font.
  *
  * @param detectedFontName Raw font name extracted from a PDF.
  * @param fontWeight Optional font weight ('bold' or 'normal').
  * @param fontStyle Optional font style ('italic' or 'normal').
+ * @param fontFlags Optional PDF font descriptor flags.
  * @return The mapped standard PDF font name.
  */
 export function mapStandardFontName(
   detectedFontName: string,
   fontWeight?: string,
-  fontStyle?: string
+  fontStyle?: string,
+  fontFlags?: number
 ): StandardFontName {
   if (!detectedFontName) detectedFontName = 'Helvetica';
+  detectedFontName = cleanSubsetPrefix(detectedFontName);
 
-  // Exact match (already a standard font) if no custom weight/style override
-  if (!fontWeight && !fontStyle && STANDARD_FONT_NAMES.has(detectedFontName)) {
+  // Exact match (already a standard font) if no custom weight/style/flag override
+  if (!fontWeight && !fontStyle && !fontFlags && STANDARD_FONT_NAMES.has(detectedFontName)) {
     return detectedFontName as StandardFontName;
   }
 
   const normalized = detectedFontName.toLowerCase().replace(/[\s_,\-]+/g, '');
-  if (!fontWeight && !fontStyle) {
-    const mapped = FONT_NAME_MAP[normalized];
+  if (!fontWeight && !fontStyle && !fontFlags) {
+    const mapped =
+      FONT_NAME_MAP[detectedFontName.toLowerCase().trim().replace(/[\s_,]+/g, '-')] ??
+      FONT_NAME_MAP[normalized];
     if (mapped) return mapped;
   }
 
@@ -432,6 +641,11 @@ export function mapStandardFontName(
     lower.includes('didot') ||
     lower.includes('caslon') ||
     lower.includes('bookman') ||
+    lower.includes('utopia') ||
+    lower.includes('termes') ||
+    lower.includes('pagella') ||
+    lower.includes('bonum') ||
+    lower.includes('schola') ||
     lower.includes('serif') ||
     lower.includes('roman') ||
     lower.startsWith('cmr') ||
@@ -445,6 +659,7 @@ export function mapStandardFontName(
     lower.startsWith('lmti') ||
     lower.startsWith('lmsl') ||
     lower.startsWith('lmcsc') ||
+    lower.startsWith('lmmi') ||
     lower.startsWith('ptm') ||
     lower.startsWith('ppl') ||
     lower.startsWith('qtm') ||
@@ -464,52 +679,8 @@ export function mapStandardFontName(
     base = 'Helvetica';
   }
 
-  const isBold =
-    fontWeight === 'bold' ||
-    lower.includes('bold') ||
-    lower.includes('black') ||
-    lower.includes('heavy') ||
-    lower.includes('semibold') ||
-    lower.includes('demibold') ||
-    lower.includes('medi') ||
-    lower.includes('medm') ||
-    lower.includes('bx') ||
-    lower.startsWith('ptmb') ||
-    lower.startsWith('phvb') ||
-    lower.startsWith('pcrb') ||
-    lower.startsWith('pplb') ||
-    lower.startsWith('bchb') ||
-    lower.startsWith('putb') ||
-    lower.startsWith('pncb') ||
-    lower.startsWith('pbkd') ||
-    lower.startsWith('txb') ||
-    lower.startsWith('pxb');
-
-  const isItalic =
-    fontStyle === 'italic' ||
-    fontStyle === 'oblique' ||
-    lower.includes('italic') ||
-    lower.includes('oblique') ||
-    lower.includes('slanted') ||
-    lower.startsWith('cmti') ||
-    lower.startsWith('cmsl') ||
-    lower.startsWith('lmti') ||
-    lower.startsWith('lmsl') ||
-    lower.startsWith('cmssi') ||
-    lower.startsWith('lmsso') ||
-    lower.startsWith('ptmri') ||
-    lower.startsWith('ptmbi') ||
-    lower.startsWith('phvro') ||
-    lower.startsWith('phvbo') ||
-    lower.startsWith('pcrro') ||
-    lower.startsWith('pcrbo') ||
-    lower.startsWith('pplri') ||
-    lower.startsWith('pplbi') ||
-    lower.startsWith('bchri') ||
-    lower.startsWith('bchbi') ||
-    lower.startsWith('putri') ||
-    lower.startsWith('txi') ||
-    lower.startsWith('pxi');
+  const isBold = isBoldFontName(detectedFontName, fontWeight, fontFlags);
+  const isItalic = isItalicFontName(detectedFontName, fontStyle, fontFlags);
 
   if (base === 'Courier') {
     if (isBold && isItalic) return 'Courier-BoldOblique';
@@ -604,12 +775,16 @@ export function calculateTextWidth(
   const isTimes = standardName.startsWith('Times');
   const table = isTimes ? TIMES_WIDTHS : HELVETICA_WIDTHS;
   const fallback = isTimes ? 500 : 556;
+  const wideSerifScale =
+    isTimes && /utopia|charter|bookman|century|palatino|pagella|bonum|schola/i.test(fontFamily)
+      ? 1.08
+      : 1.0;
 
   let units = 0;
   for (let i = 0; i < text.length; i++) {
     units += table[text[i]] ?? fallback;
   }
-  return (units / 1000) * fontSize;
+  return (units / 1000) * fontSize * wideSerifScale;
 }
 
 // Page object removal
@@ -653,16 +828,18 @@ export function removeTextObjectsInBounds(
     return false;
   }
 
-  const hasBoundsApi = typeof mod.FPDFPageObj_GetBounds === 'function';
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const pdfLeft = spanLeft + cropInfo.cropLeft;
 
   // Define the target region in PDF coordinate space (tolerance padding)
-  const targetLeft = spanLeft - 2;
-  const targetRight = spanLeft + spanWidth + 2;
-  const targetBottom = spanBaselineY - spanFontSize * 0.4;
-  const targetTop = spanBaselineY + spanFontSize * 1.1;
+  const targetLeft = pdfLeft - 1.5;
+  const targetRight = pdfLeft + spanWidth + 1.5;
+  const targetBottom = spanBaselineY - spanFontSize * 0.45;
+  const targetTop = spanBaselineY + spanFontSize * 1.05;
 
   const objectCount = mod.FPDFPage_CountObjects(pageHandle);
   const objectsToRemove: number[] = [];
+  const hasBoundsApi = typeof mod.FPDFPageObj_GetBounds === 'function';
 
   if (hasBoundsApi) {
     // Reusable bounds pointers (float* = 4 bytes each) from engine scratch buffer
@@ -699,12 +876,27 @@ export function removeTextObjectsInBounds(
       const objCenterX = (objLeft + objRight) / 2;
       const objCenterY = (objBottom + objTop) / 2;
 
+      if (cropInfo.rotation === 0) {
+        const mat = getPageObjectMatrix(engine, mod, objHandle);
+        if (
+          mat &&
+          mat.f > 0 &&
+          Math.abs(mat.b) < 0.01 &&
+          Math.abs(mat.c) < 0.01 &&
+          Math.abs(mat.f - spanBaselineY) > Math.max(3.5, spanFontSize * 0.4)
+        ) {
+          continue;
+        }
+      }
+
       const centerInTarget =
         objCenterX >= targetLeft && objCenterX <= targetRight &&
         objCenterY >= targetBottom && objCenterY <= targetTop;
 
       const substantialOverlap =
+        centerInTarget &&
         objWidth > 0 &&
+        objWidth <= spanWidth + 6.0 &&
         overlapWidth / objWidth >= 0.4 &&
         objHeight > 0 &&
         overlapHeight / objHeight >= 0.4;
@@ -870,11 +1062,14 @@ export function setTextObjectInBounds(
   const hasBoundsApi = typeof mod.FPDFPageObj_GetBounds === 'function';
   if (!hasBoundsApi) return false;
 
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const pdfLeft = spanLeft + cropInfo.cropLeft;
+
   // Match the exact bounding region used by removeTextObjectsInBounds
-  const targetLeft = spanLeft - 2;
-  const targetRight = spanLeft + spanWidth + 2;
-  const targetBottom = spanBaselineY - spanFontSize * 0.4;
-  const targetTop = spanBaselineY + spanFontSize * 1.1;
+  const targetLeft = pdfLeft - 1.5;
+  const targetRight = pdfLeft + spanWidth + 1.5;
+  const targetBottom = spanBaselineY - spanFontSize * 0.45;
+  const targetTop = spanBaselineY + spanFontSize * 1.05;
 
   const { leftPtr, bottomPtr, rightPtr, topPtr } = engine.getBoundsScratchBuffer();
 
@@ -911,12 +1106,27 @@ export function setTextObjectInBounds(
     const objCenterX = (objLeft + objRight) / 2;
     const objCenterY = (objBottom + objTop) / 2;
 
+    if (cropInfo.rotation === 0) {
+      const mat = getPageObjectMatrix(engine, mod, objHandle);
+      if (
+        mat &&
+        mat.f > 0 &&
+        Math.abs(mat.b) < 0.01 &&
+        Math.abs(mat.c) < 0.01 &&
+        Math.abs(mat.f - spanBaselineY) > Math.max(3.5, spanFontSize * 0.4)
+      ) {
+        continue;
+      }
+    }
+
     const centerInTarget =
       objCenterX >= targetLeft && objCenterX <= targetRight &&
       objCenterY >= targetBottom && objCenterY <= targetTop;
 
     const substantialOverlap =
+      centerInTarget &&
       objWidth > 0 &&
+      objWidth <= spanWidth + 6.0 &&
       overlapWidth / objWidth >= 0.4 &&
       objHeight > 0 &&
       overlapHeight / objHeight >= 0.4;
@@ -979,8 +1189,8 @@ export function findTextObjectIndicesForSpan(
   // Tight bounding region with minimal tolerance (1pt horizontal)
   const targetLeft = pdfLeft - 1;
   const targetRight = pdfLeft + spanWidth + 1;
-  const targetBottom = spanBaselineY - spanFontSize * 0.5;
-  const targetTop = spanBaselineY + spanFontSize * 1.2;
+  const targetBottom = spanBaselineY - spanFontSize * 0.45;
+  const targetTop = spanBaselineY + spanFontSize * 1.05;
 
   const matchedObjects: Array<{ index: number; left: number; top: number }> = [];
   const { leftPtr, bottomPtr, rightPtr, topPtr } = engine.getBoundsScratchBuffer();
@@ -1000,8 +1210,23 @@ export function findTextObjectIndicesForSpan(
     const objRight = heapF32[rightPtr >> 2];
     const objTop = heapF32[topPtr >> 2];
 
+    const objWidth = objRight - objLeft;
     const objCenterX = (objLeft + objRight) / 2;
     const objCenterY = (objBottom + objTop) / 2;
+
+    if (cropInfo.rotation === 0) {
+      if (objWidth > spanWidth + 10.0) continue;
+      const mat = getPageObjectMatrix(engine, mod, objHandle);
+      if (
+        mat &&
+        mat.f > 0 &&
+        Math.abs(mat.b) < 0.01 &&
+        Math.abs(mat.c) < 0.01 &&
+        Math.abs(mat.f - spanBaselineY) > Math.max(3.5, spanFontSize * 0.4)
+      ) {
+        continue;
+      }
+    }
 
     // Require the object's centre to be inside the span's tight region
     let centerInTarget = false;
@@ -1155,6 +1380,49 @@ export function drawCoverRect(
 // Font info extraction
 
 /**
+ * Reads the font name and PDF font descriptor flags of a specific character in a text page.
+ *
+ * @param engine The PDFium engine instance.
+ * @param mod The extended WASM module instance.
+ * @param textPageHandle Handle to the loaded text page.
+ * @param charIndex Zero-based index of the target character.
+ * @return Object containing the extracted fontName and fontFlags bitmask.
+ */
+export function readCharFontInfo(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  textPageHandle: number,
+  charIndex: number
+): { fontName: string; fontFlags: number } {
+  if (typeof mod.FPDFText_GetFontInfo !== 'function') {
+    return { fontName: 'Helvetica', fontFlags: 0 };
+  }
+
+  const { fontBufPtr, flagsPtr } = engine.getFontNameScratchBuffer();
+
+  try {
+    if (mod.pdfium?.HEAP32) {
+      mod.pdfium.HEAP32[flagsPtr >> 2] = 0;
+    }
+    const len = mod.FPDFText_GetFontInfo(textPageHandle, charIndex, fontBufPtr, 128, flagsPtr);
+    const fontFlags = mod.pdfium?.HEAP32 ? (mod.pdfium.HEAP32[flagsPtr >> 2] || 0) : 0;
+    if (len <= 0) return { fontName: 'Helvetica', fontFlags };
+
+    const heapU8 = mod.pdfium.HEAPU8;
+    let fontStr = '';
+    const maxLen = Math.min(len, 128);
+    for (let k = 0; k < maxLen; k++) {
+      const b = heapU8[fontBufPtr + k];
+      if (b === 0) break;
+      fontStr += String.fromCharCode(b);
+    }
+    return { fontName: fontStr.trim() || 'Helvetica', fontFlags };
+  } catch {
+    return { fontName: 'Helvetica', fontFlags: 0 };
+  }
+}
+
+/**
  * Reads the font name of a specific character in a text page.
  *
  * @param engine The PDFium engine instance.
@@ -1169,28 +1437,7 @@ export function readCharFontName(
   textPageHandle: number,
   charIndex: number,
 ): string {
-  if (typeof mod.FPDFText_GetFontInfo !== 'function') {
-    return 'Helvetica';
-  }
-
-  const { fontBufPtr, flagsPtr } = engine.getFontNameScratchBuffer();
-
-  try {
-    const len = mod.FPDFText_GetFontInfo(textPageHandle, charIndex, fontBufPtr, 128, flagsPtr);
-    if (len <= 0) return 'Helvetica';
-
-    const heapU8 = mod.pdfium.HEAPU8;
-    let fontStr = '';
-    const maxLen = Math.min(len, 128);
-    for (let k = 0; k < maxLen; k++) {
-      const b = heapU8[fontBufPtr + k];
-      if (b === 0) break;
-      fontStr += String.fromCharCode(b);
-    }
-    return fontStr.trim() || 'Helvetica';
-  } catch {
-    return 'Helvetica';
-  }
+  return readCharFontInfo(engine, mod, textPageHandle, charIndex).fontName;
 }
 
 /**
@@ -1233,13 +1480,62 @@ export function readCharFillColor(
 }
 
 /**
- * Extracts a base font family name by stripping PDF subset prefixes,
- * PostScript markers, and common style suffixes.
+ * Reads the vertical scale `hypot(c, d)` of a character text matrix.
+ *
+ * The caller owns `matrixPtr`, which must reference at least 24 bytes of WASM
+ * heap memory (an `FS_MATRIX` of six 32-bit floats) and may be reused across
+ * characters to avoid per-glyph allocations.
+ *
+ * @param mod The extended WASM module instance.
+ * @param textPageHandle Handle to the loaded text page.
+ * @param charIndex Zero-based index of the target character.
+ * @param matrixPtr Caller-owned scratch pointer for the `FS_MATRIX` output.
+ * @return The vertical matrix scale, or null when unavailable.
+ */
+export function readCharMatrixScaleY(
+  mod: ExtendedWrappedPdfiumModule,
+  textPageHandle: number,
+  charIndex: number,
+  matrixPtr: number,
+): number | null {
+  if (typeof mod.FPDFText_GetMatrix !== 'function' || !matrixPtr) return null;
+  try {
+    if (!mod.FPDFText_GetMatrix(textPageHandle, charIndex, matrixPtr)) return null;
+    const heapF32 = mod.pdfium.HEAPF32;
+    const base = matrixPtr >> 2;
+    const scaleY = Math.hypot(heapF32[base + 2], heapF32[base + 3]);
+    return Number.isFinite(scaleY) && scaleY > 0 ? scaleY : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Strips 6-character PDF subset prefix (e.g. "ABCDEF+") from a font name.
+ *
+ * @param fontName Raw PDF font name.
+ * @return Clean font name without subset prefix.
+ */
+export function cleanSubsetPrefix(fontName: string): string {
+  if (!fontName) return '';
+  const plusIdx = fontName.indexOf('+');
+  if (plusIdx >= 0 && plusIdx <= 7) {
+    const prefix = fontName.substring(0, plusIdx);
+    if (/^[A-Za-z0-9]{6,7}$/.test(prefix)) {
+      return fontName.substring(plusIdx + 1).trim();
+    }
+  }
+  return fontName.trim();
+}
+
+/**
+ * Extracts a normalised base font family from a raw PDF font name.
+ * Strips subset prefixes (e.g. "ABCDEF+"), PostScript style suffixes,
+ * and normalises casing for grouping and fallback matching.
  *
  * Examples:
- *   "ABCDEF+ArialMT" -> "arial"
- *   "Helvetica-Bold" -> "helvetica"
- *   "TimesNewRomanPSMT" -> "times new roman"
+ *   "ABCDEF+Arial-BoldMT"     -> "arial"
+ *   "XYZABC+TimesNewRomanPSMT"-> "times new roman"
  *   "GHIJKL+Calibri-BoldItalic" -> "calibri"
  *
  * @param fontName The raw font name from PDFium.
@@ -1248,26 +1544,32 @@ export function readCharFillColor(
 export function extractBaseFontFamily(fontName: string): string {
   if (!fontName) return 'helvetica';
 
-  let name = fontName;
+  let name = cleanSubsetPrefix(fontName);
 
-  // Strip PDF subset prefix (6 uppercase letters followed by '+')
-  const plusIdx = name.indexOf('+');
-  if (plusIdx >= 0 && plusIdx <= 7) {
-    name = name.substring(plusIdx + 1);
-  }
+  // Convert comma style separators to hyphens
+  name = name.replace(/,([A-Za-z]+)$/, '-$1');
 
-  // Add spaces to PascalCase/camelCase names before lowercasing (e.g. "OpenSans" -> "Open Sans")
+  // Add spaces to PascalCase/camelCase names before lowercasing
   name = name.replace(/([a-z])([A-Z])/g, '$1 $2');
 
   // Lowercase for consistent grouping
-  name = name.toLowerCase();
+  name = name.toLowerCase().trim();
 
-  // Strip common style and PostScript suffixes
-  name = name
-    .replace(/[-,_](bold|italic|oblique|bolditalic|boldoblique|regular|medium|light|semibold|demibold|extrabold|condensed|expanded|narrow|black|thin|heavy|book|psmt|ps|mt|ms|identity-h|cid)$/g, '')
-    .replace(/\s+(bold|italic|oblique|regular|medium|light|psmt|ps|mt|ms)$/g, '')
-    .replace(/(psmt|ps|mt|ms)$/g, '')
-    .trim();
+  // Iteratively strip style and PostScript variant suffixes
+  const suffixPattern = /[-,_\s]+(bolditalic|boldoblique|boldital|boldobli|reguital|mediital|medmital|reguobli|bold|italic|oblique|ital|obli|slanted|slant(?:[_-]?\d+)?|regular|regu|medium|medi|medm|light|semibold|demibold|extrabold|condensed|expanded|narrow|black|thin|heavy|book|reg|bd|it|bi|ro|psmt|ps|mt|ms|identity-h|cid)$/;
+  let prev = '';
+  while (prev !== name) {
+    prev = name;
+    name = name.replace(suffixPattern, '').trim();
+  }
+
+  // Strip trailing -roman style suffix only if not part of a compound family name like "new roman"
+  if (!name.endsWith('new roman')) {
+    name = name.replace(/[-,_\s]roman$/, '').trim();
+  }
+
+  // Strip trailing unpunctuated PostScript identifiers
+  name = name.replace(/(psmt|ps|mt|ms)$/, '').trim();
 
   return name || 'helvetica';
 }
@@ -1557,4 +1859,99 @@ export function pdfBoxToDomBounds(
     bottom: Math.max(p1.y, p2.y, p3.y, p4.y),
   };
 }
+
+/**
+ * Registry of PDFium path object handles created as text span decorations
+ * (highlight background rectangles, underlines, and strikethroughs).
+ */
+const trackedSpanDecorationObjects = new Map<
+  number,
+  { left: number; bottom: number; width: number; height: number }
+>();
+
+/**
+ * Registers a newly created PDFium rectangle object handle as a text span decoration
+ * so it can be reliably purged when the owning text span is updated or deleted.
+ *
+ * @param objHandle Native PDFium page object handle.
+ * @param left Horizontal left coordinate in PDF user space.
+ * @param bottom Vertical bottom coordinate in PDF user space.
+ * @param width Width of the decoration rectangle in points.
+ * @param height Height of the decoration rectangle in points.
+ */
+export function registerSpanDecorationObject(
+  objHandle: number,
+  left: number,
+  bottom: number,
+  width: number,
+  height: number
+): void {
+  if (!objHandle) return;
+  trackedSpanDecorationObjects.set(objHandle, { left, bottom, width, height });
+}
+
+/**
+ * Removes any previously inserted text span decoration path objects (background highlights,
+ * underlines, or strikethroughs) located within the spatial bounds of a text span line.
+ *
+ * @param engine The PDFium engine instance.
+ * @param mod The raw PDFium WASM module.
+ * @param pageHandle Native handle to the target page.
+ * @param spanLeft Left coordinate of the text span in DOM space.
+ * @param spanBaselineY Baseline Y coordinate of the text span in PDF user space.
+ * @param spanWidth Width of the text span in points.
+ * @param spanFontSize Font size of the text span in points.
+ * @return True if at least one decoration path object was removed.
+ */
+export function removeSpanDecorationObjectsInBounds(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  pageHandle: number,
+  spanLeft: number,
+  spanBaselineY: number,
+  spanWidth: number,
+  spanFontSize: number
+): boolean {
+  const numObjs = mod.FPDFPage_CountObjects(pageHandle);
+  if (numObjs <= 0) return false;
+
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const pdfLeft = spanLeft + cropInfo.cropLeft;
+  const minX = pdfLeft - 6;
+  const maxX = pdfLeft + Math.max(spanWidth, 4) + 12;
+  const minY = spanBaselineY - spanFontSize * 0.45 - 3;
+  const maxY = spanBaselineY + spanFontSize * 1.25 + 3;
+
+  const indicesToRemove: number[] = [];
+
+  for (let i = 0; i < numObjs; i++) {
+    const obj = mod.FPDFPage_GetObject(pageHandle, i);
+    if (!obj) continue;
+
+    const tracked = trackedSpanDecorationObjects.get(obj);
+    if (tracked) {
+      const tRight = tracked.left + tracked.width;
+      const tTop = tracked.bottom + tracked.height;
+      const overlapsX = tracked.left <= maxX && tRight >= minX;
+      const overlapsY = tracked.bottom >= minY && tTop <= maxY;
+      if (overlapsX && overlapsY) {
+        indicesToRemove.push(i);
+        trackedSpanDecorationObjects.delete(obj);
+      }
+    }
+  }
+
+  if (indicesToRemove.length === 0) return false;
+
+  const sortedDesc = [...indicesToRemove].sort((a, b) => b - a);
+  for (const idx of sortedDesc) {
+    const obj = mod.FPDFPage_GetObject(pageHandle, idx);
+    if (obj) {
+      mod.FPDFPage_RemoveObject(pageHandle, obj);
+      mod.FPDFPageObj_Destroy(obj);
+    }
+  }
+  return true;
+}
+
 
