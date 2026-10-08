@@ -18,7 +18,7 @@
 	bind:value
 	data-slot={dataSlot}
 	class={cn(
-		"bg-input/50 focus-visible:border-ring focus-visible:ring-ring/30 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 flex min-h-16 w-full rounded-2xl border border-border/80 dark:border-transparent px-2.5 py-2 text-sm transition-[color,box-shadow] duration-200 placeholder:text-muted-foreground focus-visible:ring-3 aria-invalid:ring-3 disabled:cursor-not-allowed disabled:opacity-50 outline-none",
+		"bg-input focus-visible:ring-ring/30 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 flex min-h-16 w-full rounded-2xl px-2.5 py-2 text-sm font-sans transition-[color,box-shadow] duration-200 placeholder:text-muted-foreground focus-visible:ring-3 aria-invalid:ring-3 disabled:cursor-not-allowed disabled:opacity-50 outline-none",
 		className
 	)}
 	{...restProps}
