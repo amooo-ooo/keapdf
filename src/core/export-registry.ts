@@ -1,5 +1,5 @@
 /**
- * Extensible export format registry for document serialization and downloads.
+ * Extensible export format registry for document serialisation and downloads.
  *
  * Allows built-in export pipelines (PDF, flattened PDF, images) and community
  * plugins (e.g., Markdown, EPUB, JSON metadata) to register custom export
@@ -26,11 +26,14 @@ export interface ExportContext {
   actions: EditorActions;
   /** PDF editor service facade. */
   service: PdfEditorService;
-  /** Active canvas elements to bake or serialize. */
+  /** Active canvas elements to bake or serialise. */
   canvasElements: CanvasElement[];
   /** Active page visual transforms. */
   pageTransforms: Record<number, PageTransform>;
 }
+
+/** Logical grouping category for organising export menu items. */
+export type ExportCategory = 'pdf' | 'office' | 'data' | 'web' | 'image' | 'plugin';
 
 /** Specification for an export format handler. */
 export interface ExportDefinition {
@@ -44,6 +47,8 @@ export interface ExportDefinition {
   extension: string;
   /** MIME type for the exported blob. */
   mimeType: string;
+  /** Logical category for grouping in export menus. */
+  category?: ExportCategory;
   /** Icon component reference for the export menu item. */
   icon?: unknown;
   /**
@@ -54,6 +59,83 @@ export interface ExportDefinition {
    * @return Promise resolving when export is complete.
    */
   export(ctx: ExportContext): Promise<void | Blob | Uint8Array>;
+}
+
+/** Submenu group metadata for cascading conversion categories in export dropdowns. */
+export interface ExportSubmenuGroup {
+  /** Category identifier. */
+  category: 'office' | 'data' | 'web';
+  /** Display title for the submenu trigger. */
+  label: string;
+  /** Enabled exporters belonging to this submenu. */
+  items: ExportDefinition[];
+}
+
+/** Structured representation of enabled export items for dropdown rendering. */
+export interface GroupedExportMenu {
+  /** Top-level PDF export actions (PDF Document, Flattened PDF, Compress PDF...). */
+  pdfItems: ExportDefinition[];
+  /** Cascading submenus for document conversions (Microsoft Office, Spreadsheet / Data, Web & Text). */
+  submenus: ExportSubmenuGroup[];
+  /** Top-level image and custom plugin export actions. */
+  trailingItems: ExportDefinition[];
+}
+
+/**
+ * Resolves the right-aligned muted format extension label for an export item,
+ * or null when the item opens an interactive configuration dialog that does not
+ * require a file extension badge.
+ *
+ * @param exporter The export definition to inspect.
+ * @return The formatted extension badge or null.
+ */
+export function getExportShortcutLabel(exporter: ExportDefinition): string | null {
+  if (exporter.id === 'compress-pdf') {
+    return null;
+  }
+  if (exporter.id === 'images') {
+    return '.png / .jpg';
+  }
+  return exporter.extension || null;
+}
+
+/**
+ * Organises a flat list of enabled exporters into top-level PDF actions,
+ * cascading format conversion submenus, and trailing image/plugin actions.
+ *
+ * @param exporters The enabled export definitions to group.
+ * @return Structured menu groups for dropdown rendering.
+ */
+export function groupExportersForMenu(exporters: ExportDefinition[]): GroupedExportMenu {
+  const pdfItems = exporters.filter((exporter) => exporter.category === 'pdf');
+
+  const officeItems = exporters.filter((exporter) => exporter.category === 'office');
+  const dataItems = exporters.filter((exporter) => exporter.category === 'data');
+  const webItems = exporters.filter((exporter) => exporter.category === 'web');
+
+  const submenus: ExportSubmenuGroup[] = [];
+  if (officeItems.length > 0) {
+    submenus.push({ category: 'office', label: 'Microsoft Office', items: officeItems });
+  }
+  if (dataItems.length > 0) {
+    submenus.push({ category: 'data', label: 'Spreadsheet / Data', items: dataItems });
+  }
+  if (webItems.length > 0) {
+    submenus.push({ category: 'web', label: 'Web & Text', items: webItems });
+  }
+
+  const trailingItems = exporters.filter(
+    (exporter) =>
+      exporter.category === 'image' ||
+      exporter.category === 'plugin' ||
+      !exporter.category
+  );
+
+  return {
+    pdfItems,
+    submenus,
+    trailingItems,
+  };
 }
 
 /**

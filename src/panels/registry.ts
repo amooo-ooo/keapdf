@@ -2,10 +2,9 @@
  * Built-in panel registrations for left and right sidebars.
  */
 
-import { Layers, Shapes, Highlighter, Wrench, Settings } from 'lucide-svelte';
+import { Layers, Shapes, Wrench, Settings } from 'lucide-svelte';
 import type { PanelRegistry } from '../core/panel-registry';
 import ComponentsPanel from '../components/panels/ComponentsPanel.svelte';
-import AnnotatePanel from '../components/panels/AnnotatePanel.svelte';
 import ToolsPanel from '../components/panels/ToolsPanel.svelte';
 import SettingsPanel from '../components/panels/SettingsPanel.svelte';
 
@@ -15,7 +14,7 @@ import SettingsPanel from '../components/panels/SettingsPanel.svelte';
  * @param registry The target panel registry instance.
  */
 export function registerBuiltinPanels(registry: PanelRegistry): void {
-  // Left Panels
+  // note: left panels ordered as workspace, components, tools, settings
   registry.registerBuiltin({
     id: 'workspace',
     label: 'Workspace',
@@ -35,33 +34,34 @@ export function registerBuiltinPanels(registry: PanelRegistry): void {
   });
 
   registry.registerBuiltin({
-    id: 'annotate',
-    label: 'Annotate',
-    subtitle: 'Markup, redact & draw',
-    icon: Highlighter,
-    position: 'left',
-    component: AnnotatePanel,
-    order: 30,
-  });
-
-  registry.registerBuiltin({
     id: 'tools',
-    label: 'Tools & OCR',
-    subtitle: 'OCR, imposition & page numbers',
+    label: 'Tools',
+    subtitle: 'OCR, optimisation, redaction & imposition',
     icon: Wrench,
     position: 'left',
     component: ToolsPanel,
-    order: 40,
+    order: 30,
   });
+
+  // Built-in Annotate tab on the left panel is consolidated into Tools and Settings.
+  // registry.registerBuiltin({
+  //   id: 'annotate',
+  //   label: 'Annotate',
+  //   subtitle: 'Markup, redact & draw',
+  //   icon: Highlighter,
+  //   position: 'left',
+  //   component: AnnotatePanel,
+  //   order: 35,
+  // });
 
   registry.registerBuiltin({
     id: 'settings',
     label: 'Settings',
-    subtitle: 'Document security & info',
+    subtitle: 'Document info, metadata & security',
     icon: Settings,
     position: 'left',
     component: SettingsPanel,
-    order: 50,
+    order: 40,
   });
 
   // Right Panels

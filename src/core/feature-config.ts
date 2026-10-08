@@ -10,7 +10,9 @@ import type { FeatureFlag } from './feature-flags';
  * Disabled features to force enable for dev mode testing.
  * Constrained at compile time to literal values in DISABLE_FEATURES.
  */
-export const DEV_ENABLE_FEATURES: readonly (typeof DISABLE_FEATURES)[number][] = [];
+export const DEV_ENABLE_FEATURES: readonly (typeof DISABLE_FEATURES)[number][] = [
+  'compliance'
+];
 
 /**
  * Force enable all disabled features for dev mode.
@@ -23,9 +25,10 @@ export const DEV_ENABLE_ALL: boolean = false;
  * Disabling a parent category automatically disables all child features.
  */
 export const DISABLE_FEATURES = [
+  'settings.repair-developer-info',
+  'compliance',
   'ocr.detect-photos',
   'extraction.remove-blanks',
-  'page-numbers',
   'page-actions.ocr',
   'annotations.read-view',
   'signatures.timestamp',
