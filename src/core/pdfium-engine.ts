@@ -28,6 +28,8 @@ export interface PdfiumSecurityMethods {
 
 export interface PdfiumImageMethods {
   FPDFImageObj_GetBitmap?(imageObject: number): number;
+  FPDFImageObj_GetRenderedBitmap?(docHandle: number, pageHandle: number, imageObject: number): number;
+  FPDFImageObj_GetImagePixelSize?(imageObject: number, widthPtr: number, heightPtr: number): boolean | number;
   FPDFImageObj_SetBitmap?(pagesPtr: number, count: number, imageObject: number, bitmap: number): boolean;
   FPDFBitmap_FillRect?(bitmap: number, left: number, top: number, width: number, height: number, color: number): boolean;
   FPDFBitmap_Destroy?(bitmap: number): void | null;
@@ -53,12 +55,110 @@ export interface PdfiumTextFontMethods {
   FPDFFont_Close?(fontHandle: number): void;
 }
 
+export interface PdfiumFormFillMethods {
+  FPDF_GetFormType?(docHandle: number): number;
+  PDFiumExt_OpenFormFillInfo?(): number;
+  PDFiumExt_CloseFormFillInfo?(formFillInfoPtr: number): void;
+  PDFiumExt_InitFormFillEnvironment?(docHandle: number, formFillInfoPtr: number): number;
+  PDFiumExt_ExitFormFillEnvironment?(formHandle: number): void;
+  FORM_OnAfterLoadPage?(pageHandle: number, formHandle: number): void;
+  FORM_OnBeforeClosePage?(pageHandle: number, formHandle: number): void;
+  FPDF_FFLDraw?(
+    formHandle: number,
+    bitmapHandle: number,
+    pageHandle: number,
+    startX: number,
+    startY: number,
+    sizeX: number,
+    sizeY: number,
+    rotate: number,
+    flags: number
+  ): void;
+}
+
+export interface PdfiumVectorPathMethods {
+  FPDFPageObj_GetFillColor?(
+    pageObject: number,
+    rPtr: number,
+    gPtr: number,
+    bPtr: number,
+    aPtr: number
+  ): boolean;
+  FPDFPageObj_GetStrokeColor?(
+    pageObject: number,
+    rPtr: number,
+    gPtr: number,
+    bPtr: number,
+    aPtr: number
+  ): boolean;
+  FPDFPageObj_GetStrokeWidth?(
+    pageObject: number,
+    strokeWidthPtr: number
+  ): boolean;
+  FPDFPageObj_GetLineCap?(pageObject: number): number;
+  FPDFPageObj_GetLineJoin?(pageObject: number): number;
+  FPDFPageObj_HasTransparency?(pageObject: number): boolean | number;
+  FPDFPath_GetDrawMode?(
+    pathObject: number,
+    fillModePtr: number,
+    strokePtr: number
+  ): boolean;
+  FPDFPath_CountSegments?(pathObject: number): number;
+  FPDFPath_GetPathSegment?(pathObject: number, index: number): number;
+  FPDFPathSegment_GetPoint?(
+    segmentHandle: number,
+    xPtr: number,
+    yPtr: number
+  ): boolean;
+  FPDFPathSegment_GetType?(segmentHandle: number): number;
+  FPDFPathSegment_GetClose?(segmentHandle: number): boolean | number;
+}
+
+export interface PdfiumAnnotationMethods {
+  FPDFAnnot_GetObjectCount?(annotHandle: number): number;
+  FPDFAnnot_GetObject?(annotHandle: number, index: number): number;
+  FPDFAnnot_GetColor?(
+    annotHandle: number,
+    type: number,
+    rPtr: number,
+    gPtr: number,
+    bPtr: number,
+    aPtr: number
+  ): boolean | number;
+  FPDFAnnot_CountAttachmentPoints?(annotHandle: number): number;
+  FPDFAnnot_GetAttachmentPoints?(
+    annotHandle: number,
+    quadIndex: number,
+    quadPointsPtr: number
+  ): boolean | number;
+  FPDFAnnot_GetInkListCount?(annotHandle: number): number;
+  FPDFAnnot_GetInkListPath?(
+    annotHandle: number,
+    pathIndex: number,
+    bufferPtr: number,
+    length: number
+  ): number;
+  FPDFAnnot_GetBorder?(
+    annotHandle: number,
+    horizontalRadiusPtr: number,
+    verticalRadiusPtr: number,
+    borderWidthPtr: number
+  ): boolean | number;
+  FPDFAnnot_GetLinkedAnnot?(annotHandle: number, key: string): number;
+  EPDFAnnot_ExportAppearanceAsDocument?(annotHandle: number): number;
+  FPDFFormObj_CountObjects?(formObject: number): number;
+  FPDFFormObj_GetObject?(formObject: number, index: number): number;
+}
+
 export type ExtendedPdfiumRuntime = PdfiumModule & PdfiumRuntimeMethods & EmscriptenHeaps;
 
 export type ExtendedWrappedPdfiumModule = Omit<WrappedPdfiumModule, 'pdfium'> &
   PdfiumSecurityMethods &
   PdfiumImageMethods &
-  PdfiumTextFontMethods & {
+  PdfiumTextFontMethods &
+  PdfiumFormFillMethods &
+  PdfiumVectorPathMethods &
+  PdfiumAnnotationMethods & {
     pdfium: ExtendedPdfiumRuntime;
   };
 
@@ -367,5 +467,154 @@ export class PdfiumEngine {
     const matrixBuf = this.matrixScratchPtr;
     this.matrixScratchPtr = 0;
     if (matrixBuf) this.freeMemory(matrixBuf);
+  }
+
+  /**
+   * Retrieves the form type of the document (0: none, 1: AcroForm, 2: XFA full, 3: XFA foreground).
+   *
+   * @param docHandle Target document handle.
+   * @return Form type code integer.
+   */
+  public getFormType(docHandle: number): number {
+    if (!docHandle) return 0;
+    const mod = this.getModule();
+    if (typeof mod.FPDF_GetFormType === 'function') {
+      try {
+        return mod.FPDF_GetFormType(docHandle);
+      } catch {
+        return 0;
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * Initialises the PDFium form fill environment for interactive AcroForm rendering.
+   * Conforms to Google Chromium PDFium form fill architecture.
+   *
+   * @param docHandle Target document handle.
+   * @return Handles for form environment and form fill info, or null on failure.
+   */
+  public initFormFillEnvironment(docHandle: number): { formHandle: number; formFillInfoPtr: number } | null {
+    if (!docHandle) return null;
+    const mod = this.getModule();
+    if (
+      typeof mod.PDFiumExt_OpenFormFillInfo !== 'function' ||
+      typeof mod.PDFiumExt_InitFormFillEnvironment !== 'function'
+    ) {
+      return null;
+    }
+
+    try {
+      const formFillInfoPtr = mod.PDFiumExt_OpenFormFillInfo();
+      if (!formFillInfoPtr) return null;
+      const formHandle = mod.PDFiumExt_InitFormFillEnvironment(docHandle, formFillInfoPtr);
+      if (!formHandle) {
+        if (typeof mod.PDFiumExt_CloseFormFillInfo === 'function') {
+          mod.PDFiumExt_CloseFormFillInfo(formFillInfoPtr);
+        }
+        return null;
+      }
+      return { formHandle, formFillInfoPtr };
+    } catch (err) {
+      console.warn('Failed to initialise PDFium form fill environment:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Exits and disposes the PDFium form fill environment.
+   *
+   * @param formHandle Form fill environment handle.
+   * @param formFillInfoPtr Form fill information structure pointer.
+   */
+  public exitFormFillEnvironment(formHandle: number, formFillInfoPtr: number): void {
+    const mod = this.getModule();
+    if (formHandle && typeof mod.PDFiumExt_ExitFormFillEnvironment === 'function') {
+      try {
+        mod.PDFiumExt_ExitFormFillEnvironment(formHandle);
+      } catch {
+        // Safe disposal
+      }
+    }
+    if (formFillInfoPtr && typeof mod.PDFiumExt_CloseFormFillInfo === 'function') {
+      try {
+        mod.PDFiumExt_CloseFormFillInfo(formFillInfoPtr);
+      } catch {
+        // Safe disposal
+      }
+    }
+  }
+
+  /**
+   * Notifies the PDFium form fill environment that a page has finished loading.
+   *
+   * @param pageHandle Target page handle.
+   * @param formHandle Form fill environment handle.
+   */
+  public pageFormAfterLoad(pageHandle: number, formHandle: number): void {
+    if (!pageHandle || !formHandle) return;
+    const mod = this.getModule();
+    if (typeof mod.FORM_OnAfterLoadPage === 'function') {
+      try {
+        mod.FORM_OnAfterLoadPage(pageHandle, formHandle);
+      } catch {
+        // Safe invocation
+      }
+    }
+  }
+
+  /**
+   * Notifies the PDFium form fill environment that a page is about to close.
+   *
+   * @param pageHandle Target page handle.
+   * @param formHandle Form fill environment handle.
+   */
+  public pageFormBeforeClose(pageHandle: number, formHandle: number): void {
+    if (!pageHandle || !formHandle) return;
+    const mod = this.getModule();
+    if (typeof mod.FORM_OnBeforeClosePage === 'function') {
+      try {
+        mod.FORM_OnBeforeClosePage(pageHandle, formHandle);
+      } catch {
+        // Safe invocation
+      }
+    }
+  }
+
+  /**
+   * Renders interactive form fill controls onto a target bitmap.
+   * Matches FPDF_FFLDraw in Google Chrome's native PDFium engine.
+   *
+   * @param formHandle Form fill environment handle.
+   * @param bitmapHandle Target bitmap handle.
+   * @param pageHandle Active page handle.
+   * @param startX Horizontal bitmap offset.
+   * @param startY Vertical bitmap offset.
+   * @param sizeX Target horizontal dimension in pixels.
+   * @param sizeY Target vertical dimension in pixels.
+   * @param rotate Page rotation angle.
+   * @param flags Form fill rendering flags.
+   */
+  public drawFormFill(
+    formHandle: number,
+    bitmapHandle: number,
+    pageHandle: number,
+    startX: number = 0,
+    startY: number = 0,
+    sizeX: number,
+    sizeY: number,
+    rotate: number = 0,
+    flags: number = 0x01
+  ): void {
+    if (!formHandle || !bitmapHandle || !pageHandle) return;
+    const mod = this.getModule();
+    if (typeof mod.FPDF_FFLDraw === 'function') {
+      try {
+        mod.FPDF_FFLDraw(formHandle, bitmapHandle, pageHandle, startX, startY, sizeX, sizeY, rotate, flags);
+      } catch {
+        // Safe invocation
+      }
+    }
   }
 }
