@@ -273,6 +273,7 @@ export interface TextWord {
   baselineY: number;
   charStartIndex: number;
   charCount: number;
+  charIndices?: number[];
   fontFamily?: string;
   rawFontFamily?: string;
   matchedFontFamily?: string;
@@ -288,6 +289,9 @@ export interface TextWord {
   orientation?: 'horizontal' | 'vertical';
   hasPrecedingSpace?: boolean;
   domBaseline?: number;
+  letterSpacing?: string;
+  letterSpacingPts?: number;
+  scaleX?: number;
 }
 
 export interface TextLine {
@@ -318,6 +322,12 @@ export interface TextLine {
   isVertical?: boolean;
   orientation?: 'horizontal' | 'vertical';
   backgroundColor?: string;
+  underline?: boolean;
+  strikethrough?: boolean;
+  letterSpacing?: string;
+  letterSpacingPts?: number;
+  wordSpacing?: number;
+  scaleX?: number;
 }
 
 export interface EditableTextSpan {
@@ -343,6 +353,9 @@ export interface EditableTextSpan {
   lines?: TextLine[];
   lineHeight?: number;
   letterSpacing?: string;
+  letterSpacingPts?: number;
+  wordSpacing?: number;
+  scaleX?: number;
   isParagraph?: boolean;
   fontWeight?: string;
   fontStyle?: string;
@@ -350,6 +363,7 @@ export interface EditableTextSpan {
   strikethrough?: boolean;
   backgroundColor?: string;
   textAlign?: 'left' | 'center' | 'right';
+  originalLeft?: number;
   hasBulletPrefix?: boolean;
   bulletWord?: TextWord;
   rotation?: number;
@@ -359,6 +373,9 @@ export interface EditableTextSpan {
   isOcr?: boolean;
   /** OCR recognition confidence score (0-100). */
   ocrConfidence?: number;
+  zIndex?: number;
+  /** Whether this span represents an isolated single word in precise selection mode. */
+  isWordSpan?: boolean;
 }
 
 export interface EditableImageSpan {
@@ -375,7 +392,12 @@ export interface EditableImageSpan {
   flipY: boolean;
   src: string; // Base64 data URL
   pdfObjectIndex: number;
+  pdfAnnotIndex?: number;
+  annotSubtype?: string;
+  zIndex?: number;
 }
+
+export type ShapeVariantType = 'rectangle' | 'circle' | 'line' | 'arrow' | 'path';
 
 export interface EditableShapeSpan {
   type: 'shape';
@@ -389,8 +411,26 @@ export interface EditableShapeSpan {
   rotation: number;
   flipX: boolean;
   flipY: boolean;
-  fill: string; // rgba string
+  fill: string; // CSS colour string or 'transparent'
+  stroke?: string; // CSS colour string or 'transparent'
+  strokeWidth?: number;
+  variant?: ShapeVariantType;
+  opacity?: number;
+  isHighlight?: boolean;
+  svgPath?: string;
+  hasFill?: boolean;
+  hasStroke?: boolean;
+  fillMode?: number;
+  strokeLineCap?: 'butt' | 'round' | 'square';
+  strokeLineJoin?: 'miter' | 'round' | 'bevel';
+  viewBox?: string;
+  baseWidth?: number;
+  baseHeight?: number;
+  fillRule?: 'nonzero' | 'evenodd';
   pdfObjectIndex: number;
+  pdfAnnotIndex?: number;
+  annotSubtype?: string;
+  zIndex?: number;
 }
 
 export type FormFieldVariantType = 'text-input' | 'checkbox' | 'radio' | 'dropdown' | 'signature' | 'attachment' | 'button';
@@ -423,6 +463,17 @@ export interface EditableFormFieldSpan {
   borderStyle?: 'solid' | 'dashed' | 'dotted' | 'none' | 'inset' | 'underline';
   borderRadius?: number;
   textAlign?: 'left' | 'center' | 'right';
+  password?: boolean;
+  multiline?: boolean;
+  exportValue?: string;
+  tooltip?: string;
+  maxLength?: number;
+  isComb?: boolean;
+  combCellCount?: number;
+  doNotSpellCheck?: boolean;
+  doNotScroll?: boolean;
+  formatType?: string;
+  zIndex?: number;
 }
 
 export type EditableSpan = EditableTextSpan | EditableImageSpan | EditableShapeSpan | EditableFormFieldSpan;
@@ -431,11 +482,14 @@ export interface TextMutationOptions {
   text: string;
   fontSize?: number;
   fontFamily?: string;
+  rawFontFamily?: string;
   color?: ColorRgba;
   left?: number;
   top?: number;
   lineHeight?: number;
   letterSpacing?: string;
+  wordSpacing?: number;
+  scaleX?: number;
   reflowParagraph?: boolean;
   fontWeight?: string;
   fontStyle?: string;
@@ -444,6 +498,7 @@ export interface TextMutationOptions {
   backgroundColor?: string;
   textAlign?: 'left' | 'center' | 'right';
   lines?: TextLine[];
+  forceTextRestore?: boolean;
 }
 
 export type AppInteractionMode = 'canvas' | 'organize' | 'select' | 'text-edit';
@@ -558,6 +613,50 @@ export interface CompressSummary {
   objectStreamsUsed: boolean;
 }
 
+/**
+ * Image metadata gathered during document compression inspection.
+ */
+export interface ImageInspectionRecord {
+  width: number;
+  height: number;
+  byteLength: number;
+  filter: string;
+  colorSpace?: string;
+  hasMask?: boolean;
+}
+
+/**
+ * Page boundary dimensions in PDF user points.
+ */
+export interface PageDimensionRecord {
+  width: number;
+  height: number;
+}
+
+/**
+ * Breakdown of estimated savings across individual compression facets.
+ */
+export interface CompressionSavingsBreakdown {
+  thumbnails: number;
+  pieceInfo: number;
+  metadata: number;
+  objectStreams: number;
+  images: number;
+  rasterisation?: number;
+}
+
+/**
+ * Structured compression estimate output.
+ */
+export interface CompressionEstimate {
+  originalSizeBytes: number;
+  estimatedSizeBytes: number;
+  estimatedSavingsBytes: number;
+  estimatedSavingsPercentage: number;
+  breakdown: CompressionSavingsBreakdown;
+  isMonotonicallyClamped: boolean;
+}
+
 /** Detailed inspection results of compressibility in the document. */
 export interface CompressionInspection {
   originalSizeBytes: number;
@@ -568,6 +667,16 @@ export interface CompressionInspection {
   thumbnailCount: number;
   hasPieceInfo: boolean;
   hasXmpMetadata: boolean;
+  jpegImageCount?: number;
+  jpegImageBytes?: number;
+  totalStreamBytes?: number;
+  structuralBytes?: number;
+  hasObjectStreams?: boolean;
+  thumbnailBytes?: number;
+  metadataBytes?: number;
+  pieceInfoBytes?: number;
+  images?: ImageInspectionRecord[];
+  pageDimensions?: PageDimensionRecord[];
 }
 
 /**
@@ -597,4 +706,11 @@ export type {
   SignatureComplianceCheck,
   EsigaComplianceReport,
 } from '../services/pdf/operations/signature-ops';
+
+export type {
+  ColorAdjustmentOptions,
+  ColorAdjustmentPreset,
+  ColorAdjustmentScope,
+  ColorAdjustmentResult,
+} from '../services/pdf/operations/color-adjustment-ops';
 
