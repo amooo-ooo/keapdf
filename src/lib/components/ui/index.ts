@@ -39,6 +39,21 @@ export {
 } from './control-row/index.js';
 
 export {
+	PropertyRow,
+	type PropertyRowProps,
+} from './property-row/index.js';
+
+export {
+	PropertyCard,
+	type PropertyCardProps,
+} from './property-card/index.js';
+
+export {
+	PropertySection,
+	type PropertySectionProps,
+} from './property-section/index.js';
+
+export {
 	Input,
 } from './input/index.js';
 
@@ -68,6 +83,10 @@ export {
 
 export {
 	Slider,
+	sliderVariants,
+	type SliderVariant,
+	type SliderSize,
+	type SliderRootProps,
 } from './slider/index.js';
 
 export {
@@ -92,6 +111,8 @@ export {
 	SelectScrollUpButton,
 	SelectSeparator,
 	SelectTrigger,
+	type SelectTriggerVariant,
+	type SelectTriggerProps,
 } from './select/index.js';
 
 export {
@@ -135,6 +156,20 @@ export {
 } from './dropdown-menu/index.js';
 
 export {
+	DropdownButton,
+	dropdownButtonVariants,
+	dropdownSplitRootVariants,
+	dropdownSplitActionVariants,
+	dropdownSplitTriggerVariants,
+	DROPDOWN_BUTTON_FILL_CLASSES,
+	DROPDOWN_BUTTON_DIVIDER_CLASSES,
+	type DropdownButtonProps,
+	type DropdownButtonVariant,
+	type DropdownButtonSize,
+	type DropdownButtonFillColor,
+} from './dropdown-button/index.js';
+
+export {
 	Popover,
 	PopoverClose,
 	PopoverContent,
@@ -161,3 +196,62 @@ export {
 	ResizablePane,
 	ResizablePaneGroup,
 } from './resizable/index.js';
+
+export {
+	Carousel,
+	CarouselContent,
+	CarouselItem,
+	CarouselIndicators,
+	CarouselPrevious,
+	CarouselNext,
+	carouselVariants,
+	clampSlideIndex,
+	resolveNextSlideIndex,
+	resolvePreviousSlideIndex,
+	canNavigatePrevious,
+	canNavigateNext,
+	getCarouselCtx,
+	setCarouselCtx,
+	type CarouselRootProps,
+	type CarouselContentProps,
+	type CarouselItemProps,
+	type CarouselIndicatorsProps,
+	type CarouselPreviousProps,
+	type CarouselNextProps,
+	type CarouselVariant,
+	type CarouselSize,
+	type CarouselOrientation,
+	type CarouselContext,
+} from './carousel/index.js';
+
+export {
+	Card,
+	CardRoot,
+	CardHeader,
+	CardTitle,
+	CardDescription,
+	CardActions,
+	CardAction,
+	CardContent,
+	CardFooter,
+	cardVariants,
+	cardHeaderVariants,
+	cardTitleVariants,
+	cardDescriptionVariants,
+	cardActionsVariants,
+	cardContentVariants,
+	cardFooterVariants,
+	getCardCtx,
+	setCardCtx,
+	type CardRootProps,
+	type CardHeaderProps,
+	type CardTitleProps,
+	type CardDescriptionProps,
+	type CardActionsProps,
+	type CardContentProps,
+	type CardFooterProps,
+	type CardVariant,
+	type CardSize,
+	type CardContext,
+} from './card/index.js';
+
