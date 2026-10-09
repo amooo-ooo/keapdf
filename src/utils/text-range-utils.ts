@@ -1,5 +1,6 @@
 import type { TextElement, TextElementLine, TextSegment } from '../stores/canvas-types';
 import type { TextLine, TextWord } from '../core/types';
+import { cleanSubsetPrefix } from '../core/pdfium-helpers';
 
 /**
  * Information about a selected range within a text container.
@@ -287,15 +288,17 @@ export function setSelectionCharOffsets(container: HTMLElement, start: number, e
 /**
  * Compares two text segments to determine if their visual styling properties are identical.
  */
-function areSegmentsStylisticallyEqual(a: TextSegment, b: TextSegment): boolean {
+export function areSegmentsStylisticallyEqual(a: TextSegment, b: TextSegment): boolean {
   return (
     a.fontSize === b.fontSize &&
     a.fontFamily === b.fontFamily &&
-    a.rawFontFamily === b.rawFontFamily &&
+    cleanSubsetPrefix(a.rawFontFamily || '') === cleanSubsetPrefix(b.rawFontFamily || '') &&
     a.fontWeight === b.fontWeight &&
     a.fontStyle === b.fontStyle &&
     a.color === b.color &&
     a.backgroundColor === b.backgroundColor &&
+    (a.letterSpacing || 'normal') === (b.letterSpacing || 'normal') &&
+    (a.wordSpacing || 0) === (b.wordSpacing || 0) &&
     Boolean(a.underline) === Boolean(b.underline) &&
     Boolean(a.strikethrough) === Boolean(b.strikethrough)
   );
@@ -316,7 +319,7 @@ export function splitSegmentsAtRange(
   segments: TextSegment[],
   start: number,
   end: number,
-  styleUpdate: Partial<TextSegment>
+  styleUpdate: Partial<TextSegment> = {}
 ): TextSegment[] {
   if (start >= end || segments.length === 0) {
     return segments.map((s) => ({ ...s }));
@@ -340,7 +343,7 @@ export function splitSegmentsAtRange(
     const overlapStart = Math.max(segStart, start);
     const overlapEnd = Math.min(segEnd, end);
 
-    // 1. Portion before overlap
+    // Portion before overlap
     if (segStart < overlapStart) {
       const beforeText = seg.text.slice(0, overlapStart - segStart);
       if (beforeText.length > 0) {
@@ -352,18 +355,22 @@ export function splitSegmentsAtRange(
       }
     }
 
-    // 2. Overlapping portion with updated styling
+    // Overlapping portion with updated styling
     const styledText = seg.text.slice(overlapStart - segStart, overlapEnd - segStart);
     if (styledText.length > 0) {
+      const resolvedSegStyle = { ...styleUpdate };
+      if (resolvedSegStyle.fontFamily) {
+        resolvedSegStyle.rawFontFamily = resolvedSegStyle.fontFamily;
+      }
       result.push({
         ...seg,
-        ...styleUpdate,
+        ...resolvedSegStyle,
         text: styledText,
         charCount: styledText.length,
       });
     }
 
-    // 3. Portion after overlap
+    // Portion after overlap
     if (segEnd > overlapEnd) {
       const afterText = seg.text.slice(overlapEnd - segStart);
       if (afterText.length > 0) {
@@ -409,18 +416,19 @@ export function coalesceSegments(segments: TextSegment[]): TextSegment[] {
 /**
  * Compares two TextWord tokens to determine if their visual styling properties are identical.
  */
-function areWordsStylisticallyEqual(a: TextWord, b: TextWord): boolean {
+export function areWordsStylisticallyEqual(a: TextWord, b: TextWord): boolean {
   const colorA = a.color ? `${a.color.r},${a.color.g},${a.color.b},${a.color.a}` : '';
   const colorB = b.color ? `${b.color.r},${b.color.g},${b.color.b},${b.color.a}` : '';
   return (
     a.fontSize === b.fontSize &&
     a.fontFamily === b.fontFamily &&
-    a.rawFontFamily === b.rawFontFamily &&
+    cleanSubsetPrefix(a.rawFontFamily || '') === cleanSubsetPrefix(b.rawFontFamily || '') &&
     a.matchedFontFamily === b.matchedFontFamily &&
     a.fontWeight === b.fontWeight &&
     a.fontStyle === b.fontStyle &&
     colorA === colorB &&
     a.backgroundColor === b.backgroundColor &&
+    (a.letterSpacing || 'normal') === (b.letterSpacing || 'normal') &&
     Boolean(a.underline) === Boolean(b.underline) &&
     Boolean(a.strikethrough) === Boolean(b.strikethrough)
   );
@@ -440,7 +448,7 @@ export function splitWordsAtRange(
   words: TextWord[],
   start: number,
   end: number,
-  styleUpdate: Partial<TextWord>
+  styleUpdate: Partial<TextWord> = {}
 ): TextWord[] {
   if (start >= end || words.length === 0) {
     return words.map((w) => ({ ...w }));
@@ -470,7 +478,7 @@ export function splitWordsAtRange(
     const totalLen = Math.max(1, wordLen);
     const charW = (word.width && word.width > 0 ? word.width : word.fontSize * 0.52 * totalLen) / totalLen;
 
-    // 1. Portion before overlap
+    // Portion before overlap
     if (wordStart < overlapStart) {
       const beforeText = word.text.slice(0, overlapStart - wordStart);
       if (beforeText.length > 0) {
@@ -487,14 +495,19 @@ export function splitWordsAtRange(
       }
     }
 
-    // 2. Overlapping portion with updated styling
+    // Overlapping portion with updated styling
     const styledText = word.text.slice(overlapStart - wordStart, overlapEnd - wordStart);
     if (styledText.length > 0) {
       const sLeft = word.left + (overlapStart - wordStart) * charW;
       const sW = styledText.length * charW;
+      const resolvedWordStyle = { ...styleUpdate };
+      if (resolvedWordStyle.fontFamily) {
+        resolvedWordStyle.rawFontFamily = resolvedWordStyle.fontFamily;
+        resolvedWordStyle.matchedFontFamily = resolvedWordStyle.fontFamily;
+      }
       result.push({
         ...word,
-        ...styleUpdate,
+        ...resolvedWordStyle,
         text: styledText,
         charCount: styledText.length,
         hasPrecedingSpace: wordStart === overlapStart ? word.hasPrecedingSpace : false,
@@ -504,7 +517,7 @@ export function splitWordsAtRange(
       });
     }
 
-    // 3. Portion after overlap
+    // Portion after overlap
     if (wordEnd > overlapEnd) {
       const afterText = word.text.slice(overlapEnd - wordStart);
       if (afterText.length > 0) {
@@ -580,9 +593,10 @@ export function applyStyleToCanvasElement(
   element: TextElement,
   start: number,
   end: number,
-  styleUpdate: Partial<TextSegment>
-): { lines: TextElementLine[]; segments: TextSegment[] } {
+  styleUpdate: Partial<TextSegment> & { lineHeight?: number }
+): { lines: TextElementLine[]; segments: TextSegment[]; letterSpacing?: string; lineHeight?: number } {
   const lines = element.lines && element.lines.length > 0 ? element.lines : undefined;
+  const { lineHeight: updatedLineHeight, ...segmentStyleUpdate } = styleUpdate;
   if (!lines) {
     const baseSegments: TextSegment[] = element.segments && element.segments.length > 0
       ? element.segments
@@ -594,18 +608,28 @@ export function applyStyleToCanvasElement(
           color: element.color,
           fontWeight: element.fontWeight,
           fontStyle: element.fontStyle,
+          letterSpacing: element.letterSpacing,
+          wordSpacing: element.wordSpacing,
           underline: element.underline,
           strikethrough: element.strikethrough,
           backgroundColor: element.backgroundColor,
           charCount: (element.text || '').length,
         }];
-    const updatedSegments = splitSegmentsAtRange(baseSegments, start, end, styleUpdate);
+    const updatedSegments = splitSegmentsAtRange(baseSegments, start, end, segmentStyleUpdate);
     const updatedLines: TextElementLine[] = [{
       text: element.text || '',
       fontSize: element.fontSize,
+      lineHeight: updatedLineHeight ?? element.lineHeight,
+      letterSpacing: segmentStyleUpdate.letterSpacing ?? element.letterSpacing,
+      wordSpacing: segmentStyleUpdate.wordSpacing ?? element.wordSpacing,
       segments: updatedSegments,
     }];
-    return { lines: updatedLines, segments: updatedSegments };
+    return {
+      lines: updatedLines,
+      segments: updatedSegments,
+      ...(segmentStyleUpdate.letterSpacing !== undefined ? { letterSpacing: segmentStyleUpdate.letterSpacing } : {}),
+      ...(updatedLineHeight !== undefined ? { lineHeight: updatedLineHeight } : {}),
+    };
   }
 
   const updatedLines: TextElementLine[] = [];
@@ -627,6 +651,8 @@ export function applyStyleToCanvasElement(
           color: element.color,
           fontWeight: element.fontWeight,
           fontStyle: element.fontStyle,
+          letterSpacing: line.letterSpacing ?? element.letterSpacing,
+          wordSpacing: line.wordSpacing ?? element.wordSpacing,
           underline: line.underline ?? element.underline,
           strikethrough: line.strikethrough ?? element.strikethrough,
           backgroundColor: element.backgroundColor,
@@ -638,14 +664,31 @@ export function applyStyleToCanvasElement(
     const lineEnd = currentOffset + lineTextLen;
 
     if (lineEnd <= start || lineStart >= end) {
-      updatedLines.push({ ...line, segments: lineSegments.map((s) => ({ ...s })) });
+      updatedLines.push({
+        ...line,
+        ...(updatedLineHeight !== undefined ? { lineHeight: updatedLineHeight } : {}),
+        segments: lineSegments.map((s) => ({ ...s })),
+      });
       allSegments.push(...lineSegments.map((s) => ({ ...s })));
     } else {
       const relStart = Math.max(0, start - lineStart);
       const relEnd = Math.min(lineTextLen, end - lineStart);
-      const newSegments = splitSegmentsAtRange(lineSegments, relStart, relEnd, styleUpdate);
+      const newSegments = splitSegmentsAtRange(lineSegments, relStart, relEnd, segmentStyleUpdate);
+      const allUnderline = newSegments.length > 0 && newSegments.every((s) => Boolean(s.underline));
+      const anyUnderline = newSegments.some((s) => Boolean(s.underline));
+      const allStrike = newSegments.length > 0 && newSegments.every((s) => Boolean(s.strikethrough));
+      const anyStrike = newSegments.some((s) => Boolean(s.strikethrough));
+      const allSameLetterSpacing =
+        newSegments.length > 0 &&
+        newSegments.every((s) => s.letterSpacing === newSegments[0].letterSpacing);
       updatedLines.push({
         ...line,
+        ...(updatedLineHeight !== undefined ? { lineHeight: updatedLineHeight } : {}),
+        ...(allSameLetterSpacing && newSegments[0].letterSpacing !== undefined
+          ? { letterSpacing: newSegments[0].letterSpacing }
+          : {}),
+        underline: allUnderline ? true : (anyUnderline ? undefined : false),
+        strikethrough: allStrike ? true : (anyStrike ? undefined : false),
         segments: newSegments,
       });
       allSegments.push(...newSegments);
@@ -653,7 +696,12 @@ export function applyStyleToCanvasElement(
     currentOffset = lineEnd;
   }
 
-  return { lines: updatedLines, segments: allSegments };
+  return {
+    lines: updatedLines,
+    segments: allSegments,
+    ...(segmentStyleUpdate.letterSpacing !== undefined ? { letterSpacing: segmentStyleUpdate.letterSpacing } : {}),
+    ...(updatedLineHeight !== undefined ? { lineHeight: updatedLineHeight } : {}),
+  };
 }
 
 /**
@@ -664,11 +712,16 @@ export function applyStyleToPdfLines(
   lines: TextLine[],
   start: number,
   end: number,
-  styleUpdate: Partial<TextWord>
+  styleUpdate: Partial<TextWord> & { lineHeight?: number }
 ): { updatedLines: TextLine[]; updatedText: string } {
+  const { lineHeight: updatedLineHeight, ...wordStyleUpdate } = styleUpdate;
   if (start >= end || lines.length === 0) {
     return {
-      updatedLines: lines.map((l) => ({ ...l, words: l.words?.map((w) => ({ ...w })) })),
+      updatedLines: lines.map((l) => ({
+        ...l,
+        ...(updatedLineHeight !== undefined ? { lineHeight: updatedLineHeight } : {}),
+        words: l.words?.map((w) => ({ ...w })),
+      })),
       updatedText: lines.map((l) => l.text).join('\n'),
     };
   }
@@ -689,7 +742,10 @@ export function applyStyleToPdfLines(
       const lineEnd = currentOffset + lineLen;
 
       if (lineEnd <= start || lineStart >= end) {
-        updatedLines.push({ ...line });
+        updatedLines.push({
+          ...line,
+          ...(updatedLineHeight !== undefined ? { lineHeight: updatedLineHeight } : {}),
+        });
       } else {
         const relStart = Math.max(0, start - lineStart);
         const relEnd = Math.min(lineLen, end - lineStart);
@@ -711,10 +767,29 @@ export function applyStyleToPdfLines(
           color: line.color,
           fontWeight: line.fontWeight,
           fontStyle: line.fontStyle,
+          letterSpacing: line.letterSpacing,
+          underline: line.underline,
+          strikethrough: line.strikethrough,
+          backgroundColor: line.backgroundColor,
         };
-        const newWords = splitWordsAtRange([dummyWord], relStart, relEnd, styleUpdate);
+        const newWords = splitWordsAtRange([dummyWord], relStart, relEnd, wordStyleUpdate);
+        const allUnderline = newWords.length > 0 && newWords.every((w) => Boolean(w.underline));
+        const anyUnderline = newWords.some((w) => Boolean(w.underline));
+        const allStrike = newWords.length > 0 && newWords.every((w) => Boolean(w.strikethrough));
+        const anyStrike = newWords.some((w) => Boolean(w.strikethrough));
+        const allBg = newWords.length > 0 && newWords.every((w) => Boolean(w.backgroundColor) && w.backgroundColor === newWords[0].backgroundColor);
+        const allSameLetterSpacing =
+          newWords.length > 0 &&
+          newWords.every((w) => w.letterSpacing === newWords[0].letterSpacing);
         updatedLines.push({
           ...line,
+          ...(updatedLineHeight !== undefined ? { lineHeight: updatedLineHeight } : {}),
+          ...(allSameLetterSpacing && newWords[0].letterSpacing !== undefined
+            ? { letterSpacing: newWords[0].letterSpacing }
+            : {}),
+          underline: allUnderline ? true : (anyUnderline ? undefined : false),
+          strikethrough: allStrike ? true : (anyStrike ? undefined : false),
+          backgroundColor: allBg ? newWords[0].backgroundColor : undefined,
           words: newWords,
         });
       }
@@ -744,6 +819,10 @@ export function applyStyleToPdfLines(
 
       const wordWithSpace: TextWord = {
         ...word,
+        letterSpacing: word.letterSpacing ?? line.letterSpacing,
+        underline: word.underline ?? line.underline,
+        strikethrough: word.strikethrough ?? line.strikethrough,
+        backgroundColor: word.backgroundColor ?? line.backgroundColor,
         hasPrecedingSpace: hasPrecedingSpace || Boolean(word.hasPrecedingSpace),
       };
 
@@ -752,7 +831,7 @@ export function applyStyleToPdfLines(
       } else {
         const relStart = Math.max(0, start - wordStart);
         const relEnd = Math.min(wordLen, end - wordStart);
-        const split = splitWordsAtRange([wordWithSpace], relStart, relEnd, styleUpdate);
+        const split = splitWordsAtRange([wordWithSpace], relStart, relEnd, wordStyleUpdate);
         lineWords.push(...split);
       }
 
@@ -770,9 +849,25 @@ export function applyStyleToPdfLines(
       return `${space}${w.text}`;
     }).join('');
 
+    const allWordsUnderline = coalesced.length > 0 && coalesced.every((w) => Boolean(w.underline));
+    const anyWordUnderline = coalesced.some((w) => Boolean(w.underline));
+    const allWordsStrike = coalesced.length > 0 && coalesced.every((w) => Boolean(w.strikethrough));
+    const anyWordStrike = coalesced.some((w) => Boolean(w.strikethrough));
+    const allWordsBg = coalesced.length > 0 && coalesced.every((w) => Boolean(w.backgroundColor) && w.backgroundColor === coalesced[0].backgroundColor);
+    const allWordsSameLetterSpacing =
+      coalesced.length > 0 &&
+      coalesced.every((w) => w.letterSpacing === coalesced[0].letterSpacing);
+
     updatedLines.push({
       ...line,
       text: lineText,
+      ...(updatedLineHeight !== undefined ? { lineHeight: updatedLineHeight } : {}),
+      ...(allWordsSameLetterSpacing && coalesced[0].letterSpacing !== undefined
+        ? { letterSpacing: coalesced[0].letterSpacing }
+        : {}),
+      underline: allWordsUnderline ? true : (anyWordUnderline ? undefined : false),
+      strikethrough: allWordsStrike ? true : (anyWordStrike ? undefined : false),
+      backgroundColor: allWordsBg ? coalesced[0].backgroundColor : undefined,
       words: coalesced,
     });
   }
@@ -832,6 +927,53 @@ export function getSegmentAtCharOffset(segments: TextSegment[], charOffset: numb
       return seg;
     }
     currentOffset += segLen;
+  }
+  return null;
+}
+
+/**
+ * Finds the TextSegment located at the specified character offset within structured lines.
+ * Accounts for newline characters between successive lines.
+ *
+ * @param lines Array of structured canvas text lines.
+ * @param charOffset Character offset relative to plain text container content.
+ * @return The matching TextSegment or null if not found.
+ */
+export function getSegmentAtCharOffsetFromLines(
+  lines: TextElementLine[],
+  charOffset: number
+): TextSegment | null {
+  let currentOffset = 0;
+  let lastSeg: TextSegment | null = null;
+  for (let lIdx = 0; lIdx < lines.length; lIdx++) {
+    if (lIdx > 0) {
+      if (charOffset === currentOffset && lastSeg) {
+        return lastSeg;
+      }
+      currentOffset += 1;
+    }
+    const line = lines[lIdx];
+    const segments = line.segments && line.segments.length > 0 ? line.segments : [];
+    if (segments.length === 0) {
+      const lineLen = line.text?.length ?? 0;
+      if (charOffset >= currentOffset && charOffset < currentOffset + lineLen) {
+        return null;
+      }
+      lastSeg = null;
+      currentOffset += lineLen;
+      continue;
+    }
+    for (const seg of segments) {
+      const segLen = seg.text.length;
+      if (charOffset >= currentOffset && charOffset < currentOffset + segLen) {
+        return seg;
+      }
+      lastSeg = seg;
+      currentOffset += segLen;
+    }
+  }
+  if (charOffset === currentOffset && lastSeg) {
+    return lastSeg;
   }
   return null;
 }
