@@ -378,7 +378,10 @@ export function createElementFromPayload(
   if (payload.color != null) elementOverrides.color = payload.color;
   if (payload.fontSize != null) elementOverrides.fontSize = payload.fontSize;
   if (payload.fontWeight != null) elementOverrides.fontWeight = payload.fontWeight;
+  if (payload.fontStyle != null) elementOverrides.fontStyle = payload.fontStyle;
   if (payload.fontFamily != null) elementOverrides.fontFamily = payload.fontFamily;
+  if (payload.rawFontFamily != null) elementOverrides.rawFontFamily = payload.rawFontFamily;
+  if (payload.lineHeight != null) elementOverrides.lineHeight = payload.lineHeight;
   if (payload.label != null) elementOverrides.label = payload.label;
   if (payload.backgroundColor != null) elementOverrides.backgroundColor = payload.backgroundColor;
   if (payload.borderColor != null) elementOverrides.borderColor = payload.borderColor;
