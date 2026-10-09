@@ -194,15 +194,37 @@ export function collectEraserCandidates(
 ): ErasableCandidate[] {
   const candidates: ErasableCandidate[] = [];
 
-  // 1. Canvas layer elements (highest stacking tier: 10000+)
-  const pageCanvasElements = canvasElements.filter((el) => el.pageIndex === pageIndex && el.visible !== false);
+  // Canvas layer elements (highest stacking tier: 10000+ for front band, 10+ for back band)
+  const pageCanvasElements = canvasElements.filter(
+    (el) => el.pageIndex === pageIndex && el.visible !== false && !el.locked,
+  );
   for (let i = 0; i < pageCanvasElements.length; i++) {
     const el = pageCanvasElements[i];
     let isHit = false;
 
     if (el.kind === 'path') {
       const pathEl = el as PathElement;
-      isHit = isPointNearPath(point, pathEl.points, pathEl.strokeWidth || 2, radius);
+      let testPoint = point;
+      const rotDeg = pathEl.rotation || 0;
+      if (rotDeg !== 0 || pathEl.flipX || pathEl.flipY) {
+        const cx = pathEl.x + pathEl.width / 2;
+        const cy = pathEl.y + pathEl.height / 2;
+        let dx = point.x - cx;
+        let dy = point.y - cy;
+        if (rotDeg !== 0) {
+          const rad = (-rotDeg * Math.PI) / 180;
+          const cos = Math.cos(rad);
+          const sin = Math.sin(rad);
+          const rx = dx * cos - dy * sin;
+          const ry = dx * sin + dy * cos;
+          dx = rx;
+          dy = ry;
+        }
+        if (pathEl.flipX) dx = -dx;
+        if (pathEl.flipY) dy = -dy;
+        testPoint = { x: cx + dx, y: cy + dy };
+      }
+      isHit = isPointNearPath(testPoint, pathEl.points, pathEl.strokeWidth || 2, radius);
       if (!isHit && pathEl.points.length <= 1 && pathEl.width > 0 && pathEl.height > 0) {
         isHit = isPointInExpandedRotatedRect(point, { x: pathEl.x, y: pathEl.y, width: pathEl.width, height: pathEl.height }, pathEl.rotation || 0, radius);
       }
@@ -218,11 +240,12 @@ export function collectEraserCandidates(
     if (isHit) {
       const category = getCanvasElementCategory(el);
       const zLevel = category === 'highlight' || category === 'redaction' ? category : `canvas_${el.id}`;
+      const isBackBand = typeof el.zIndex === 'number' && el.zIndex < 10;
       candidates.push({
         id: `canvas_${el.id}`,
         source: 'canvas',
         pageIndex,
-        zIndex: 10000 + i,
+        zIndex: (isBackBand ? 10 : 10000) + i,
         zLevel,
         category,
         bounds: { x: el.x, y: el.y, width: el.width, height: el.height },
@@ -233,7 +256,7 @@ export function collectEraserCandidates(
     }
   }
 
-  // 2. Native PDF annotations (stacking tier: 2000+)
+  // Native PDF annotations (stacking tier: 2000+)
   if (pdfAnnotations && pdfAnnotations.length > 0) {
     for (const annot of pdfAnnotations) {
       // Exclude widget form fields unless specifically needed
@@ -271,15 +294,56 @@ export function collectEraserCandidates(
     }
   }
 
-  // 3. PDF Shape Spans (stacking tier: 1000+)
+  // PDF Shape Spans (stacking tier: 1000+)
   if (pdfShapeSpans && pdfShapeSpans.length > 0) {
+    const addedAnnotIndices = new Set(
+      candidates
+        .filter((c) => c.source === 'pdf-annotation' && typeof c.pdfAnnotIndex === 'number')
+        .map((c) => c.pdfAnnotIndex!)
+    );
     for (const shape of pdfShapeSpans) {
       if (shape.pageIndex !== pageIndex) continue;
+      if (typeof shape.pdfAnnotIndex === 'number' && shape.pdfAnnotIndex >= 0) {
+        if (addedAnnotIndices.has(shape.pdfAnnotIndex)) continue;
+        const rect = { x: shape.left, y: shape.top, width: shape.width, height: shape.height };
+        if (isPointInExpandedRotatedRect(point, rect, shape.rotation || 0, radius)) {
+          const isRedaction = shape.fill === '#000000' || shape.fill === 'rgba(0, 0, 0, 1)';
+          const category: AnnotationCategory = shape.isHighlight
+            ? 'highlight'
+            : isRedaction
+              ? 'redaction'
+              : 'shape';
+          const zLevel = category === 'highlight' || category === 'redaction'
+            ? category
+            : `pdf_annot_${shape.pdfAnnotIndex}`;
+          candidates.push({
+            id: `pdf_annot_${pageIndex}_${shape.pdfAnnotIndex}`,
+            source: 'pdf-annotation',
+            pageIndex,
+            zIndex: 2000 + shape.pdfAnnotIndex,
+            zLevel,
+            category,
+            bounds: rect,
+            pdfAnnotIndex: shape.pdfAnnotIndex,
+            pdfSpanId: shape.id,
+            raw: shape,
+          });
+          addedAnnotIndices.add(shape.pdfAnnotIndex);
+        }
+        continue;
+      }
+      if (shape.pdfObjectIndex < 0) continue;
       const rect = { x: shape.left, y: shape.top, width: shape.width, height: shape.height };
       if (isPointInExpandedRotatedRect(point, rect, shape.rotation || 0, radius)) {
         const isRedaction = shape.fill === '#000000' || shape.fill === 'rgba(0, 0, 0, 1)';
-        const category: AnnotationCategory = isRedaction ? 'redaction' : 'shape';
-        const zLevel = isRedaction ? 'redaction' : `pdf_shape_${shape.pdfObjectIndex}`;
+        const category: AnnotationCategory = shape.isHighlight
+          ? 'highlight'
+          : isRedaction
+            ? 'redaction'
+            : 'shape';
+        const zLevel = category === 'highlight' || category === 'redaction'
+          ? category
+          : `pdf_shape_${shape.pdfObjectIndex}`;
         candidates.push({
           id: `pdf_shape_${pageIndex}_${shape.pdfObjectIndex}`,
           source: 'pdf-shape',
@@ -289,13 +353,14 @@ export function collectEraserCandidates(
           category,
           bounds: rect,
           pdfObjectIndex: shape.pdfObjectIndex,
+          pdfSpanId: shape.id,
           raw: shape,
         });
       }
     }
   }
 
-  // 4. PDF Text Highlight Backgrounds (stacking tier: 100+)
+  // PDF Text Highlight Backgrounds (stacking tier: 100+)
   if (pdfTextSpans && pdfTextSpans.length > 0) {
     for (const textSpan of pdfTextSpans) {
       if (textSpan.pageIndex !== pageIndex) continue;
