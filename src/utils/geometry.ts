@@ -218,6 +218,29 @@ export function pointInRotatedRect(point: Point, rect: Rect, rotationDegrees: nu
   );
 }
 
+/**
+ * Checks whether two axis-aligned rectangles intersect or overlap.
+ *
+ * @param r1 First rectangle.
+ * @param r2 Second rectangle.
+ * @return True if the rectangles overlap, false otherwise.
+ */
+export function doRectanglesIntersect(
+  r1: { x?: number; left?: number; y?: number; top?: number; width: number; height: number },
+  r2: { x?: number; left?: number; y?: number; top?: number; width: number; height: number },
+): boolean {
+  const x1 = r1.x ?? r1.left ?? 0;
+  const y1 = r1.y ?? r1.top ?? 0;
+  const x2 = r2.x ?? r2.left ?? 0;
+  const y2 = r2.y ?? r2.top ?? 0;
+  return !(
+    x2 > x1 + r1.width ||
+    x2 + r2.width < x1 ||
+    y2 > y1 + r1.height ||
+    y2 + r2.height < y1
+  );
+}
+
 /** Get CSS cursor style for a given handle position. */
 export function getHandleCursor(handle: HandlePosition): string {
   switch (handle) {
@@ -399,6 +422,67 @@ export function calculatePageCenteringScroll(
 }
 
 /**
+ * Parameters for calculating viewport scroll adjustments to preserve a page visual centre on screen during rotation.
+ */
+export interface CenterPreservingRotationScrollParams {
+  currentScrollLeft: number;
+  currentScrollTop: number;
+  preRotationCenter: Point;
+  postRotationCenter: Point;
+}
+
+/**
+ * Calculates updated viewport scroll offsets to keep a target point (such as a page visual centre)
+ * invariant in screen coordinates across layout transformations.
+ */
+export function calculateCenterPreservingScroll(
+  params: CenterPreservingRotationScrollParams,
+): ViewportScrollPosition {
+  const deltaX = params.postRotationCenter.x - params.preRotationCenter.x;
+  const deltaY = params.postRotationCenter.y - params.preRotationCenter.y;
+
+  return {
+    scrollLeft: Math.max(0, Math.round(params.currentScrollLeft + deltaX)),
+    scrollTop: Math.max(0, Math.round(params.currentScrollTop + deltaY)),
+  };
+}
+
+/**
+ * Parameters for arithmetic page centre preservation without direct DOM measurements.
+ */
+export interface ArithmeticRotationScrollParams {
+  currentScrollLeft: number;
+  currentScrollTop: number;
+  prevPageLayout: PageLayoutDimensions;
+  newPageLayout: PageLayoutDimensions;
+  prevContentWidth?: number;
+  newContentWidth?: number;
+}
+
+/**
+ * Calculates scroll adjustments from layout dimension deltas to preserve a page visual centre.
+ */
+export function calculateArithmeticRotationScroll(
+  params: ArithmeticRotationScrollParams,
+): ViewportScrollPosition {
+  const deltaH = params.newPageLayout.height - params.prevPageLayout.height;
+  const deltaY = deltaH / 2;
+
+  let deltaX = 0;
+  if (params.prevContentWidth !== undefined && params.newContentWidth !== undefined) {
+    deltaX = (params.newContentWidth - params.prevContentWidth) / 2;
+  } else {
+    const deltaW = params.newPageLayout.width - params.prevPageLayout.width;
+    deltaX = deltaW / 2;
+  }
+
+  return {
+    scrollLeft: Math.max(0, Math.round(params.currentScrollLeft + deltaX)),
+    scrollTop: Math.max(0, Math.round(params.currentScrollTop + deltaY)),
+  };
+}
+
+/**
  * Rect bounds representing a page layout in viewport or screen coordinates.
  */
 export interface PageLayoutBound {
@@ -574,6 +658,8 @@ export interface ZoomScrollParams {
   pointerViewportY: number;
   paddingLeft?: number;
   paddingTop?: number;
+  newPaddingLeft?: number;
+  newPaddingTop?: number;
 }
 
 /**
@@ -590,19 +676,86 @@ export function calculateZoomScrollOffsets(params: ZoomScrollParams): ViewportSc
     pointerViewportY,
     paddingLeft = 0,
     paddingTop = 0,
+    newPaddingLeft,
+    newPaddingTop,
   } = params;
 
   if (newZoom === currentZoom || currentZoom <= 0) {
     return { scrollLeft, scrollTop };
   }
 
+  const targetPaddingLeft = newPaddingLeft ?? paddingLeft;
+  const targetPaddingTop = newPaddingTop ?? paddingTop;
+
   // Content point in unzoomed space relative to content origin
   const contentX = (scrollLeft + pointerViewportX - paddingLeft) / currentZoom;
   const contentY = (scrollTop + pointerViewportY - paddingTop) / currentZoom;
 
   // New scroll position keeping content point aligned with pointer in viewport
-  const newScrollLeft = Math.max(0, Math.round(contentX * newZoom + paddingLeft - pointerViewportX));
-  const newScrollTop = Math.max(0, Math.round(contentY * newZoom + paddingTop - pointerViewportY));
+  const newScrollLeft = Math.max(0, Math.round(contentX * newZoom + targetPaddingLeft - pointerViewportX));
+  const newScrollTop = Math.max(0, Math.round(contentY * newZoom + targetPaddingTop - pointerViewportY));
+
+  return {
+    scrollLeft: newScrollLeft,
+    scrollTop: newScrollTop,
+  };
+}
+
+/** Parameters for anchor-preserving page-relative zoom scroll calculation. */
+export interface PageAnchorZoomParams {
+  anchorViewportX: number;
+  anchorViewportY: number;
+  normX: number;
+  normY: number;
+  newPageTop: number;
+  newPageLeft: number;
+  newPageWidth: number;
+  newPageHeight: number;
+  visibleWidth: number;
+  contentWidth?: number;
+  visibleOffsetX?: number;
+  anchorToCursor?: boolean;
+}
+
+/**
+ * Calculates viewport scroll offsets for a zoom transition keeping a normalised page anchor
+ * invariant at the target viewport coordinate without vertical or horizontal drift.
+ */
+export function calculatePageAnchorZoomScroll(params: PageAnchorZoomParams): ViewportScrollPosition {
+  const {
+    anchorViewportX,
+    anchorViewportY,
+    normX,
+    normY,
+    newPageTop,
+    newPageLeft,
+    newPageWidth,
+    newPageHeight,
+    visibleWidth,
+    contentWidth,
+    visibleOffsetX = 0,
+    anchorToCursor = false,
+  } = params;
+
+  // Target content point after zoom
+  const targetContentY = newPageTop + normY * newPageHeight;
+  const newScrollTop = Math.max(0, Math.round(targetContentY - anchorViewportY));
+
+  let newScrollLeft: number;
+  // If the page fits comfortably within the visible width and is not anchored to a cursor, keep it centred horizontally
+  if (newPageWidth <= visibleWidth && !anchorToCursor) {
+    if (contentWidth !== undefined && contentWidth > 0) {
+      const pageCenterX = contentWidth / 2;
+      const targetCenterX = visibleOffsetX + visibleWidth / 2;
+      newScrollLeft = Math.max(0, Math.round(pageCenterX - targetCenterX));
+    } else {
+      newScrollLeft = Math.max(0, Math.round(newPageLeft + newPageWidth / 2 - (visibleOffsetX + visibleWidth / 2)));
+    }
+  } else {
+    // Preserve the horizontal anchor point under the cursor
+    const targetContentX = newPageLeft + normX * newPageWidth;
+    newScrollLeft = Math.max(0, Math.round(targetContentX - anchorViewportX));
+  }
 
   return {
     scrollLeft: newScrollLeft,
