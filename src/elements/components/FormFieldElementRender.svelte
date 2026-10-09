@@ -3,6 +3,7 @@
   import type { ElementRenderProps } from '../../core/element-registry';
   import { useCanvasStore } from '../../stores/canvas.svelte';
   import { useCanvasActions } from '../../stores/canvas-actions';
+  import { useEditorActions } from '../../stores/editor-actions';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { ChevronDown, Paperclip, Lock } from 'lucide-svelte';
   import { getCssFontFamily } from '../../services/font-loader';
@@ -17,6 +18,7 @@
 
   const canvasStore = useCanvasStore();
   const canvasActions = useCanvasActions();
+  const editorActions = useEditorActions();
   const editorStore = useEditorStore();
 
   let inputRef = $state<HTMLInputElement | null>(null);
@@ -49,7 +51,7 @@
   });
 
   function commitInlineEdit(): void {
-    if (!editing || editorStore.isReadOnly || !editorStore.canEditValues) return;
+    if (!editing || !editorStore.canEditValues) return;
     const updates: Partial<FormFieldElement> = {};
     if (element.variant === 'text-input' || element.variant === 'dropdown') {
       updates.value = editValue;
@@ -63,6 +65,10 @@
       updates.label = editValue;
     }
     canvasActions.updateElementProperties(element.id, updates);
+    const fieldName = element.sourceFieldName || element.label;
+    if (fieldName && updates.value !== undefined) {
+      editorActions.updateFormFieldValue(element.pageIndex, fieldName, updates.value, false);
+    }
     if (canvasStore.editingElementId === element.id) {
       canvasStore.editingElementId = null;
     }
@@ -211,7 +217,7 @@
   });
 
   const isFieldDisabled = $derived(
-    Boolean(element.readOnly || editorStore.isReadOnly || !editorStore.canEditValues)
+    Boolean(element.readOnly || (!editorStore.canEditValues && editorStore.isReadOnly))
   );
 
   function handleGlyphClick(e: MouseEvent): void {
@@ -220,11 +226,16 @@
     if (element.variant === 'checkbox') {
       const nextVal = isChecked ? 'false' : 'true';
       canvasActions.updateElementProperties(element.id, { value: nextVal });
+      const fieldName = element.sourceFieldName || element.label;
+      if (fieldName) {
+        editorActions.updateFormFieldValue(element.pageIndex, fieldName, nextVal, false);
+      }
     } else if (element.variant === 'radio') {
       const activeOpt = element.options?.[0] || 'true';
       canvasActions.updateElementProperties(element.id, { value: activeOpt });
       const groupName = element.sourceFieldName || element.label;
       if (groupName) {
+        editorActions.updateFormFieldValue(element.pageIndex, groupName, activeOpt, true);
         for (const other of canvasStore.elements) {
           if (other.id !== element.id && other.kind === 'form-field' && (other as FormFieldElement).variant === 'radio') {
             const otherRadio = other as FormFieldElement;
@@ -277,10 +288,10 @@
           onpointerdown={(e) => e.stopPropagation()}
           onclick={(e) => e.stopPropagation()}
           ondblclick={(e) => e.stopPropagation()}
-          class="flex-1 min-w-0 ml-2 bg-transparent outline-none border-b border-primary/50 p-0 m-0 select-text cursor-text leading-none disabled:cursor-not-allowed disabled:opacity-70"
+          class="flex-1 min-w-0 ml-2 bg-transparent outline-none border-b border-border p-0 m-0 select-text cursor-text leading-none disabled:cursor-not-allowed disabled:opacity-70 font-sans"
           style="
             font-size: {(element.fontSize || 13) * zoom}px;
-            font-family: {element.fontFamily ? getCssFontFamily(element.fontFamily) : 'inherit'};
+            font-family: {getCssFontFamily(element.fontFamily)};
             color: {element.color || '#111827'};
           "
         />
@@ -325,10 +336,10 @@
           onpointerdown={(e) => e.stopPropagation()}
           onclick={(e) => e.stopPropagation()}
           ondblclick={(e) => e.stopPropagation()}
-          class="flex-1 min-w-0 ml-2 bg-transparent outline-none border-b border-primary/50 p-0 m-0 select-text cursor-text leading-none disabled:cursor-not-allowed disabled:opacity-70"
+          class="flex-1 min-w-0 ml-2 bg-transparent outline-none border-b border-border p-0 m-0 select-text cursor-text leading-none disabled:cursor-not-allowed disabled:opacity-70 font-sans"
           style="
             font-size: {(element.fontSize || 13) * zoom}px;
-            font-family: {element.fontFamily ? getCssFontFamily(element.fontFamily) : 'inherit'};
+            font-family: {getCssFontFamily(element.fontFamily)};
             color: {element.color || '#111827'};
           "
         />
@@ -344,10 +355,10 @@
         onpointerdown={(e) => e.stopPropagation()}
         onclick={(e) => e.stopPropagation()}
         ondblclick={(e) => e.stopPropagation()}
-        class="w-full h-full bg-transparent outline-none border-none p-0 m-0 select-text cursor-text resize-none leading-normal disabled:cursor-not-allowed disabled:opacity-70"
+        class="w-full h-full bg-transparent outline-none border-none p-0 m-0 select-text cursor-text resize-none leading-normal disabled:cursor-not-allowed disabled:opacity-70 font-sans"
         style="
           font-size: {(element.fontSize || 13) * zoom}px;
-          font-family: {element.fontFamily ? getCssFontFamily(element.fontFamily) : 'inherit'};
+          font-family: {getCssFontFamily(element.fontFamily)};
           color: {element.color || '#111827'};
           text-align: {element.textAlign || 'left'};
         "
@@ -364,10 +375,10 @@
         onpointerdown={(e) => e.stopPropagation()}
         onclick={(e) => e.stopPropagation()}
         ondblclick={(e) => e.stopPropagation()}
-        class="w-full h-full bg-transparent outline-none border-none p-0 m-0 select-text cursor-text leading-none disabled:cursor-not-allowed disabled:opacity-70 {element.variant === 'button' ? 'text-center' : ''}"
+        class="w-full h-full bg-transparent outline-none border-none p-0 m-0 select-text cursor-text leading-none disabled:cursor-not-allowed disabled:opacity-70 font-sans {element.variant === 'button' ? 'text-center' : ''}"
         style="
           font-size: {(element.fontSize || 13) * zoom}px;
-          font-family: {element.fontFamily ? getCssFontFamily(element.fontFamily) : 'inherit'};
+          font-family: {getCssFontFamily(element.fontFamily)};
           color: {element.color || '#111827'};
           text-align: {element.variant === 'button' ? 'center' : (element.textAlign || 'left')};
         "
@@ -385,6 +396,7 @@
         "
         onclick={handleGlyphClick}
         role="radio"
+        aria-label={element.label || element.sourceFieldName || 'Radio option'}
         aria-checked={isChecked}
         tabindex="0"
         onkeydown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); handleGlyphClick(e as unknown as MouseEvent); } }}
@@ -412,6 +424,7 @@
           "
           onclick={handleGlyphClick}
           role="radio"
+          aria-label={element.label || element.sourceFieldName || 'Radio option'}
           aria-checked={isChecked}
           tabindex="0"
           onkeydown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); handleGlyphClick(e as unknown as MouseEvent); } }}
@@ -427,9 +440,9 @@
             ></div>
           {/if}
         </div>
-        <span class="truncate leading-none ml-2 select-none flex-1 min-w-0">{element.label || 'Radio'}</span>
+        <span class="truncate leading-none ml-2 select-none flex-1 min-w-0" title={element.label || 'Radio'}>{element.label || 'Radio'}</span>
         {#if element.required}
-          <span class="text-red-500 font-bold ml-0.5 select-none">*</span>
+          <span class="text-destructive font-bold ml-0.5 select-none">*</span>
         {/if}
       </div>
     {/if}
@@ -445,6 +458,7 @@
         "
         onclick={handleGlyphClick}
         role="checkbox"
+        aria-label={element.label || element.sourceFieldName || 'Checkbox'}
         aria-checked={isChecked}
         tabindex="0"
         onkeydown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); handleGlyphClick(e as unknown as MouseEvent); } }}
@@ -479,6 +493,7 @@
           "
           onclick={handleGlyphClick}
           role="checkbox"
+          aria-label={element.label || element.sourceFieldName || 'Checkbox'}
           aria-checked={isChecked}
           tabindex="0"
           onkeydown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); handleGlyphClick(e as unknown as MouseEvent); } }}
@@ -501,26 +516,45 @@
             </svg>
           {/if}
         </div>
-        <span class="truncate leading-none ml-2 select-none flex-1 min-w-0">{element.label || 'Checkbox'}</span>
+        <span class="truncate leading-none ml-2 select-none flex-1 min-w-0" title={element.label || 'Checkbox'}>{element.label || 'Checkbox'}</span>
         {#if element.required}
-          <span class="text-red-500 font-bold ml-0.5 select-none">*</span>
+          <span class="text-destructive font-bold ml-0.5 select-none">*</span>
         {/if}
       </div>
     {/if}
   {:else if element.variant === 'text-input'}
-    <div class="w-full {isMultiline ? 'h-full whitespace-pre-wrap leading-normal break-words overflow-hidden' : 'truncate leading-none'}">
+    <div
+      role="textbox"
+      aria-label={element.label || element.sourceFieldName || 'Text input'}
+      tabindex={isFieldDisabled ? -1 : 0}
+      aria-readonly={isFieldDisabled}
+      class="w-full {isMultiline ? 'h-full whitespace-pre-wrap leading-normal break-words overflow-hidden' : 'truncate leading-none'} {isFieldDisabled ? 'cursor-default' : 'cursor-text'}"
+      onclick={(e) => {
+        if (!isFieldDisabled && editorStore.isReadOnly) {
+          e.stopPropagation();
+          canvasStore.editingElementId = element.id;
+        }
+      }}
+      onkeydown={(e) => {
+        if (!isFieldDisabled && editorStore.isReadOnly && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault();
+          e.stopPropagation();
+          canvasStore.editingElementId = element.id;
+        }
+      }}
+    >
       {#if element.value !== undefined && element.value !== ''}
         <span>{element.password ? '*'.repeat(element.value.length) : element.value}</span>
       {:else if element.placeholder}
         <span class="opacity-40 italic">{element.placeholder}</span>
       {/if}
       {#if element.required}
-        <span class="text-red-500 font-bold ml-0.5 select-none">*</span>
+        <span class="text-destructive font-bold ml-0.5 select-none">*</span>
       {/if}
     </div>
   {:else if element.variant === 'dropdown'}
     <div class="w-full h-full flex items-center justify-between min-w-0">
-      <span class="truncate leading-none flex-1 min-w-0 pr-1">
+      <span class="truncate leading-none flex-1 min-w-0 pr-1" title={element.value || element.placeholder || (element.options && element.options[0] ? element.options[0] : (element.label || 'Select option...'))}>
         {#if element.value}
           {element.value}
         {:else if element.placeholder}
@@ -529,10 +563,10 @@
           <span class="opacity-70">{element.options && element.options[0] ? element.options[0] : (element.label || 'Select option...')}</span>
         {/if}
         {#if element.required}
-          <span class="text-red-500 font-bold ml-0.5 select-none">*</span>
+          <span class="text-destructive font-bold ml-0.5 select-none">*</span>
         {/if}
       </span>
-      <div class="h-full flex items-center justify-center px-1.5 shrink-0 border-l border-slate-300 dark:border-slate-600 bg-slate-100/70 dark:bg-slate-800/70">
+      <div class="h-full flex items-center justify-center px-1.5 shrink-0 border-l border-border bg-muted/70">
         <ChevronDown class="w-3.5 h-3.5 opacity-70" />
       </div>
     </div>
@@ -547,52 +581,52 @@
           />
         {:else}
           <div class="flex items-center gap-1.5 truncate">
-            <span class="font-serif italic text-base select-none truncate text-primary">{element.value}</span>
-            <svg class="w-3 h-3 text-emerald-600 dark:text-emerald-400 shrink-0" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2">
+            <span class="font-serif italic text-base select-none truncate text-foreground" title={element.value}>{element.value}</span>
+            <svg class="w-3 h-3 text-muted-foreground shrink-0" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M2 6l3 3 5-5"/>
             </svg>
-            <span class="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium shrink-0">Signed</span>
+            <span class="text-[10px] text-muted-foreground font-medium shrink-0">Signed</span>
           </div>
         {/if}
       </div>
     {:else}
       <div class="w-full h-full flex items-center justify-between relative min-w-0 px-1">
         <div class="flex items-center gap-1.5 min-w-0">
-          <div class="bg-red-600 text-white text-[9px] font-semibold px-1 py-0.5 rounded-[2px] shrink-0 leading-none shadow-xs">
+          <div class="bg-destructive text-white text-[9px] font-semibold px-1 py-0.5 rounded-[2px] shrink-0 leading-none">
             Sign
           </div>
-          <span class="text-red-600 font-bold text-xs select-none shrink-0 leading-none">X</span>
-          <span class="truncate leading-none italic text-xs text-muted-foreground select-none">
+          <span class="text-destructive font-bold text-xs select-none shrink-0 leading-none">X</span>
+          <span class="truncate leading-none italic text-xs text-muted-foreground select-none" title={element.placeholder || element.label || 'Sign here'}>
             {element.placeholder || element.label || 'Sign here'}
           </span>
         </div>
         {#if element.required}
-          <span class="text-red-500 font-bold ml-0.5 select-none shrink-0">*</span>
+          <span class="text-destructive font-bold ml-0.5 select-none shrink-0">*</span>
         {/if}
       </div>
     {/if}
   {:else if element.variant === 'button'}
-    <div class="w-full h-full flex items-center justify-center font-medium select-none truncate px-1 text-center leading-none">
+    <div class="w-full h-full flex items-center justify-center font-medium select-none truncate px-1 text-center leading-none" title={element.label || 'Button'}>
       <span>{element.label || 'Button'}</span>
     </div>
   {:else if element.variant === 'attachment'}
     <div class="flex items-center w-full min-w-0">
       <Paperclip class="w-3.5 h-3.5 mr-1.5 shrink-0 opacity-60" />
-      <span class="truncate leading-none">{element.label || 'Attachment'}</span>
+      <span class="truncate leading-none" title={element.label || 'Attachment'}>{element.label || 'Attachment'}</span>
       {#if element.required}
-        <span class="text-red-500 font-bold ml-0.5 select-none">*</span>
+        <span class="text-destructive font-bold ml-0.5 select-none">*</span>
       {/if}
     </div>
   {:else}
-    <div class="w-full truncate leading-none">
+    <div class="w-full truncate leading-none" title={element.label || 'Form Field'}>
       <span>{element.label || 'Form Field'}</span>
       {#if element.required}
-        <span class="text-red-500 font-bold ml-0.5 select-none">*</span>
+        <span class="text-destructive font-bold ml-0.5 select-none">*</span>
       {/if}
     </div>
   {/if}
 
-  {#if (element.readOnly || editorStore.isReadOnly) && !editing}
+  {#if (element.readOnly || (!editorStore.canEditValues && editorStore.isReadOnly)) && !editing}
     <div class="absolute right-1 top-1/2 -translate-y-1/2 pointer-events-none">
       <Lock class="w-3 h-3 opacity-40" />
     </div>
