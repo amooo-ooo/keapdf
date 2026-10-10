@@ -247,19 +247,23 @@ export function getCssFontFamily(
 ): string {
   if (!rawFontFamily) return '"Inter Variable", "Inter", Helvetica, Arial, sans-serif';
 
-  if (extractBaseFontFamily === defaultExtractBaseFontFamily && cssFontFamilyCache.has(rawFontFamily)) {
-    return cssFontFamilyCache.get(rawFontFamily)!;
+  const cacheKey =
+    extractBaseFontFamily === defaultExtractBaseFontFamily
+      ? rawFontFamily
+      : `${rawFontFamily}\0${extractBaseFontFamily(rawFontFamily)}`;
+
+  const cached = cssFontFamilyCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
   }
 
   const result = computeCssFontFamily(rawFontFamily, extractBaseFontFamily);
 
-  if (extractBaseFontFamily === defaultExtractBaseFontFamily) {
-    if (cssFontFamilyCache.size >= CSS_FONT_CACHE_MAX_SIZE) {
-      const firstKey = cssFontFamilyCache.keys().next().value;
-      if (firstKey !== undefined) cssFontFamilyCache.delete(firstKey);
-    }
-    cssFontFamilyCache.set(rawFontFamily, result);
+  if (cssFontFamilyCache.size >= CSS_FONT_CACHE_MAX_SIZE) {
+    const firstKey = cssFontFamilyCache.keys().next().value;
+    if (firstKey !== undefined) cssFontFamilyCache.delete(firstKey);
   }
+  cssFontFamilyCache.set(cacheKey, result);
 
   return result;
 }
@@ -345,6 +349,11 @@ function computeCssFontFamily(
       lower.includes('didot') ||
       lower.includes('caslon') ||
       lower.includes('bookman') ||
+      lower.includes('utopia') ||
+      lower.includes('termes') ||
+      lower.includes('pagella') ||
+      lower.includes('bonum') ||
+      lower.includes('schola') ||
       lower.startsWith('cmr') ||
       lower.startsWith('cmbx') ||
       lower.startsWith('cmti') ||
