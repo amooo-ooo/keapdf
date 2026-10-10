@@ -32,6 +32,10 @@
   });
 </script>
 
-<div class="w-full h-full relative overflow-hidden flex items-center justify-center select-none bg-white rounded-xs">
+<div
+  role="img"
+  aria-label={`Barcode: ${element.payload || 'https://keapdf.com'}`}
+  class="w-full h-full relative overflow-hidden flex items-center justify-center select-none bg-white rounded-xs"
+>
   {@html svgMarkup}
 </div>

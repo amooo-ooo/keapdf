@@ -18,17 +18,17 @@
 </script>
 
 <div
-  class="w-full h-full rounded shadow-md border flex flex-col overflow-hidden text-xs select-none"
+  class="w-full h-full rounded border flex flex-col overflow-hidden text-xs select-none"
   style="background-color: {element.color || '#fef08a'}; border-color: rgba(0,0,0,0.15);"
 >
   <div class="flex items-center justify-between px-2 py-1 bg-black/5 border-b border-black/10 cursor-move">
-    <div class="flex items-center gap-1 font-semibold text-[11px] text-foreground/80 truncate">
-      <StickyNote class="w-3.5 h-3.5 text-amber-600 shrink-0" />
-      <span>{element.author || 'Note'}</span>
+    <div class="flex items-center gap-1 font-semibold text-[11px] text-foreground/80 truncate" title={element.author || 'Note'}>
+      <StickyNote class="w-3.5 h-3.5 text-warning shrink-0" />
+      <span class="truncate">{element.author || 'Note'}</span>
     </div>
     <button
       type="button"
-      class="h-4 w-4 rounded hover:bg-black/10 flex items-center justify-center text-foreground/60 hover:text-foreground cursor-pointer"
+      class="h-6 w-6 rounded hover:bg-black/10 flex items-center justify-center text-foreground/60 hover:text-foreground cursor-pointer"
       onclick={(e) => {
         e.stopPropagation();
         canvasActions.deleteElement(element.id);
@@ -49,8 +49,9 @@
       }}
       onpointerdown={(e) => e.stopPropagation()}
       onclick={(e) => e.stopPropagation()}
+      aria-label="Note comment"
       placeholder="Write a comment..."
-      class="w-full h-full bg-transparent resize-none outline-none text-[11px] text-foreground placeholder:text-foreground/40 leading-relaxed"
+      class="w-full h-full bg-transparent resize-none outline-none font-sans text-[11px] text-foreground placeholder:text-foreground/40 leading-relaxed"
     ></textarea>
   </div>
 </div>

@@ -26,7 +26,7 @@
   }
 </script>
 
-<div class="w-full h-full relative overflow-hidden rounded-md bg-neutral-900 border border-neutral-700/80 shadow-xs flex flex-col select-none">
+<div class="w-full h-full relative overflow-hidden rounded-md bg-card border border-border flex flex-col select-none">
   {#if element.src}
     <div class="relative w-full h-full flex-1 bg-black flex items-center justify-center overflow-hidden">
       <video
@@ -57,16 +57,16 @@
       {/if}
 
       <!-- Top header badge indicating ISO 32000 RichMedia stream -->
-      <div class="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-xs text-[9px] font-sans text-neutral-300 flex items-center gap-1 border border-white/10 pointer-events-none">
-        <Film class="w-2.5 h-2.5 text-primary" />
-        <span class="truncate max-w-[120px]">{element.title || element.fileName || 'ISO 32000 RichMedia Video'}</span>
+      <div class="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-secondary/90 backdrop-blur-xs text-[9px] font-sans text-foreground flex items-center gap-1 border border-border pointer-events-none">
+        <Film class="w-2.5 h-2.5" />
+        <span class="truncate max-w-[120px]" title={element.title || element.fileName || 'ISO 32000 RichMedia Video'}>{element.title || element.fileName || 'ISO 32000 RichMedia Video'}</span>
       </div>
     </div>
   {:else}
-    <div class="w-full h-full flex flex-col items-center justify-center p-3 text-center bg-neutral-900 text-neutral-400 border border-dashed border-neutral-700">
-      <Video class="w-8 h-8 text-neutral-500 mb-1" />
-      <span class="text-xs font-medium text-neutral-200">Video Media Stream</span>
-      <span class="text-[10px] text-neutral-500 mt-0.5">ISO 32000-1 Clause 13.2</span>
+    <div class="w-full h-full flex flex-col items-center justify-center p-3 text-center bg-card text-muted-foreground border border-dashed border-border">
+      <Video class="w-8 h-8 text-muted-foreground mb-1" />
+      <span class="text-xs font-medium text-foreground">Video Media Stream</span>
+      <span class="text-[10px] text-muted-foreground mt-0.5">ISO 32000-1 Clause 13.2</span>
     </div>
   {/if}
 </div>
