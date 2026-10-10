@@ -7,6 +7,7 @@
  */
 
 import { resolveFontAlias } from './font-aliases';
+import { cleanSubsetPrefix } from '../core/pdfium-helpers';
 
 export type FontCategory = 'sans-serif' | 'serif' | 'monospace' | 'display' | 'handwriting';
 
@@ -173,13 +174,7 @@ export function getGoogleFontsCatalog(): readonly string[] {
 export function normalizeFontName(fontName: string): string {
   if (!fontName) return '';
 
-  let name = fontName.trim();
-
-  // Strip 6-uppercase-letter PDF subset prefix (e.g. "ABCDEF+")
-  const plusIdx = name.indexOf('+');
-  if (plusIdx >= 0 && plusIdx <= 7) {
-    name = name.substring(plusIdx + 1);
-  }
+  let name = cleanSubsetPrefix(fontName);
 
   // Insert space between lower-to-upper and upper-to-upper-then-lower transitions
   name = name
