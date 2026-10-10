@@ -96,6 +96,18 @@ export const shapeElementDef: ElementDefinition<'shape', ShapeElement> = {
 
     if (element.variant === 'rectangle' && element.isHighlight) {
       ctx.page.addHighlightAnnotation(options);
+    } else if (element.svgPath && typeof ctx.page.drawSvgPath === 'function') {
+      ctx.page.drawSvgPath({
+        ...options,
+        svgPath: element.svgPath,
+        viewBox: element.viewBox,
+        baseWidth: element.baseWidth,
+        baseHeight: element.baseHeight,
+        strokeLineCap: element.strokeLineCap,
+        strokeLineJoin: element.strokeLineJoin,
+        fillMode: element.fillMode,
+        fillRule: element.fillRule,
+      });
     } else {
       switch (element.variant) {
         case 'rectangle':
@@ -109,6 +121,9 @@ export const shapeElementDef: ElementDefinition<'shape', ShapeElement> = {
           break;
         case 'arrow':
           ctx.page.drawArrow(options);
+          break;
+        case 'path':
+          ctx.page.drawRectangle(options);
           break;
       }
     }

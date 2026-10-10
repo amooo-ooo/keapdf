@@ -42,10 +42,12 @@ export const textElementDef: ElementDefinition<'text', TextElement> = {
   propertiesPanel: TextSection as unknown as Component<ElementPanelProps<TextElement>>,
 
   normalize(element: TextElement): TextElement {
+    const minW = element.originalSpan ? 4 : 20;
+    const minH = element.originalSpan ? 6 : 14;
     return {
       ...element,
-      width: Math.max(20, element.width),
-      height: Math.max(14, element.height),
+      width: Math.max(minW, element.width),
+      height: Math.max(minH, element.height),
       fontSize: Math.max(6, Math.min(144, element.fontSize)),
     };
   },
@@ -110,63 +112,112 @@ export const textElementDef: ElementDefinition<'text', TextElement> = {
       fontStyle: element.fontStyle,
       textAlign: element.textAlign,
       lineHeight: element.lineHeight,
+      letterSpacing: element.letterSpacing,
+      wordSpacing: element.wordSpacing,
+      scaleX: element.scaleX,
       backgroundColor: hasSegments ? undefined : undefined,
       lines: element.lines,
       segments: element.segments
     }, charsetIndex);
 
-    if (element.underline) {
-      let lineX = element.x;
-      let lineY = element.y + Math.max(element.height - 2, element.fontSize);
-      if (element.rotation !== 0) {
-        const cx = element.x + element.width / 2;
-        const cy = element.y + element.height / 2;
-        const rad = (element.rotation * Math.PI) / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
-        const dx = lineX - cx;
-        const dy = lineY - cy;
-        lineX = cx + dx * cos - dy * sin;
-        lineY = cy + dx * sin + dy * cos;
-      }
-      ctx.page.drawLine({
-        x: lineX,
-        y: lineY,
-        width: element.width,
-        height: 1.5,
-        stroke: element.color,
-        strokeWidth: 1.5,
-        rotation: element.rotation,
-        flipX: element.flipX,
-        flipY: element.flipY,
-      });
-    }
+    const rotateLineTopLeftAroundElementCenter = (
+      lineLeft: number,
+      lineTop: number,
+      lineWidth: number,
+      lineHeight: number,
+    ): { x: number; y: number } => {
+      if (!element.rotation) return { x: lineLeft, y: lineTop };
+      const cx = element.x + element.width / 2;
+      const cy = element.y + element.height / 2;
+      const ucx = lineLeft + lineWidth / 2;
+      const ucy = lineTop + lineHeight / 2;
+      const rad = (element.rotation * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const dx = ucx - cx;
+      const dy = ucy - cy;
+      const rcx = cx + dx * cos - dy * sin;
+      const rcy = cy + dx * sin + dy * cos;
+      return {
+        x: rcx - lineWidth / 2,
+        y: rcy - lineHeight / 2,
+      };
+    };
 
-    if (element.strikethrough) {
-      let lineX = element.x;
-      let lineY = element.y + element.height / 2;
-      if (element.rotation !== 0) {
-        const cx = element.x + element.width / 2;
-        const cy = element.y + element.height / 2;
-        const rad = (element.rotation * Math.PI) / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
-        const dx = lineX - cx;
-        const dy = lineY - cy;
-        lineX = cx + dx * cos - dy * sin;
-        lineY = cy + dx * sin + dy * cos;
+    if (element.lines && element.lines.length > 0) {
+      for (let lIdx = 0; lIdx < element.lines.length; lIdx++) {
+        const line = element.lines[lIdx];
+        const hasHandledDecorations = (line.segments && line.segments.some((s) => s.underline || s.strikethrough)) || line.underline || line.strikethrough;
+        if (hasHandledDecorations) continue;
+
+        const lH = line.lineHeight || element.lineHeight || (line.fontSize || element.fontSize) * 1.25;
+        const lTop = line.top !== undefined ? element.y + line.top : element.y + lIdx * lH;
+        const lLeft = line.left !== undefined ? element.x + line.left : element.x;
+        const lWidth = line.width || element.width;
+        const lFs = line.fontSize || element.fontSize;
+
+        if (line.underline || element.underline) {
+          const pos = rotateLineTopLeftAroundElementCenter(lLeft, lTop + lFs * 0.94, lWidth, 1.5);
+          ctx.page.drawLine({
+            x: pos.x,
+            y: pos.y,
+            width: lWidth,
+            height: 1.5,
+            stroke: element.color,
+            strokeWidth: 1.5,
+            rotation: element.rotation,
+            flipX: element.flipX,
+            flipY: element.flipY,
+          });
+        }
+
+        if (line.strikethrough || element.strikethrough) {
+          const pos = rotateLineTopLeftAroundElementCenter(lLeft, lTop + lFs * 0.52, lWidth, 1.5);
+          ctx.page.drawLine({
+            x: pos.x,
+            y: pos.y,
+            width: lWidth,
+            height: 1.5,
+            stroke: element.color,
+            strokeWidth: 1.5,
+            rotation: element.rotation,
+            flipX: element.flipX,
+            flipY: element.flipY,
+          });
+        }
       }
-      ctx.page.drawLine({
-        x: lineX,
-        y: lineY,
-        width: element.width,
-        height: 1.5,
-        stroke: element.color,
-        strokeWidth: 1.5,
-        rotation: element.rotation,
-        flipX: element.flipX,
-        flipY: element.flipY,
-      });
+    } else {
+      if (element.underline) {
+        const rawY = element.y + Math.max(element.height - 2, element.fontSize);
+        const pos = rotateLineTopLeftAroundElementCenter(element.x, rawY, element.width, 1.5);
+        ctx.page.drawLine({
+          x: pos.x,
+          y: pos.y,
+          width: element.width,
+          height: 1.5,
+          stroke: element.color,
+          strokeWidth: 1.5,
+          rotation: element.rotation,
+          flipX: element.flipX,
+          flipY: element.flipY,
+        });
+      }
+
+      if (element.strikethrough) {
+        const rawY = element.y + element.height / 2;
+        const pos = rotateLineTopLeftAroundElementCenter(element.x, rawY, element.width, 1.5);
+        ctx.page.drawLine({
+          x: pos.x,
+          y: pos.y,
+          width: element.width,
+          height: 1.5,
+          stroke: element.color,
+          strokeWidth: 1.5,
+          rotation: element.rotation,
+          flipX: element.flipX,
+          flipY: element.flipY,
+        });
+      }
     }
   }
 };

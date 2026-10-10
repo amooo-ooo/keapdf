@@ -84,14 +84,41 @@ export const pathElementDef: ElementDefinition<'path', PathElement> = {
         width: element.width,
         height: element.height,
         fill: strokeStr,
+        rotation: element.rotation,
+        flipX: element.flipX,
+        flipY: element.flipY,
       });
     } else {
+      const rotDeg = element.rotation || 0;
+      const flipX = Boolean(element.flipX);
+      const flipY = Boolean(element.flipY);
+      let burnedPoints = element.points;
+
+      if ((rotDeg !== 0 || flipX || flipY) && element.points.length > 0) {
+        const cx = element.x + (element.width || 0) / 2;
+        const cy = element.y + (element.height || 0) / 2;
+        const rad = (rotDeg * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+
+        burnedPoints = element.points.map((p) => {
+          let dx = p.x - cx;
+          let dy = p.y - cy;
+          if (flipX) dx = -dx;
+          if (flipY) dy = -dy;
+          return {
+            x: cx + dx * cos - dy * sin,
+            y: cy + dx * sin + dy * cos,
+          };
+        });
+      }
+
       // Coordinates are converted from canvas (top-left origin) to PDF (bottom-left origin)
       // internally within the addInkAnnotation operation.
       ctx.page.addInkAnnotation({
         x: element.x,
         y: element.y,
-        points: element.points,
+        points: burnedPoints,
         stroke: strokeStr,
         strokeWidth: element.strokeWidth,
         opacity: element.opacity,

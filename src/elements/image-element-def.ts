@@ -3,6 +3,7 @@ import type { ElementDefinition, ElementRenderProps, ElementPanelProps, BurnCont
 import type { ImageElement } from '../stores/canvas-types';
 import ImageElementRender from './components/ImageElementRender.svelte';
 import ImageSection from '../components/panels/element-properties/ImageSection.svelte';
+import { decodePngDataUrlFallback } from '../services/pdf/operations/annotation-extract-ops';
 
 /**
  * Definition for the image element type.
@@ -81,6 +82,35 @@ export const imageElementDef: ElementDefinition<'image', ImageElement> = {
     }
 
     if (typeof Image === 'undefined') {
+      const decoded = decodePngDataUrlFallback(element.src);
+      if (decoded) {
+        if (element.opacity !== undefined && element.opacity < 1) {
+          for (let i = 3; i < decoded.data.length; i += 4) {
+            decoded.data[i] = Math.round(decoded.data[i] * element.opacity);
+          }
+        }
+        ctx.page.drawImage({
+          id: element.id,
+          x: element.x,
+          y: element.y,
+          width: element.width,
+          height: element.height,
+          imageData: {
+            width: decoded.width,
+            height: decoded.height,
+            imgData: {
+              data: decoded.data,
+              width: decoded.width,
+              height: decoded.height,
+              colorSpace: 'srgb',
+            } as unknown as ImageData,
+          },
+          objectFit: element.objectFit,
+          rotation: element.rotation,
+          flipX: element.flipX,
+          flipY: element.flipY,
+        });
+      }
       return Promise.resolve();
     }
 
@@ -102,17 +132,21 @@ export const imageElementDef: ElementDefinition<'image', ImageElement> = {
       const drawImageToPage = (): void => {
         clearTimeout(timer);
         try {
+          const targetW =
+            img.naturalWidth || img.width || Math.max(1, Math.round(element.width * 2));
+          const targetH =
+            img.naturalHeight || img.height || Math.max(1, Math.round(element.height * 2));
           const canvas = document.createElement('canvas');
-          canvas.width = img.width;
-          canvas.height = img.height;
+          canvas.width = targetW;
+          canvas.height = targetH;
           const cCtx = canvas.getContext('2d');
           if (!cCtx) {
             safeResolve();
             return;
           }
 
-          cCtx.drawImage(img, 0, 0);
-          const imageData = cCtx.getImageData(0, 0, img.width, img.height);
+          cCtx.drawImage(img, 0, 0, targetW, targetH);
+          const imageData = cCtx.getImageData(0, 0, targetW, targetH);
 
           // Handle opacity by modifying the alpha channel
           if (element.opacity !== undefined && element.opacity < 1) {
