@@ -1,5 +1,6 @@
 import type { PdfiumEngine } from '../../core/pdfium-engine';
-import { readCharFontName, extractBaseFontFamily } from '../../core/pdfium-helpers';
+import { readCharFontName, extractBaseFontFamily, mapStandardFontName, type StandardFontName } from '../../core/pdfium-helpers';
+import { getDisplayFontName } from '../font-loader';
 
 import {
   WIN_ANSI_HIGH_CODEPOINTS,
@@ -57,6 +58,32 @@ export function isStandard14Font(fontFamily?: string): boolean {
 }
 
 /**
+ * Evaluates whether a font has a relatively complete character set for composition.
+ * Standard 14 fonts are inherently complete. Embedded fonts are considered relatively complete
+ * if they encompass the standard Latin lowercase alphabet or contain at least 26 distinct characters.
+ *
+ * @param fontName Raw or normalised font name.
+ * @param charset Character set extracted from document inspection.
+ * @returns True if the font character set is sufficiently complete.
+ */
+export function isFontRelativelyComplete(
+  fontName: string,
+  charset?: ReadonlySet<string> | Set<string> | null
+): boolean {
+  if (!fontName) return false;
+  if (isStandard14Font(fontName)) return true;
+  if (!charset || charset.size === 0) return false;
+  if (charset.size >= 26) return true;
+
+  const latinAlphabet = 'abcdefghijklmnopqrstuvwxyz';
+  let matchCount = 0;
+  for (const ch of latinAlphabet) {
+    if (charset.has(ch)) matchCount++;
+  }
+  return matchCount >= 18;
+}
+
+/**
  * Lazily-built, document-wide index of characters available per font.
  * Scans all pages once on first access and caches the result.
  * Used by the in-place text editing heuristic to determine whether
@@ -80,6 +107,17 @@ export class FontCharsetIndex {
 
   /** Next page index to scan when progressively scanning large documents. */
   private nextScanPageIndex: number = 0;
+
+  /** Pages modified after initial scan that require incremental rescanning. */
+  private dirtyPages: Set<number> = new Set();
+
+  /** Cached list of relatively complete document fonts. */
+  private cachedCompleteFonts: Array<{
+    family: string;
+    displayName: string;
+    builtInStandardFont: StandardFontName;
+    charCount: number;
+  }> | null = null;
 
   /**
    * @param engine The PDFium engine instance.
@@ -117,15 +155,28 @@ export class FontCharsetIndex {
       }
     }
 
-    if (!fontFamily.includes('+')) {
-      const familySet = this.getFamilyCharset(fontFamily);
-      if (familySet.size > 0) {
-        const allInFamily = charsToCheck.every((c) => familySet.has(c));
-        if (allInFamily) return true;
-      }
+    const familySet = this.getFamilyCharset(fontFamily);
+    if (familySet.size > 0) {
+      const allInFamily = charsToCheck.every((c) => familySet.has(c));
+      if (allInFamily) return true;
     }
 
     return false;
+  }
+
+  /**
+   * Rescans any individual pages marked dirty since the last index build.
+   */
+  private flushDirtyPages(): void {
+    if (this.dirtyPages.size === 0) return;
+    const pageCount = this.getPageCountSafe();
+    const pagesToRescan = Array.from(this.dirtyPages);
+    this.dirtyPages.clear();
+    for (const pageIdx of pagesToRescan) {
+      if (pageIdx >= 0 && pageIdx < pageCount) {
+        this.scanPages(pageIdx, pageIdx + 1);
+      }
+    }
   }
 
   /**
@@ -134,7 +185,7 @@ export class FontCharsetIndex {
    * Checks the raw font variant, base font family, and original span text.
    *
    * @param text The text to check.
-   * @param fontFamily Optional font family name (raw or normalized).
+   * @param fontFamily Optional font family name (raw or normalised).
    * @param origSpanText Optional original text of the span being edited.
    * @return True if every character in the text is present in the font's charset.
    */
@@ -183,6 +234,13 @@ export class FontCharsetIndex {
       return true;
     }
 
+    if (this.dirtyPages.size > 0) {
+      this.flushDirtyPages();
+      if (this.checkCharset(fontFamily, charsToCheck)) {
+        return true;
+      }
+    }
+
     const pageCount = this.getPageCountSafe();
     while (this.nextScanPageIndex < pageCount) {
       const nextBatch = Math.min(pageCount, this.nextScanPageIndex + 20);
@@ -204,6 +262,21 @@ export class FontCharsetIndex {
     this.familyCharsets = null;
     this.allDocumentChars = null;
     this.nextScanPageIndex = 0;
+    this.dirtyPages.clear();
+    this.cachedCompleteFonts = null;
+  }
+
+  /**
+   * Marks a single page as dirty in the charset index without discarding
+   * already-scanned character sets from other pages in the document.
+   *
+   * @param pageIndex Zero-based index of the mutated page.
+   */
+  public invalidatePage(pageIndex: number): void {
+    this.cachedCompleteFonts = null;
+    if (pageIndex >= 0 && pageIndex < this.nextScanPageIndex) {
+      this.dirtyPages.add(pageIndex);
+    }
   }
 
   /**
@@ -211,6 +284,7 @@ export class FontCharsetIndex {
    * without requiring an expensive full-document rescan.
    */
   public registerText(text: string, rawFontName: string): void {
+    this.cachedCompleteFonts = null;
     if (!this.rawCharsets) this.rawCharsets = new Map<string, Set<string>>();
     if (!this.familyCharsets) this.familyCharsets = new Map<string, Set<string>>();
     if (!this.allDocumentChars) this.allDocumentChars = new Set<string>();
@@ -251,6 +325,7 @@ export class FontCharsetIndex {
   /** Builds the index across all pages if not yet built. */
   public ensureBuilt(): void {
     const pageCount = this.getPageCountSafe();
+    this.flushDirtyPages();
     if (this.rawCharsets && this.nextScanPageIndex >= pageCount) return;
     this.scanPages(this.nextScanPageIndex, pageCount);
   }
@@ -262,24 +337,27 @@ export class FontCharsetIndex {
    * @param toIndex Zero-based end page index (exclusive).
    */
   public scanPages(fromIndex: number, toIndex: number): void {
-    const rawMap = new Map<string, Set<string>>();
-    const familyMap = new Map<string, Set<string>>();
-    const docCharSet = new Set<string>();
+    this.cachedCompleteFonts = null;
+    if (!this.rawCharsets) this.rawCharsets = new Map<string, Set<string>>();
+    if (!this.familyCharsets) this.familyCharsets = new Map<string, Set<string>>();
+    if (!this.allDocumentChars) this.allDocumentChars = new Set<string>();
 
-    this.rawCharsets = rawMap;
-    this.familyCharsets = familyMap;
-    this.allDocumentChars = docCharSet;
+    const rawMap = this.rawCharsets;
+    const familyMap = this.familyCharsets;
+    const docCharSet = this.allDocumentChars;
 
     if (!this.getDocHandle) return;
     const docHandle = this.getDocHandle();
     if (!docHandle) return;
     const mod = this.engine.getModule();
+    if (typeof mod.FPDF_GetPageCount !== 'function' || typeof mod.FPDF_LoadPage !== 'function') return;
 
     const pageCount = mod.FPDF_GetPageCount(docHandle);
     const start = Math.max(0, fromIndex);
     const end = Math.min(pageCount, toIndex);
 
     for (let pageIdx = start; pageIdx < end; pageIdx++) {
+      this.dirtyPages.delete(pageIdx);
       const pageHandle = mod.FPDF_LoadPage(docHandle, pageIdx);
       if (!pageHandle) continue;
 
@@ -289,6 +367,9 @@ export class FontCharsetIndex {
         if (!textPageHandle) continue;
 
         const totalChars = mod.FPDFText_CountChars(textPageHandle);
+        let lastRawFontName = '';
+        let lastRawSet: Set<string> | null = null;
+        let lastFamilySet: Set<string> | null = null;
 
         for (let i = 0; i < totalChars; i++) {
           const charCode = mod.FPDFText_GetUnicode(textPageHandle, i);
@@ -300,22 +381,26 @@ export class FontCharsetIndex {
 
           docCharSet.add(charStr);
 
-          // Index by raw font name
-          let rawSet = rawMap.get(rawFontName);
-          if (!rawSet) {
-            rawSet = new Set<string>();
-            rawMap.set(rawFontName, rawSet);
-          }
-          rawSet.add(charStr);
+          if (rawFontName !== lastRawFontName || !lastRawSet || !lastFamilySet) {
+            lastRawFontName = rawFontName;
+            let rawSet = rawMap.get(rawFontName);
+            if (!rawSet) {
+              rawSet = new Set<string>();
+              rawMap.set(rawFontName, rawSet);
+            }
+            lastRawSet = rawSet;
 
-          // Index by base family name (strips subset prefix and style suffix)
-          const baseName = extractBaseFontFamily(rawFontName);
-          let familySet = familyMap.get(baseName);
-          if (!familySet) {
-            familySet = new Set<string>();
-            familyMap.set(baseName, familySet);
+            const baseName = extractBaseFontFamily(rawFontName);
+            let familySet = familyMap.get(baseName);
+            if (!familySet) {
+              familySet = new Set<string>();
+              familyMap.set(baseName, familySet);
+            }
+            lastFamilySet = familySet;
           }
-          familySet.add(charStr);
+
+          lastRawSet.add(charStr);
+          lastFamilySet.add(charStr);
         }
       } finally {
         if (textPageHandle) {
@@ -336,6 +421,80 @@ export class FontCharsetIndex {
    */
   public buildIndex(): void {
     this.scanPages(0, this.getPageCountSafe());
+  }
+
+  /**
+   * Checks whether a specific font in the document has a relatively complete character set.
+   *
+   * @param fontName Raw or base font family name.
+   * @returns True if the font is relatively complete.
+   */
+  public isFontComplete(fontName: string): boolean {
+    if (!fontName) return false;
+    if (isStandard14Font(fontName)) return true;
+    this.ensureBuilt();
+    if (this.rawCharsets) {
+      const rawSet = this.rawCharsets.get(fontName);
+      if (rawSet && isFontRelativelyComplete(fontName, rawSet)) {
+        return true;
+      }
+    }
+    const familySet = this.getFamilyCharset(fontName);
+    return isFontRelativelyComplete(fontName, familySet);
+  }
+
+  /**
+   * Retrieves all document fonts indexed via font masking and character scanning
+   * that meet the relative completeness threshold.
+   *
+   * @returns Array of relatively complete document fonts with mapped standard equivalents.
+   */
+  public getRelativelyCompleteDocumentFonts(): Array<{
+    family: string;
+    displayName: string;
+    builtInStandardFont: StandardFontName;
+    charCount: number;
+  }> {
+    this.ensureBuilt();
+    if (this.cachedCompleteFonts) {
+      return this.cachedCompleteFonts;
+    }
+    const result: Array<{
+      family: string;
+      displayName: string;
+      builtInStandardFont: StandardFontName;
+      charCount: number;
+    }> = [];
+    if (!this.familyCharsets) return result;
+
+    const seenCanonicalFamilies = new Set<string>();
+
+    for (const [baseFamily, charset] of this.familyCharsets.entries()) {
+      if (isFontRelativelyComplete(baseFamily, charset)) {
+        const stdFont = mapStandardFontName(baseFamily);
+        const displayName = getDisplayFontName(baseFamily, extractBaseFontFamily);
+        const canonicalKey = displayName.toLowerCase().trim();
+
+        if (seenCanonicalFamilies.has(canonicalKey)) {
+          // Merge character counts into the existing entry if higher
+          const existing = result.find((it) => it.displayName.toLowerCase().trim() === canonicalKey);
+          if (existing && charset.size > existing.charCount) {
+            existing.charCount = charset.size;
+          }
+          continue;
+        }
+
+        seenCanonicalFamilies.add(canonicalKey);
+        result.push({
+          family: baseFamily,
+          displayName,
+          builtInStandardFont: stdFont,
+          charCount: charset.size,
+        });
+      }
+    }
+    this.cachedCompleteFonts = result;
+    return result;
   }
 }
 
