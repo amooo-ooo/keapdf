@@ -33,6 +33,27 @@ export interface ShapeOptions extends DrawOptions {
 }
 
 /**
+ * Options for drawing vector paths and splines from SVG definitions.
+ */
+export interface SvgPathOptions extends ShapeOptions {
+  /** The SVG path definition string. */
+  svgPath: string;
+  /** Optional SVG viewBox string defining local path coordinate space. */
+  viewBox?: string;
+  /** Optional base coordinate width. */
+  baseWidth?: number;
+  /** Optional base coordinate height. */
+  baseHeight?: number;
+  /** Optional line cap style. */
+  strokeLineCap?: 'butt' | 'round' | 'square';
+  /** Optional line join style. */
+  strokeLineJoin?: 'miter' | 'round' | 'bevel';
+  /** Optional PDFium fill mode or SVG fill rule. */
+  fillMode?: number;
+  fillRule?: 'nonzero' | 'evenodd';
+}
+
+/**
  * Options for drawing paths/polylines.
  */
 export interface PathOptions extends DrawOptions {
@@ -71,8 +92,18 @@ export interface TextOptions extends DrawOptions {
   textAlign?: 'left' | 'center' | 'right';
   /** Background highlight/fill color string. */
   backgroundColor?: string;
+  /** Whether text has underline decoration. */
+  underline?: boolean;
+  /** Whether text has strikethrough decoration. */
+  strikethrough?: boolean;
   /** Line height in points. */
   lineHeight?: number;
+  /** CSS letter spacing value or normal. */
+  letterSpacing?: string;
+  /** Extra inter-word spacing in points. */
+  wordSpacing?: number;
+  /** Horizontal scale ratio (1.0 is default). */
+  scaleX?: number;
   /** Styled multi-line structures for portion-level styling. */
   lines?: TextElementLine[];
   /** Styled text segments for portion-level styling. */
