@@ -11,6 +11,7 @@ import type {
   CompressionInspection,
   DocumentMetadata,
   DocumentMetadataUpdate,
+  EditableTextSpan,
 } from '../core/types';
 import type { SignPdfOptions, SignatureValidationResult } from './pdf/operations/signature-ops';
 import type { WorkspaceFile } from '../stores/editor.svelte';
@@ -27,6 +28,7 @@ export class PdfEditorService {
   private _workspaceFiles: WorkspaceFile[];
   private _document: PdfDocument | null = null;
   private _elementRegistry: ElementRegistry | null = null;
+  private _isEncryptionPreservationEnabled: () => boolean = () => true;
 
   constructor(
     workspaceFilesRef: WorkspaceFile[] = [],
@@ -77,6 +79,29 @@ export class PdfEditorService {
     this._document = null;
     this.engine.loadDocumentFromBuffer(buffer, password);
     this.document.setRawBuffer(buffer);
+    this.document.setSecurityCredential(password);
+    this.document.setEncryptionPreservationResolver(this._isEncryptionPreservationEnabled);
+  }
+
+  /**
+   * Reloads a serialisation of the active document, reusing the password that unlocked it
+   * so encrypted documents reopen after rewrites, rollbacks and temporary export passes.
+   *
+   * @param buffer Bytes derived from the active document.
+   */
+  public reloadDocumentFromBuffer(buffer: ArrayBuffer): void {
+    this.loadDocumentFromBuffer(buffer, this._document?.getSecurityCredential() ?? '');
+  }
+
+  /**
+   * Installs the predicate deciding whether encrypted documents keep their encryption
+   * across pdf-lib rewrites (wired to the 'security.preserve-encryption' feature flag).
+   *
+   * @param resolver Predicate evaluated lazily on every rewrite.
+   */
+  public setEncryptionPreservationResolver(resolver: () => boolean): void {
+    this._isEncryptionPreservationEnabled = resolver;
+    this._document?.setEncryptionPreservationResolver(resolver);
   }
 
   /**
@@ -192,11 +217,52 @@ export class PdfEditorService {
         pageHeight: dims.heightPts,
       };
 
-      for (const el of pageElements) {
+      let backInsertCursor = 0;
+
+      const sortedPageElements = pageElements
+        .map((el, idx) => ({ el, idx }))
+        .sort((a, b) => {
+          const zA = a.el.zIndex ?? 21;
+          const zB = b.el.zIndex ?? 21;
+          if (zA !== zB) return zA - zB;
+          return a.idx - b.idx;
+        })
+        .map((entry) => entry.el);
+
+      for (const el of sortedPageElements) {
         if (this._elementRegistry && this._elementRegistry.has(el.kind)) {
           const def = this._elementRegistry.get(el.kind);
           try {
-            await def.burn(el, burnCtx);
+            const isBackBand =
+              typeof el.zIndex === 'number' &&
+              el.zIndex < 10 &&
+              typeof page.reorderObject === 'function';
+            let burnTarget: CanvasElement = el;
+            if (
+              isBackBand &&
+              el.kind === 'text' &&
+              el.originalSpan &&
+              typeof page.deleteTextSpan === 'function'
+            ) {
+              try {
+                page.deleteTextSpan(el.originalSpan as unknown as EditableTextSpan, { reflowDownstream: false });
+                burnTarget = { ...el, originalSpan: undefined };
+              } catch {
+                // Best-effort cleanup prior to measuring object count
+              }
+            }
+
+            const countBefore = typeof page.getObjectCount === 'function' ? page.getObjectCount() : 0;
+            await def.burn(burnTarget, burnCtx);
+            const countAfter = typeof page.getObjectCount === 'function' ? page.getObjectCount() : 0;
+
+            if (isBackBand && countAfter > countBefore) {
+              for (let objIdx = countBefore; objIdx < countAfter; objIdx++) {
+                if (page.reorderObject(objIdx, backInsertCursor)) {
+                  backInsertCursor++;
+                }
+              }
+            }
           } catch (e) {
             console.error(`Failed to burn element ${el.id}:`, e);
           }
@@ -217,7 +283,7 @@ export class PdfEditorService {
     const doc = this.document;
     const finalBytes = await doc.saveAsync(pageTransforms);
     const bufferArray = finalBytes.buffer.slice(finalBytes.byteOffset, finalBytes.byteOffset + finalBytes.byteLength) as ArrayBuffer;
-    this.loadDocumentFromBuffer(bufferArray);
+    this.reloadDocumentFromBuffer(bufferArray);
   }
 
   /**
@@ -249,7 +315,7 @@ export class PdfEditorService {
       bytes.byteOffset,
       bytes.byteOffset + bytes.byteLength
     ) as ArrayBuffer;
-    this.loadDocumentFromBuffer(bufferArray);
+    this.reloadDocumentFromBuffer(bufferArray);
     return summary;
   }
 
@@ -285,7 +351,7 @@ export class PdfEditorService {
       bytes.byteOffset,
       bytes.byteOffset + bytes.byteLength
     ) as ArrayBuffer;
-    this.loadDocumentFromBuffer(bufferArray);
+    this.reloadDocumentFromBuffer(bufferArray);
     return summary;
   }
 
@@ -331,7 +397,7 @@ export class PdfEditorService {
       result.bytes.byteOffset,
       result.bytes.byteOffset + result.bytes.byteLength
     ) as ArrayBuffer;
-    this.loadDocumentFromBuffer(bufferArray);
+    this.reloadDocumentFromBuffer(bufferArray);
     return result;
   }
 
@@ -352,7 +418,7 @@ export class PdfEditorService {
       signedBytes.byteOffset,
       signedBytes.byteOffset + signedBytes.byteLength
     ) as ArrayBuffer;
-    this.loadDocumentFromBuffer(bufferArray);
+    this.reloadDocumentFromBuffer(bufferArray);
     return signedBytes;
   }
 
