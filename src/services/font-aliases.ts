@@ -4,15 +4,15 @@
  * Provides high-precision resolution of native PDF font names that are abbreviated,
  * encoded with TeX/LaTeX conventions, or non-Google commercial typefaces.
  *
- * Supported domains:
- * 1. LaTeX Computer Modern (Knuth optical sizes: cmr10, cmbx12, cmti10, cmtt10, cmss10, etc.)
- * 2. Latin Modern (GUST consortium: lmr10, lmbx10, lmti10, lmtt10, lmss10, etc.)
- * 3. Karl Berry dvips/pdflatex naming scheme (ptmr8t, phvr8t, pcrr8t, pplr8t, bchr8t, etc.)
- * 4. TeX Gyre and modern LaTeX packages (newtxtext, mathptmx, mathpazo, fourier, stix2, etc.)
- * 5. Commercial typefaces and metric-compatible Google Fonts (Calibri->Carlito, Cambria->Caladea, etc.)
+ * Supported domains include LaTeX Computer Modern (Knuth optical sizes such as cmr10, cmbx12, cmti10, cmtt10, cmss10),
+ * Latin Modern (GUST consortium such as lmr10, lmbx10, lmti10, lmtt10, lmss10),
+ * Karl Berry dvips and pdflatex naming scheme (ptmr8t, phvr8t, pcrr8t, pplr8t, bchr8t),
+ * TeX Gyre and modern LaTeX packages (newtxtext, mathptmx, mathpazo, fourier, stix2), and
+ * commercial typefaces with metric-compatible Google Fonts (Calibri to Carlito, Cambria to Caladea).
  */
 
 import type { FontCategory } from './font-matcher';
+import { cleanSubsetPrefix, isBoldFontName, isItalicFontName } from '../core/pdfium-helpers';
 
 export interface FontAliasResolution {
   readonly canonicalName: string;
@@ -23,18 +23,6 @@ export interface FontAliasResolution {
   readonly isSystemFont?: boolean;
   readonly weight?: 'normal' | 'bold';
   readonly style?: 'normal' | 'italic';
-}
-
-/**
- * Strips 6-character PDF subset prefix (e.g. "ABCDEF+").
- */
-function cleanSubsetPrefix(name: string): string {
-  if (!name) return '';
-  const plusIdx = name.indexOf('+');
-  if (plusIdx >= 0 && plusIdx <= 7) {
-    return name.substring(plusIdx + 1).trim();
-  }
-  return name.trim();
 }
 
 /**
@@ -120,6 +108,14 @@ const COMMERCIAL_FONT_MAP: Record<string, CommercialFontDef> = {
     cssStack: '"Times New Roman", "Tinos", Times, "Liberation Serif", serif',
   },
   times: {
+    canonicalName: 'Times New Roman',
+    matchedGoogleFont: 'Tinos',
+    category: 'serif',
+    isMetricCompatible: true,
+    isSystemFont: true,
+    cssStack: '"Times New Roman", "Tinos", Times, "Liberation Serif", serif',
+  },
+  timesroman: {
     canonicalName: 'Times New Roman',
     matchedGoogleFont: 'Tinos',
     category: 'serif',
@@ -423,11 +419,30 @@ export function resolveCommercialFontAlias(rawFontName: string): FontAliasResolu
       def = COMMERCIAL_FONT_MAP['nimbusmonl'];
     }
   }
+  if (!def) {
+    // Strip common variant suffixes from key (e.g. calibribold to calibri, arialboldmt to arial)
+    let strippedKey = key;
+    const variantSuffixRegex = /(bolditalic|boldoblique|boldital|boldobli|reguital|mediital|medmital|reguobli|bold|italic|oblique|ital|obli|slanted|slant(?:\d+)?|regular|regu|medium|medi|medm|light|semibold|demibold|extrabold|condensed|expanded|narrow|black|thin|heavy|book|reg|bd|it|bi|ro|psmt|ps|mt|ms|cid)$/;
+    let prevKey = '';
+    while (prevKey !== strippedKey) {
+      prevKey = strippedKey;
+      strippedKey = strippedKey.replace(variantSuffixRegex, '');
+    }
+
+    if (strippedKey && COMMERCIAL_FONT_MAP[strippedKey]) {
+      def = COMMERCIAL_FONT_MAP[strippedKey];
+    } else if (strippedKey.startsWith('nimbusrom')) {
+      def = COMMERCIAL_FONT_MAP['nimbusromno9l'];
+    } else if (strippedKey.startsWith('nimbussan')) {
+      def = COMMERCIAL_FONT_MAP['nimbussanl'];
+    } else if (strippedKey.startsWith('nimbusmon')) {
+      def = COMMERCIAL_FONT_MAP['nimbusmonl'];
+    }
+  }
   if (!def) return null;
 
-  const lower = rawFontName.toLowerCase();
-  const weight = lower.includes('bold') ? 'bold' : 'normal';
-  const style = lower.includes('italic') || lower.includes('oblique') ? 'italic' : 'normal';
+  const weight = isBoldFontName(rawFontName) ? 'bold' : 'normal';
+  const style = isItalicFontName(rawFontName) ? 'italic' : 'normal';
 
   return {
     canonicalName: def.canonicalName,
@@ -448,7 +463,7 @@ export function resolveLatexFont(rawFontName: string): FontAliasResolution | nul
   if (!rawFontName) return null;
   const key = normalizeKey(rawFontName);
 
-  // 1. Computer Modern family (Knuth short names with optional optical sizes)
+  // Computer Modern family (Knuth short names with optional optical sizes)
   const cmMatch = key.match(/^cm([a-z]+?)(\d*)$/);
   if (cmMatch) {
     const code = cmMatch[1];
@@ -618,7 +633,7 @@ export function resolveLatexFont(rawFontName: string): FontAliasResolution | nul
     }
   }
 
-  // 2. Latin Modern family (GUST consortium)
+  // Latin Modern family (GUST consortium)
   const lmMatch = key.match(/^lm([a-z]+?)(\d*)$/);
   if (lmMatch) {
     const code = lmMatch[1];
@@ -744,7 +759,7 @@ export function resolveLatexFont(rawFontName: string): FontAliasResolution | nul
     }
   }
 
-  // 3. TeX Gyre family codes
+  // TeX Gyre family codes
   if (key.startsWith('qtm')) {
     return {
       canonicalName: 'TeX Gyre Termes',
@@ -818,7 +833,7 @@ export function resolveLatexFont(rawFontName: string): FontAliasResolution | nul
     };
   }
 
-  // 4. Common LaTeX package font names
+  // Common LaTeX package font names
   if (
     key.startsWith('newtx') ||
     key.startsWith('ntxtmr') ||
@@ -991,15 +1006,15 @@ export function resolveBerryCode(rawFontName: string): FontAliasResolution | nul
 export function resolveFontAlias(rawFontName: string): FontAliasResolution | null {
   if (!rawFontName) return null;
 
-  // 1. Direct commercial match (Calibri, Cambria, Arial, etc.)
+  // Commercial typeface alias match (Calibri, Cambria, Arial, etc.)
   const comm = resolveCommercialFontAlias(rawFontName);
   if (comm) return comm;
 
-  // 2. LaTeX Computer Modern / Latin Modern / Package match
+  // LaTeX Computer Modern, Latin Modern, or package match
   const latex = resolveLatexFont(rawFontName);
   if (latex) return latex;
 
-  // 3. Karl Berry dvips scheme decoder
+  // Karl Berry dvips scheme decoder
   const berry = resolveBerryCode(rawFontName);
   if (berry) return berry;
 
