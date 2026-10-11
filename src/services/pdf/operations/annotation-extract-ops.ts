@@ -462,3 +462,465 @@ export function extractBitmapToDataUrl(
       const srcIdx = y * stride + x * bytesPerPixel;
       const dstIdx = (y * bmpWidth + x) * 4;
 
+      if (format === 4 || format === 3) {
+        rgba[dstIdx] = rawBytes[srcIdx + 2];
+        rgba[dstIdx + 1] = rawBytes[srcIdx + 1];
+        rgba[dstIdx + 2] = rawBytes[srcIdx];
+        rgba[dstIdx + 3] = format === 4 ? rawBytes[srcIdx + 3] : 255;
+      } else if (format === 2) {
+        rgba[dstIdx] = rawBytes[srcIdx + 2];
+        rgba[dstIdx + 1] = rawBytes[srcIdx + 1];
+        rgba[dstIdx + 2] = rawBytes[srcIdx];
+        rgba[dstIdx + 3] = 255;
+      } else {
+        rgba[dstIdx] = rawBytes[srcIdx];
+        rgba[dstIdx + 1] = rawBytes[srcIdx];
+        rgba[dstIdx + 2] = rawBytes[srcIdx];
+        rgba[dstIdx + 3] = 255;
+      }
+    }
+  }
+
+  return rgbaToPngDataUrl(rgba, bmpWidth, bmpHeight);
+}
+
+/**
+ * Renders an annotation appearance stream into a transparent PNG data URL,
+ * preserving soft masks (/SMask) and alpha channels.
+ */
+function renderAnnotationAppearanceToDataUrl(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  annotHandle: number,
+  domWidth: number,
+  domHeight: number
+): string {
+  let nativeImgW = 0;
+  let nativeImgH = 0;
+  let firstImageObj = 0;
+
+  if (
+    typeof mod.FPDFAnnot_GetObjectCount === 'function' &&
+    typeof mod.FPDFAnnot_GetObject === 'function'
+  ) {
+    const objCount = mod.FPDFAnnot_GetObjectCount(annotHandle);
+    for (let i = 0; i < objCount; i++) {
+      const obj = mod.FPDFAnnot_GetObject(annotHandle, i);
+      if (obj && mod.FPDFPageObj_GetType(obj) === 3) {
+        firstImageObj = obj;
+        if (typeof mod.FPDFImageObj_GetBitmap === 'function') {
+          const bmp = mod.FPDFImageObj_GetBitmap(obj);
+          if (bmp) {
+            try {
+              nativeImgW = mod.FPDFBitmap_GetWidth?.(bmp) ?? 0;
+              nativeImgH = mod.FPDFBitmap_GetHeight?.(bmp) ?? 0;
+            } finally {
+              mod.FPDFBitmap_Destroy?.(bmp);
+            }
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  if (typeof mod.EPDFAnnot_ExportAppearanceAsDocument === 'function') {
+    const appDoc = mod.EPDFAnnot_ExportAppearanceAsDocument(annotHandle);
+    if (appDoc) {
+      let appPage = 0;
+      let bmp = 0;
+      let bufPtr = 0;
+      try {
+        appPage = mod.FPDF_LoadPage(appDoc, 0);
+        if (appPage) {
+          const renderW = Math.max(
+            1,
+            Math.min(1024, nativeImgW > 0 ? nativeImgW : Math.ceil(domWidth * 2))
+          );
+          const renderH = Math.max(
+            1,
+            Math.min(1024, nativeImgH > 0 ? nativeImgH : Math.ceil(domHeight * 2))
+          );
+          const stride = renderW * 4;
+          bufPtr = engine.allocateMemory(stride * renderH);
+          if (bufPtr) {
+            bmp = mod.FPDFBitmap_CreateEx(renderW, renderH, 4, bufPtr, stride);
+            if (bmp) {
+              mod.FPDFBitmap_FillRect?.(bmp, 0, 0, renderW, renderH, 0x00000000);
+              mod.FPDF_RenderPageBitmap(bmp, appPage, 0, 0, renderW, renderH, 0, 0);
+              const url = extractBitmapToDataUrl(mod, bmp);
+              if (url) {
+                return url;
+              }
+            }
+          }
+        }
+      } catch {
+        // Fall through to direct bitmap extraction
+      } finally {
+        try {
+          if (bmp) {
+            mod.FPDFBitmap_Destroy?.(bmp);
+          }
+        } finally {
+          try {
+            if (bufPtr) {
+              engine.freeMemory(bufPtr);
+            }
+          } finally {
+            try {
+              if (appPage) {
+                mod.FPDF_ClosePage(appPage);
+              }
+            } finally {
+              mod.FPDF_CloseDocument(appDoc);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (firstImageObj && typeof mod.FPDFImageObj_GetBitmap === 'function') {
+    const bmp = mod.FPDFImageObj_GetBitmap(firstImageObj);
+    if (bmp) {
+      try {
+        return extractBitmapToDataUrl(mod, bmp);
+      } finally {
+        mod.FPDFBitmap_Destroy?.(bmp);
+      }
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Multiplies two 2D PDF affine transformation matrices (outer * inner).
+ */
+function multiplyPdfMatrices(outer: PdfMatrix, inner: PdfMatrix): PdfMatrix {
+  return {
+    a: outer.a * inner.a + outer.c * inner.b,
+    b: outer.b * inner.a + outer.d * inner.b,
+    c: outer.a * inner.c + outer.c * inner.d,
+    d: outer.b * inner.c + outer.d * inner.d,
+    e: outer.a * inner.e + outer.c * inner.f + outer.e,
+    f: outer.b * inner.e + outer.d * inner.f + outer.f,
+  };
+}
+
+/**
+ * Recursively collects vector path objects (FPDF_PAGEOBJ_PATH = 2) inside an annotation
+ * or nested Form XObject (FPDF_PAGEOBJ_FORM = 5), accumulating parent Form matrices.
+ */
+function collectAnnotationPathObjects(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  annotHandle: number
+): Array<{ objHandle: number; insideForm: boolean; parentMatrix: PdfMatrix | null }> {
+  const results: Array<{ objHandle: number; insideForm: boolean; parentMatrix: PdfMatrix | null }> = [];
+  if (
+    typeof mod.FPDFAnnot_GetObjectCount !== 'function' ||
+    typeof mod.FPDFAnnot_GetObject !== 'function'
+  ) {
+    return results;
+  }
+
+  const visitFormObject = (formObj: number, accumulatedMatrix: PdfMatrix | null, depth: number): void => {
+    if (
+      depth > 6 ||
+      typeof mod.FPDFFormObj_CountObjects !== 'function' ||
+      typeof mod.FPDFFormObj_GetObject !== 'function'
+    ) {
+      return;
+    }
+    const formMat = getPageObjectMatrix(engine, mod, formObj);
+    const nextMatrix =
+      accumulatedMatrix && formMat
+        ? multiplyPdfMatrices(accumulatedMatrix, formMat)
+        : formMat || accumulatedMatrix;
+
+    const subCount = mod.FPDFFormObj_CountObjects(formObj);
+    for (let k = 0; k < subCount; k++) {
+      const subObj = mod.FPDFFormObj_GetObject(formObj, k);
+      if (!subObj) continue;
+      const subType = mod.FPDFPageObj_GetType(subObj);
+      if (subType === 2) {
+        results.push({ objHandle: subObj, insideForm: true, parentMatrix: nextMatrix });
+      } else if (subType === 5) {
+        visitFormObject(subObj, nextMatrix, depth + 1);
+      }
+    }
+  };
+
+  const topCount = mod.FPDFAnnot_GetObjectCount(annotHandle);
+  for (let j = 0; j < topCount; j++) {
+    const obj = mod.FPDFAnnot_GetObject(annotHandle, j);
+    if (!obj) continue;
+    const objType = mod.FPDFPageObj_GetType(obj);
+    if (objType === 2) {
+      results.push({ objHandle: obj, insideForm: false, parentMatrix: null });
+    } else if (objType === 5) {
+      visitFormObject(obj, null, 1);
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Resolves the effective page-space matrix for an annotation path object.
+ * Nested Form XObject paths may have coordinates in [0..W, 0..H] or in an arbitrary Form /BBox;
+ * this normalises their translation into the annotation's page-space /Rect [pdfLeft, pdfBottom].
+ */
+function resolveAnnotationPathMatrix(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  pathObj: number,
+  insideForm: boolean,
+  parentMatrix: PdfMatrix | null,
+  pdfLeft: number,
+  pdfBottom: number,
+  width: number,
+  height: number,
+  boundsPtrs: { leftPtr: number; bottomPtr: number; rightPtr: number; topPtr: number }
+): PdfMatrix | null {
+  const ownMat = getPageObjectMatrix(engine, mod, pathObj) ?? {
+    a: 1,
+    b: 0,
+    c: 0,
+    d: 1,
+    e: 0,
+    f: 0,
+  };
+  const mat = parentMatrix ? multiplyPdfMatrices(parentMatrix, ownMat) : ownMat;
+  if (!insideForm) return mat;
+
+  const ok = mod.FPDFPageObj_GetBounds(
+    pathObj,
+    boundsPtrs.leftPtr,
+    boundsPtrs.bottomPtr,
+    boundsPtrs.rightPtr,
+    boundsPtrs.topPtr
+  );
+  if (!ok) return mat;
+
+  const heapF32 = mod.pdfium.HEAPF32;
+  const bLeft = heapF32[boundsPtrs.leftPtr >> 2];
+  const bBottom = heapF32[boundsPtrs.bottomPtr >> 2];
+
+  const tLeft = parentMatrix
+    ? parentMatrix.a * bLeft + parentMatrix.c * bBottom + parentMatrix.e
+    : bLeft;
+  const tBottom = parentMatrix
+    ? parentMatrix.b * bLeft + parentMatrix.d * bBottom + parentMatrix.f
+    : bBottom;
+
+  const distToPageRect = Math.hypot(tLeft - pdfLeft, tBottom - pdfBottom);
+  if (distToPageRect <= Math.max(width, height, 5)) {
+    return mat;
+  }
+
+  if (tLeft >= -2 && tBottom >= -2 && tLeft <= width + 2 && tBottom <= height + 2) {
+    return {
+      ...mat,
+      e: mat.e + pdfLeft,
+      f: mat.f + pdfBottom,
+    };
+  }
+
+  return {
+    ...mat,
+    e: mat.e + (pdfLeft - tLeft),
+    f: mat.f + (pdfBottom - tBottom),
+  };
+}
+
+/**
+ * Formats an RGB triplet and alpha byte into a CSS hex or rgba colour string.
+ */
+function formatColorAndOpacity(
+  r: number,
+  g: number,
+  b: number,
+  a: number
+): { color: string; opacity: number } {
+  const toHex = (n: number): string => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
+  const hex = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  const opacity = a < 255 ? Math.round((a / 255) * 1000) / 1000 : 1;
+  return { color: hex, opacity };
+}
+
+/**
+ * Extracts QuadPoints from a markup annotation into a local SVG path string.
+ */
+function extractQuadPointsSvgPath(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  annotHandle: number,
+  cropInfo: PageCropInfo,
+  domLeft: number,
+  domTop: number,
+  heightPts: number
+): string | undefined {
+  if (
+    typeof mod.FPDFAnnot_CountAttachmentPoints !== 'function' ||
+    typeof mod.FPDFAnnot_GetAttachmentPoints !== 'function'
+  ) {
+    return undefined;
+  }
+
+  const quadCount = mod.FPDFAnnot_CountAttachmentPoints(annotHandle);
+  if (quadCount <= 1) return undefined;
+
+  const quadPtr = engine.allocateMemory(32);
+  if (!quadPtr) return undefined;
+
+  try {
+    const heapF32 = mod.pdfium.HEAPF32;
+    const cmds: string[] = [];
+    const fmt = (n: number): number => Math.round(n * 100) / 100;
+
+    const toLocalDom = (pdfX: number, pdfY: number): { x: number; y: number } => {
+      if (cropInfo.rotation !== 0) {
+        const pt = pdfToDomCoords(pdfX, pdfY, cropInfo);
+        return { x: fmt(pt.x - domLeft), y: fmt(pt.y - domTop) };
+      }
+      return {
+        x: fmt(pdfX - cropInfo.cropLeft - domLeft),
+        y: fmt(heightPts - (pdfY - cropInfo.cropBottom) - domTop),
+      };
+    };
+
+    for (let q = 0; q < quadCount; q++) {
+      const ok = mod.FPDFAnnot_GetAttachmentPoints(annotHandle, q, quadPtr);
+      if (!ok) continue;
+      const base = quadPtr >> 2;
+      const p1 = toLocalDom(heapF32[base], heapF32[base + 1]);
+      const p2 = toLocalDom(heapF32[base + 2], heapF32[base + 3]);
+      const p3 = toLocalDom(heapF32[base + 4], heapF32[base + 5]);
+      const p4 = toLocalDom(heapF32[base + 6], heapF32[base + 7]);
+      cmds.push(
+        `M ${p1.x} ${p1.y} L ${p2.x} ${p2.y} L ${p4.x} ${p4.y} L ${p3.x} ${p3.y} Z`
+      );
+    }
+
+    return cmds.length > 0 ? cmds.join(' ') : undefined;
+  } finally {
+    engine.freeMemory(quadPtr);
+  }
+}
+
+/**
+ * Extracts InkList strokes from an Ink annotation into a local SVG path string.
+ */
+function extractInkListSvgPath(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  annotHandle: number,
+  cropInfo: PageCropInfo,
+  domLeft: number,
+  domTop: number,
+  heightPts: number
+): string | undefined {
+  if (
+    typeof mod.FPDFAnnot_GetInkListCount !== 'function' ||
+    typeof mod.FPDFAnnot_GetInkListPath !== 'function'
+  ) {
+    return undefined;
+  }
+
+  const inkCount = mod.FPDFAnnot_GetInkListCount(annotHandle);
+  if (inkCount <= 0) return undefined;
+
+  const fmt = (n: number): number => Math.round(n * 100) / 100;
+  const toLocalDom = (pdfX: number, pdfY: number): { x: number; y: number } => {
+    if (cropInfo.rotation !== 0) {
+      const pt = pdfToDomCoords(pdfX, pdfY, cropInfo);
+      return { x: fmt(pt.x - domLeft), y: fmt(pt.y - domTop) };
+    }
+    return {
+      x: fmt(pdfX - cropInfo.cropLeft - domLeft),
+      y: fmt(heightPts - (pdfY - cropInfo.cropBottom) - domTop),
+    };
+  };
+
+  const cmds: string[] = [];
+  for (let s = 0; s < inkCount; s++) {
+    const ptCount = mod.FPDFAnnot_GetInkListPath(annotHandle, s, 0, 0);
+    if (ptCount <= 0) continue;
+    const bufPtr = engine.allocateMemory(ptCount * 8);
+    if (!bufPtr) continue;
+    try {
+      mod.FPDFAnnot_GetInkListPath(annotHandle, s, bufPtr, ptCount);
+      const heapF32 = mod.pdfium.HEAPF32;
+      const base = bufPtr >> 2;
+      for (let k = 0; k < ptCount; k++) {
+        const pt = toLocalDom(heapF32[base + k * 2], heapF32[base + k * 2 + 1]);
+        cmds.push(k === 0 ? `M ${pt.x} ${pt.y}` : `L ${pt.x} ${pt.y}`);
+      }
+    } finally {
+      engine.freeMemory(bufPtr);
+    }
+  }
+
+  return cmds.length > 0 ? cmds.join(' ') : undefined;
+}
+
+/**
+ * Extracts native PDF annotations (stamps, highlights, markups, ink drawings, geometric shapes,
+ * and redactions) on a page into EditableImageSpan and EditableShapeSpan overlays.
+ */
+export function extractPageAnnotations(
+  engine: PdfiumEngine,
+  mod: ExtendedWrappedPdfiumModule,
+  pageIndex: number,
+  pageHandle: number,
+  cropInfo: PageCropInfo,
+  heightPts: number,
+  boundsPtrs: { leftPtr: number; bottomPtr: number; rightPtr: number; topPtr: number },
+  pathPtrs: PathExtractionPointers
+): { images: EditableImageSpan[]; shapes: EditableShapeSpan[] } {
+  const images: EditableImageSpan[] = [];
+  const shapes: EditableShapeSpan[] = [];
+
+  if (
+    typeof mod.FPDFPage_GetAnnotCount !== 'function' ||
+    typeof mod.FPDFPage_GetAnnot !== 'function' ||
+    typeof mod.FPDFAnnot_GetRect !== 'function'
+  ) {
+    return { images, shapes };
+  }
+
+  const annotCount = mod.FPDFPage_GetAnnotCount(pageHandle);
+  if (annotCount <= 0) {
+    return { images, shapes };
+  }
+
+  const rectPtr = engine.allocateMemory(16);
+  if (!rectPtr) {
+    return { images, shapes };
+  }
+
+  try {
+    const heapF32 = mod.pdfium.HEAPF32;
+    const heapU32 = mod.pdfium.HEAPU32;
+
+    for (let i = 0; i < annotCount; i++) {
+      const annotHandle = mod.FPDFPage_GetAnnot(pageHandle, i);
+      if (!annotHandle) continue;
+
+      try {
+        const subtype = mod.FPDFAnnot_GetSubtype(annotHandle);
+        if (
+          subtype === FPDF_ANNOT_TEXT ||
+          subtype === FPDF_ANNOT_LINK ||
+          subtype === FPDF_ANNOT_POPUP ||
+          subtype === FPDF_ANNOT_WIDGET
+        ) {
+          continue;
+        }
+
+        const okRect = mod.FPDFAnnot_GetRect(annotHandle, rectPtr);
+        if (!okRect) continue;
+
