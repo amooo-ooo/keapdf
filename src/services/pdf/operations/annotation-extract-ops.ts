@@ -924,3 +924,464 @@ export function extractPageAnnotations(
         const okRect = mod.FPDFAnnot_GetRect(annotHandle, rectPtr);
         if (!okRect) continue;
 
+        const x1 = heapF32[rectPtr >> 2];
+        const y1 = heapF32[(rectPtr >> 2) + 1];
+        const x2 = heapF32[(rectPtr >> 2) + 2];
+        const y2 = heapF32[(rectPtr >> 2) + 3];
+
+        const pdfLeft = Math.min(x1, x2);
+        const pdfRight = Math.max(x1, x2);
+        const pdfBottom = Math.min(y1, y2);
+        const pdfTop = Math.max(y1, y2);
+
+        let left: number;
+        let top: number;
+        let width: number;
+        let height: number;
+
+        if (cropInfo.rotation !== 0) {
+          const bounds = pdfBoxToDomBounds(pdfLeft, pdfBottom, pdfRight, pdfTop, cropInfo);
+          left = bounds.left;
+          top = bounds.top;
+          width = bounds.right - bounds.left;
+          height = bounds.bottom - bounds.top;
+        } else {
+          left = pdfLeft - cropInfo.cropLeft;
+          top = heightPts - (pdfTop - cropInfo.cropBottom);
+          width = pdfRight - pdfLeft;
+          height = pdfTop - pdfBottom;
+        }
+
+        if (width <= 0.5 || height <= 0.5) continue;
+
+        const objCount =
+          typeof mod.FPDFAnnot_GetObjectCount === 'function'
+            ? mod.FPDFAnnot_GetObjectCount(annotHandle)
+            : 0;
+
+        let hasImageObj = false;
+        if (objCount > 0 && typeof mod.FPDFAnnot_GetObject === 'function') {
+          for (let j = 0; j < objCount; j++) {
+            const obj = mod.FPDFAnnot_GetObject(annotHandle, j);
+            if (obj && mod.FPDFPageObj_GetType(obj) === 3) {
+              hasImageObj = true;
+              break;
+            }
+          }
+        }
+
+        const subtypeName = ANNOT_SUBTYPE_NAMES[subtype] || `Type ${subtype}`;
+
+        if (subtype === FPDF_ANNOT_STAMP || hasImageObj) {
+          const src = renderAnnotationAppearanceToDataUrl(
+            engine,
+            mod,
+            annotHandle,
+            width,
+            height
+          );
+          if (src) {
+            images.push({
+              type: 'image',
+              id: `annot_img_${pageIndex}_${i}`,
+              pageIndex,
+              left,
+              top,
+              width,
+              height,
+              rotation: 0,
+              flipX: false,
+              flipY: false,
+              src,
+              pdfObjectIndex: -1,
+              pdfAnnotIndex: i,
+              annotSubtype: subtypeName,
+            });
+            continue;
+          }
+        }
+
+        const isSupportedShapeAnnot =
+          subtype === FPDF_ANNOT_HIGHLIGHT ||
+          subtype === FPDF_ANNOT_UNDERLINE ||
+          subtype === FPDF_ANNOT_SQUIGGLY ||
+          subtype === FPDF_ANNOT_STRIKEOUT ||
+          subtype === FPDF_ANNOT_INK ||
+          subtype === FPDF_ANNOT_SQUARE ||
+          subtype === FPDF_ANNOT_CIRCLE ||
+          subtype === FPDF_ANNOT_LINE ||
+          subtype === FPDF_ANNOT_POLYGON ||
+          subtype === FPDF_ANNOT_POLYLINE ||
+          subtype === FPDF_ANNOT_REDACT;
+
+        if (!isSupportedShapeAnnot) continue;
+
+        const pathEntries = collectAnnotationPathObjects(engine, mod, annotHandle);
+        if (pathEntries.length > 0) {
+          const svgPaths: string[] = [];
+          let primaryProps = extractRawPathProperties(
+            mod,
+            pathEntries[0].objHandle,
+            cropInfo,
+            left,
+            top,
+            width,
+            height,
+            pathPtrs,
+            resolveAnnotationPathMatrix(
+              engine,
+              mod,
+              pathEntries[0].objHandle,
+              pathEntries[0].insideForm,
+              pathEntries[0].parentMatrix,
+              pdfLeft,
+              pdfBottom,
+              width,
+              height,
+              boundsPtrs
+            )
+          );
+
+          if (primaryProps.svgPath) {
+            svgPaths.push(primaryProps.svgPath);
+          }
+
+          for (let k = 1; k < pathEntries.length; k++) {
+            const entry = pathEntries[k];
+            const entryMat = resolveAnnotationPathMatrix(
+              engine,
+              mod,
+              entry.objHandle,
+              entry.insideForm,
+              entry.parentMatrix,
+              pdfLeft,
+              pdfBottom,
+              width,
+              height,
+              boundsPtrs
+            );
+            const props = extractRawPathProperties(
+              mod,
+              entry.objHandle,
+              cropInfo,
+              left,
+              top,
+              width,
+              height,
+              pathPtrs,
+              entryMat
+            );
+            if (props.svgPath) {
+              svgPaths.push(props.svgPath);
+            }
+            if (!primaryProps.hasFill && props.hasFill) {
+              primaryProps = { ...primaryProps, fill: props.fill, hasFill: true, opacity: props.opacity };
+            }
+            if (!primaryProps.hasStroke && props.hasStroke) {
+              primaryProps = {
+                ...primaryProps,
+                stroke: props.stroke,
+                strokeWidth: props.strokeWidth,
+                hasStroke: true,
+              };
+            }
+          }
+
+          const combinedSvgPath = svgPaths.length > 0 ? svgPaths.join(' ') : primaryProps.svgPath;
+          const variant: ShapeVariantType =
+            pathEntries.length > 1 ? 'path' : primaryProps.variant;
+
+          shapes.push({
+            type: 'shape',
+            id: `annot_shape_${pageIndex}_${i}`,
+            pageIndex,
+            left,
+            top,
+            width,
+            height,
+            rotation: 0,
+            flipX: false,
+            flipY: false,
+            fill: primaryProps.fill,
+            stroke: primaryProps.stroke,
+            strokeWidth: primaryProps.strokeWidth,
+            variant,
+            opacity: primaryProps.opacity,
+            isHighlight: subtype === FPDF_ANNOT_HIGHLIGHT,
+            hasFill: primaryProps.hasFill,
+            hasStroke: primaryProps.hasStroke,
+            fillMode: primaryProps.fillMode,
+            fillRule: primaryProps.fillRule,
+            strokeLineCap: primaryProps.strokeLineCap,
+            strokeLineJoin: primaryProps.strokeLineJoin,
+            svgPath: combinedSvgPath,
+            viewBox: primaryProps.viewBox,
+            baseWidth: width,
+            baseHeight: height,
+            pdfObjectIndex: -1,
+            pdfAnnotIndex: i,
+            annotSubtype: subtypeName,
+          });
+          continue;
+        }
+
+        let r = 255;
+        let g = 235;
+        let b = 59;
+        let a = subtype === FPDF_ANNOT_HIGHLIGHT ? 128 : 255;
+        if (typeof mod.FPDFAnnot_GetColor === 'function') {
+          const okColor = mod.FPDFAnnot_GetColor(
+            annotHandle,
+            0,
+            pathPtrs.rPtr,
+            pathPtrs.gPtr,
+            pathPtrs.bPtr,
+            pathPtrs.aPtr
+          );
+          if (okColor) {
+            r = heapU32[pathPtrs.rPtr >> 2];
+            g = heapU32[pathPtrs.gPtr >> 2];
+            b = heapU32[pathPtrs.bPtr >> 2];
+            a = heapU32[pathPtrs.aPtr >> 2];
+          }
+        }
+
+        const { color: primaryColor, opacity } = formatColorAndOpacity(r, g, b, a);
+        const viewBox = `0 0 ${Math.max(1, Math.round(width * 100) / 100)} ${Math.max(1, Math.round(height * 100) / 100)}`;
+
+        if (subtype === FPDF_ANNOT_INK) {
+          let strokeWidth = 2;
+          if (typeof mod.FPDFAnnot_GetBorder === 'function') {
+            const okBorder = mod.FPDFAnnot_GetBorder(
+              annotHandle,
+              pathPtrs.xPtr,
+              pathPtrs.yPtr,
+              pathPtrs.wPtr
+            );
+            if (okBorder) {
+              const bw = heapF32[pathPtrs.wPtr >> 2];
+              if (bw > 0) strokeWidth = Math.round(bw * 100) / 100;
+            }
+          }
+          const svgPath = extractInkListSvgPath(
+            engine,
+            mod,
+            annotHandle,
+            cropInfo,
+            left,
+            top,
+            heightPts
+          );
+          shapes.push({
+            type: 'shape',
+            id: `annot_shape_${pageIndex}_${i}`,
+            pageIndex,
+            left,
+            top,
+            width,
+            height,
+            rotation: 0,
+            flipX: false,
+            flipY: false,
+            fill: 'transparent',
+            stroke: primaryColor,
+            strokeWidth,
+            variant: 'path',
+            opacity,
+            isHighlight: false,
+            hasFill: false,
+            hasStroke: true,
+            strokeLineCap: 'round',
+            strokeLineJoin: 'round',
+            svgPath,
+            viewBox,
+            baseWidth: width,
+            baseHeight: height,
+            pdfObjectIndex: -1,
+            pdfAnnotIndex: i,
+            annotSubtype: subtypeName,
+          });
+        } else if (
+          subtype === FPDF_ANNOT_HIGHLIGHT ||
+          subtype === FPDF_ANNOT_UNDERLINE ||
+          subtype === FPDF_ANNOT_SQUIGGLY ||
+          subtype === FPDF_ANNOT_STRIKEOUT
+        ) {
+          const quadSvgPath = extractQuadPointsSvgPath(
+            engine,
+            mod,
+            annotHandle,
+            cropInfo,
+            left,
+            top,
+            heightPts
+          );
+          shapes.push({
+            type: 'shape',
+            id: `annot_shape_${pageIndex}_${i}`,
+            pageIndex,
+            left,
+            top,
+            width,
+            height,
+            rotation: 0,
+            flipX: false,
+            flipY: false,
+            fill: primaryColor,
+            stroke: 'transparent',
+            strokeWidth: 0,
+            variant: quadSvgPath ? 'path' : 'rectangle',
+            opacity,
+            isHighlight: subtype === FPDF_ANNOT_HIGHLIGHT,
+            hasFill: true,
+            hasStroke: false,
+            svgPath: quadSvgPath,
+            viewBox: quadSvgPath ? viewBox : undefined,
+            baseWidth: width,
+            baseHeight: height,
+            pdfObjectIndex: -1,
+            pdfAnnotIndex: i,
+            annotSubtype: subtypeName,
+          });
+        } else {
+          const variant: ShapeVariantType =
+            subtype === FPDF_ANNOT_CIRCLE
+              ? 'circle'
+              : subtype === FPDF_ANNOT_LINE
+                ? 'line'
+                : 'rectangle';
+          shapes.push({
+            type: 'shape',
+            id: `annot_shape_${pageIndex}_${i}`,
+            pageIndex,
+            left,
+            top,
+            width,
+            height,
+            rotation: 0,
+            flipX: false,
+            flipY: false,
+            fill: subtype === FPDF_ANNOT_REDACT ? '#000000' : primaryColor,
+            stroke: primaryColor,
+            strokeWidth: subtype === FPDF_ANNOT_LINE ? 1.5 : 0,
+            variant,
+            opacity,
+            isHighlight: false,
+            hasFill: subtype !== FPDF_ANNOT_LINE,
+            hasStroke: subtype === FPDF_ANNOT_LINE,
+            baseWidth: width,
+            baseHeight: height,
+            pdfObjectIndex: -1,
+            pdfAnnotIndex: i,
+            annotSubtype: subtypeName,
+          });
+        }
+      } finally {
+        mod.FPDFPage_CloseAnnot(annotHandle);
+      }
+    }
+  } finally {
+    engine.freeMemory(rectPtr);
+  }
+
+  return { images, shapes };
+}
+
+/**
+ * Removes a native PDF annotation from the page by index, falling back to spatial bounds
+ * matching if earlier annotations on the same page were already removed.
+ */
+export function removeAnnotationWithFallback(
+  engine: PdfiumEngine,
+  pageHandle: number,
+  annotIndex: number,
+  expectedDomBounds?: { left: number; top: number; width: number; height: number }
+): void {
+  const mod = engine.getModule();
+  if (typeof mod.FPDFPage_RemoveAnnot !== 'function') return;
+
+  if (
+    !expectedDomBounds ||
+    typeof mod.FPDFPage_GetAnnotCount !== 'function' ||
+    typeof mod.FPDFPage_GetAnnot !== 'function' ||
+    typeof mod.FPDFAnnot_GetRect !== 'function'
+  ) {
+    mod.FPDFPage_RemoveAnnot(pageHandle, annotIndex);
+    return;
+  }
+
+  const annotCount = mod.FPDFPage_GetAnnotCount(pageHandle);
+  if (annotCount <= 0) return;
+
+  const rectPtr = engine.allocateMemory(16);
+  if (!rectPtr) {
+    mod.FPDFPage_RemoveAnnot(pageHandle, annotIndex);
+    return;
+  }
+
+  try {
+    const heightPts = mod.FPDF_GetPageHeightF(pageHandle);
+    const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+    const heapF32 = mod.pdfium.HEAPF32;
+
+    const getAnnotDomRect = (idx: number): { left: number; top: number; width: number; height: number; subtype: number } | null => {
+      if (idx < 0 || idx >= annotCount) return null;
+      const annot = mod.FPDFPage_GetAnnot(pageHandle, idx);
+      if (!annot) return null;
+      try {
+        const subtype = mod.FPDFAnnot_GetSubtype(annot);
+        if (!mod.FPDFAnnot_GetRect(annot, rectPtr)) return null;
+        const x1 = heapF32[rectPtr >> 2];
+        const y1 = heapF32[(rectPtr >> 2) + 1];
+        const x2 = heapF32[(rectPtr >> 2) + 2];
+        const y2 = heapF32[(rectPtr >> 2) + 3];
+        const pdfLeft = Math.min(x1, x2);
+        const pdfRight = Math.max(x1, x2);
+        const pdfBottom = Math.min(y1, y2);
+        const pdfTop = Math.max(y1, y2);
+
+        if (cropInfo.rotation !== 0) {
+          const b = pdfBoxToDomBounds(pdfLeft, pdfBottom, pdfRight, pdfTop, cropInfo);
+          return { left: b.left, top: b.top, width: b.right - b.left, height: b.bottom - b.top, subtype };
+        }
+        return {
+          left: pdfLeft - cropInfo.cropLeft,
+          top: heightPts - (pdfTop - cropInfo.cropBottom),
+          width: pdfRight - pdfLeft,
+          height: pdfTop - pdfBottom,
+          subtype,
+        };
+      } finally {
+        mod.FPDFPage_CloseAnnot(annot);
+      }
+    };
+
+    const matchesBounds = (rect: { left: number; top: number; width: number; height: number }): boolean =>
+      Math.abs(rect.left - expectedDomBounds.left) <= 3 &&
+      Math.abs(rect.top - expectedDomBounds.top) <= 3 &&
+      Math.abs(rect.width - expectedDomBounds.width) <= 3 &&
+      Math.abs(rect.height - expectedDomBounds.height) <= 3;
+
+    let resolvedIndex = -1;
+    const directRect = getAnnotDomRect(annotIndex);
+    if (directRect && directRect.subtype !== FPDF_ANNOT_POPUP && matchesBounds(directRect)) {
+      resolvedIndex = annotIndex;
+    } else {
+      for (let idx = 0; idx < annotCount; idx++) {
+        const candidateRect = getAnnotDomRect(idx);
+        if (candidateRect && candidateRect.subtype !== FPDF_ANNOT_POPUP && matchesBounds(candidateRect)) {
+          resolvedIndex = idx;
+          break;
+        }
+      }
+    }
+
+    if (resolvedIndex >= 0) {
+      mod.FPDFPage_RemoveAnnot(pageHandle, resolvedIndex);
+    } else if (annotIndex >= 0 && annotIndex < annotCount) {
+      mod.FPDFPage_RemoveAnnot(pageHandle, annotIndex);
+    }
+  } finally {
+    engine.freeMemory(rectPtr);
+  }
+}
