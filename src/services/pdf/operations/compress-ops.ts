@@ -12,7 +12,13 @@ import type {
   CompressionInspection,
   CompressImageProcessor,
   PageRasterizer,
+  ImageInspectionRecord,
+  PageDimensionRecord,
 } from '../../../core/types';
+import {
+  resolveCompressionDefaults,
+  resolveMaxPixelDimension,
+} from './compress-estimate';
 
 /**
  * Image XObject metadata extracted from indirect objects.
@@ -25,6 +31,31 @@ interface ImageXObjectRecord {
   colorSpace: string;
   filter: string;
   hasMask: boolean;
+}
+
+/**
+ * Scans raw bytes for presence of object stream markers.
+ *
+ * @param bytes The raw PDF binary buffer.
+ * @return True if object streams are detected in the file.
+ */
+function hasObjectStreamsInBytes(bytes: Uint8Array): boolean {
+  const marker = [0x2f, 0x4f, 0x62, 0x6a, 0x53, 0x74, 0x6d];
+  const len = bytes.byteLength;
+  const mLen = marker.length;
+  for (let i = 0; i <= len - mLen; i++) {
+    if (bytes[i] === marker[0]) {
+      let match = true;
+      for (let j = 1; j < mLen; j++) {
+        if (bytes[i + j] !== marker[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -42,29 +73,130 @@ export async function inspectPdfForCompression(
   const pageCount = pdfDoc.getPageCount();
   let imageCount = 0;
   let totalImageBytes = 0;
+  let jpegImageCount = 0;
+  let jpegImageBytes = 0;
+  let totalStreamBytes = 0;
+  let hasObjectStreams = hasObjectStreamsInBytes(bytes);
   let thumbnailCount = 0;
+  let thumbnailBytes = 0;
+  let pieceInfoBytes = 0;
   let hasPieceInfo = pdfDoc.catalog.has(PDFName.of('PieceInfo'));
   const hasXmpMetadata = pdfDoc.catalog.has(PDFName.of('Metadata'));
+  let metadataBytes = 0;
+
+  const images: ImageInspectionRecord[] = [];
 
   for (const [, obj] of pdfDoc.context.enumerateIndirectObjects()) {
     if (obj instanceof PDFRawStream) {
+      const streamSize = obj.getContentsSize();
+      totalStreamBytes += streamSize;
+
       const subtype = obj.dict.get(PDFName.of('Subtype'));
+      const type = obj.dict.get(PDFName.of('Type'));
+      if (
+        (type instanceof PDFName && (type.asString() === '/ObjStm' || type.asString() === '/XRef')) ||
+        (subtype instanceof PDFName && subtype.asString() === '/ObjStm')
+      ) {
+        hasObjectStreams = true;
+      }
+
       if (subtype instanceof PDFName && subtype.asString() === '/Image') {
         imageCount++;
-        totalImageBytes += obj.getContentsSize();
+        totalImageBytes += streamSize;
+
+        const widthObj = obj.dict.get(PDFName.of('Width'));
+        const heightObj = obj.dict.get(PDFName.of('Height'));
+        const width = widthObj instanceof PDFNumber ? widthObj.asNumber() : 0;
+        const height = heightObj instanceof PDFNumber ? heightObj.asNumber() : 0;
+
+        let filter = '';
+        const filterObj = obj.dict.get(PDFName.of('Filter'));
+        if (filterObj instanceof PDFName) {
+          filter = filterObj.asString().replace(/^\//, '');
+        } else if (filterObj instanceof PDFArray && filterObj.size() > 0) {
+          const first = filterObj.get(0);
+          if (first instanceof PDFName) {
+            filter = first.asString().replace(/^\//, '');
+          }
+        }
+
+        let colorSpace = 'DeviceRGB';
+        const csObj = obj.dict.get(PDFName.of('ColorSpace'));
+        if (csObj instanceof PDFName) {
+          colorSpace = csObj.asString().replace(/^\//, '');
+        }
+
+        const hasMask =
+          obj.dict.has(PDFName.of('SMask')) || obj.dict.has(PDFName.of('Mask'));
+
+        if (filter === 'DCTDecode') {
+          jpegImageCount++;
+          jpegImageBytes += streamSize;
+        }
+
+        images.push({
+          width,
+          height,
+          byteLength: streamSize,
+          filter,
+          colorSpace,
+          hasMask,
+        });
       }
     }
   }
 
-  for (let i = 0; i < pageCount; i++) {
-    const page = pdfDoc.getPage(i);
-    if (page.node.has(PDFName.of('Thumb'))) {
-      thumbnailCount++;
-    }
-    if (page.node.has(PDFName.of('PieceInfo'))) {
-      hasPieceInfo = true;
+  if (hasXmpMetadata) {
+    const metaRef = pdfDoc.catalog.get(PDFName.of('Metadata'));
+    if (metaRef instanceof PDFRef) {
+      const metaObj = pdfDoc.context.lookup(metaRef);
+      if (metaObj instanceof PDFRawStream) {
+        metadataBytes += metaObj.getContentsSize();
+      } else {
+        metadataBytes += 200;
+      }
+    } else {
+      metadataBytes += 200;
     }
   }
+
+  if (pdfDoc.context.trailerInfo.Info) {
+    metadataBytes += 200;
+  }
+
+  if (hasPieceInfo) {
+    pieceInfoBytes += 150;
+  }
+
+  const pageDimensions: PageDimensionRecord[] = [];
+
+  for (let i = 0; i < pageCount; i++) {
+    const page = pdfDoc.getPage(i);
+    const size = page.getSize();
+    pageDimensions.push({ width: size.width, height: size.height });
+
+    if (page.node.has(PDFName.of('Thumb'))) {
+      thumbnailCount++;
+      const thumbRef = page.node.get(PDFName.of('Thumb'));
+      if (thumbRef instanceof PDFRef) {
+        const thumbObj = pdfDoc.context.lookup(thumbRef);
+        if (thumbObj instanceof PDFRawStream) {
+          thumbnailBytes += thumbObj.getContentsSize();
+        } else {
+          thumbnailBytes += 100;
+        }
+      } else {
+        thumbnailBytes += 100;
+      }
+    }
+
+    if (page.node.has(PDFName.of('PieceInfo'))) {
+      hasPieceInfo = true;
+      pieceInfoBytes += 100;
+    }
+  }
+
+  const structuralBytes = Math.max(0, bytes.byteLength - totalStreamBytes);
 
   return {
     originalSizeBytes: bytes.byteLength,
@@ -75,6 +207,16 @@ export async function inspectPdfForCompression(
     thumbnailCount,
     hasPieceInfo,
     hasXmpMetadata,
+    jpegImageCount,
+    jpegImageBytes,
+    totalStreamBytes,
+    structuralBytes,
+    hasObjectStreams,
+    thumbnailBytes,
+    metadataBytes,
+    pieceInfoBytes,
+    images,
+    pageDimensions,
   };
 }
 
@@ -83,7 +225,7 @@ export async function inspectPdfForCompression(
  * private vendor application data, and DocInfo dictionaries.
  *
  * @param pdfDoc The PDFDocument instance to prune.
- * @param options Compression options controlling pruning behavior.
+ * @param options Compression options controlling pruning behaviour.
  * @return Count of pruned items.
  */
 export function pruneStructuralBloat(
@@ -304,20 +446,6 @@ async function recompressJpegViaBrowser(
   return null;
 }
 
-/**
- * Calculates max pixel dimension based on maxDpi or fallback limits.
- *
- * @param maxDpi Target DPI cap.
- * @return Maximum allowed dimension in pixels.
- */
-function resolveMaxPixelDimension(maxDpi?: number): number {
-  if (!maxDpi || maxDpi <= 0) return 4096;
-  if (maxDpi <= 96) return 1280;
-  if (maxDpi <= 150) return 1920;
-  if (maxDpi <= 200) return 2560;
-  if (maxDpi <= 300) return 3840;
-  return 4096;
-}
 
 /**
  * Recompresses qualifying image XObjects within the PDF document.
@@ -348,7 +476,11 @@ export async function recompressImageXObjects(
     const origSize = origBytes.byteLength;
     if (origSize === 0) continue;
 
-    const scale = Math.min(1.0, maxDim / Math.max(img.width, img.height));
+    // Preserve 1:1 pixel dimensions when the image carries an /SMask or /Mask
+    // so the soft mask dimensions remain synchronised with the colour stream.
+    const scale = img.hasMask
+      ? 1.0
+      : Math.min(1.0, maxDim / Math.max(img.width, img.height));
     const targetW = Math.max(1, Math.round(img.width * scale));
     const targetH = Math.max(1, Math.round(img.height * scale));
 
@@ -398,7 +530,7 @@ export async function recompressImageXObjects(
 }
 
 /**
- * Performs full-page lossy flat image rasterization, converting every page
+ * Performs full-page lossy flat image rasterisation, converting every page
  * into a single compressed JPEG image on an identical page boundary.
  *
  * @param pdfBytes The source PDF buffer.
@@ -439,83 +571,6 @@ export async function rasterizePdfToFlatImage(
   return { bytes, pageCount };
 }
 
-/**
- * Resolves default parameters for each named compression level.
- *
- * @param options User supplied compression options.
- * @return Normalized options with all defaults populated.
- */
-export function resolveCompressionDefaults(options: CompressOptions): CompressOptions {
-  const level = options.level;
-
-  switch (level) {
-    case 'lossless':
-      return {
-        level,
-        imageQuality: 1.0,
-        maxDpi: undefined,
-        useObjectStreams: options.useObjectStreams ?? true,
-        removeThumbnails: options.removeThumbnails ?? true,
-        removePieceInfo: options.removePieceInfo ?? true,
-        removeMetadata: options.removeMetadata ?? false,
-        removeAnnotations: options.removeAnnotations ?? false,
-        imageProcessor: options.imageProcessor,
-      };
-
-    case 'recommended':
-      return {
-        level,
-        imageQuality: options.imageQuality ?? 0.75,
-        maxDpi: options.maxDpi ?? 150,
-        useObjectStreams: options.useObjectStreams ?? true,
-        removeThumbnails: options.removeThumbnails ?? true,
-        removePieceInfo: options.removePieceInfo ?? true,
-        removeMetadata: options.removeMetadata ?? true,
-        removeAnnotations: options.removeAnnotations ?? false,
-        imageProcessor: options.imageProcessor,
-      };
-
-    case 'strong':
-      return {
-        level,
-        imageQuality: options.imageQuality ?? 0.50,
-        maxDpi: options.maxDpi ?? 96,
-        useObjectStreams: options.useObjectStreams ?? true,
-        removeThumbnails: options.removeThumbnails ?? true,
-        removePieceInfo: options.removePieceInfo ?? true,
-        removeMetadata: options.removeMetadata ?? true,
-        removeAnnotations: options.removeAnnotations ?? false,
-        imageProcessor: options.imageProcessor,
-      };
-
-    case 'flat_image':
-      return {
-        level,
-        imageQuality: options.imageQuality ?? 0.65,
-        maxDpi: options.maxDpi ?? 150,
-        useObjectStreams: options.useObjectStreams ?? true,
-        removeThumbnails: options.removeThumbnails ?? true,
-        removePieceInfo: options.removePieceInfo ?? true,
-        removeMetadata: options.removeMetadata ?? true,
-        removeAnnotations: options.removeAnnotations ?? false,
-        imageProcessor: options.imageProcessor,
-      };
-
-    case 'custom':
-    default:
-      return {
-        level: 'custom',
-        imageQuality: options.imageQuality ?? 0.75,
-        maxDpi: options.maxDpi ?? 150,
-        useObjectStreams: options.useObjectStreams ?? true,
-        removeThumbnails: options.removeThumbnails ?? true,
-        removePieceInfo: options.removePieceInfo ?? true,
-        removeMetadata: options.removeMetadata ?? false,
-        removeAnnotations: options.removeAnnotations ?? false,
-        imageProcessor: options.imageProcessor,
-      };
-  }
-}
 
 /**
  * Executes PDF compression across selected levels with monotonic size guarantees.
@@ -605,3 +660,10 @@ export async function compressPdf(
     summary,
   };
 }
+
+export {
+  resolveCompressionDefaults,
+  resolveMaxPixelDimension,
+  estimatePdfCompression,
+  estimateAllPresets,
+} from './compress-estimate';
