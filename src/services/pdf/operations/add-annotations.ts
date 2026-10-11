@@ -1,5 +1,5 @@
 import type { PdfiumEngine } from '../../../core/pdfium-engine';
-import { encodeUtf16Le } from '../../../core/pdfium-helpers';
+import { encodeUtf16Le, getPageCropInfo } from '../../../core/pdfium-helpers';
 import { parseColor } from '../utils';
 import type { ShapeOptions, PathOptions } from './types';
 
@@ -10,15 +10,24 @@ const FPDF_ANNOT_INK = 15;
 /**
  * Helper to allocate and set an FS_RECTF structure
  */
-function createRect(engine: PdfiumEngine, x: number, y: number, width: number, height: number, pageHeight: number): number {
+function createRect(
+  engine: PdfiumEngine,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  pageHeight: number,
+  cropLeft: number = 0,
+  cropBottom: number = 0,
+): number {
   const rectPtr = engine.allocateMemory(16); // 4 floats
   const heap = engine.getModule().pdfium.HEAPF32;
   
-  // PDF coordinates: origin at bottom-left.
-  const left = x;
-  const right = x + width;
-  const top = pageHeight - y;
-  const bottom = pageHeight - (y + height);
+  // PDF coordinates: origin at bottom-left, offset by active CropBox origin when present.
+  const left = cropLeft + x;
+  const right = cropLeft + x + width;
+  const top = cropBottom + (pageHeight - y);
+  const bottom = cropBottom + (pageHeight - (y + height));
 
   heap[rectPtr >> 2] = left;
   heap[(rectPtr >> 2) + 1] = bottom;
@@ -38,6 +47,9 @@ export function addHighlightAnnotation(
 ): void {
   const mod = engine.getModule();
   const pageHeight = mod.FPDF_GetPageHeightF(pageHandle);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const cropLeft = cropInfo.hasCropBox ? cropInfo.cropLeft : 0;
+  const cropBottom = cropInfo.hasCropBox ? cropInfo.cropBottom : 0;
   
   // Create highlight annotation
   const annotHandle = mod.FPDFPage_CreateAnnot(pageHandle, FPDF_ANNOT_HIGHLIGHT);
@@ -72,7 +84,7 @@ export function addHighlightAnnotation(
 
     const rx = cx + dx * cos - dy * sin;
     const ry = cy + dx * sin + dy * cos;
-    return { x: rx, pdfY: pageHeight - ry };
+    return { x: cropLeft + rx, pdfY: cropBottom + (pageHeight - ry) };
   });
 
   const TL = rotatedCorners[0];
@@ -145,6 +157,9 @@ export function addInkAnnotation(
 ): void {
   const mod = engine.getModule();
   const pageHeight = mod.FPDF_GetPageHeightF(pageHandle);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const cropLeft = cropInfo.hasCropBox ? cropInfo.cropLeft : 0;
+  const cropBottom = cropInfo.hasCropBox ? cropInfo.cropBottom : 0;
 
   if (!options.points || options.points.length === 0) return;
 
@@ -175,7 +190,9 @@ export function addInkAnnotation(
     minY - padding, 
     (maxX - minX) + padding * 2, 
     (maxY - minY) + padding * 2, 
-    pageHeight
+    pageHeight,
+    cropLeft,
+    cropBottom,
   );
   mod.FPDFAnnot_SetRect(annotHandle, rectPtr);
   engine.freeMemory(rectPtr);
@@ -203,8 +220,8 @@ export function addInkAnnotation(
     
     for (let i = 0; i < pointCount; i++) {
       const p = options.points[i];
-      heap[(pathPtr >> 2) + i * 2] = p.x;
-      heap[(pathPtr >> 2) + i * 2 + 1] = pageHeight - p.y;
+      heap[(pathPtr >> 2) + i * 2] = cropLeft + p.x;
+      heap[(pathPtr >> 2) + i * 2 + 1] = cropBottom + (pageHeight - p.y);
     }
     
     mod.FPDFAnnot_AddInkStroke(annotHandle, pathPtr, pointCount);
@@ -238,6 +255,9 @@ export function addTextAnnotation(
 ): void {
   const mod = engine.getModule();
   const pageHeight = mod.FPDF_GetPageHeightF(pageHandle);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const cropLeft = cropInfo.hasCropBox ? cropInfo.cropLeft : 0;
+  const cropBottom = cropInfo.hasCropBox ? cropInfo.cropBottom : 0;
 
   const annotHandle = mod.FPDFPage_CreateAnnot(pageHandle, FPDF_ANNOT_TEXT);
   if (!annotHandle) return;
@@ -245,7 +265,7 @@ export function addTextAnnotation(
   const width = options.width || 24;
   const height = options.height || 24;
 
-  const rectPtr = createRect(engine, options.x, options.y, width, height, pageHeight);
+  const rectPtr = createRect(engine, options.x, options.y, width, height, pageHeight, cropLeft, cropBottom);
   mod.FPDFAnnot_SetRect(annotHandle, rectPtr);
   engine.freeMemory(rectPtr);
 
