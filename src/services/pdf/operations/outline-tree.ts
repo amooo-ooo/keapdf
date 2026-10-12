@@ -46,7 +46,16 @@ export interface OutlineItemFlat {
 export function inferOutlineLevel(options: InferOutlineLevelOptions): number {
   const text = (options.text || '').trim();
 
-  // 1. Numbering pattern analysis (requires hierarchical numbering prefix followed by title text)
+  // Explicit Markdown outline attribute marker such as {#heading 1}, {#heading-2}, or {#h3}
+  const explicitOutlineMatch = text.match(/\{:?\s*#(?:heading[\s_-]*([1-6])|h([1-6]))(?:\b|\s|\})/i);
+  if (explicitOutlineMatch) {
+    const parsedLevel = parseInt(explicitOutlineMatch[1] || explicitOutlineMatch[2], 10);
+    if (parsedLevel >= 1 && parsedLevel <= 6) {
+      return parsedLevel;
+    }
+  }
+
+  // Numbering pattern analysis (requires hierarchical numbering prefix followed by title text)
   if (/^\d+\.\d+\.\d+\.\d+(?:[.:\-\s]+[A-Z\u00C0-\u024F]|\s+[^\d\s])/.test(text)) {
     return 4;
   }
@@ -71,7 +80,7 @@ export function inferOutlineLevel(options: InferOutlineLevelOptions): number {
     return 1;
   }
 
-  // 2. Relative font-size clustering (if surrounding page spans are available)
+  // Relative font-size clustering (if surrounding page spans are available)
   const targetFontSize = options.fontSize;
   if (targetFontSize && options.pageSpans && options.pageSpans.length >= 2) {
     const distinctSizes: number[] = [];
@@ -89,7 +98,7 @@ export function inferOutlineLevel(options: InferOutlineLevelOptions): number {
     }
   }
 
-  // 3. Absolute typographic thresholds fallback
+  // Absolute typographic thresholds fallback
   const baseSize = targetFontSize && targetFontSize > 0 ? targetFontSize : 12;
   const effectiveSize = baseSize + (options.isBold ? 2.5 : 0);
 
@@ -181,7 +190,7 @@ export function isSpanInTableRow(
 
   const spanY = span.baselineY || span.top;
   const sameRowSpans = pageSpans.filter((s) => {
-    if (s.id === span.id) return false;
+    if (s === span || (s.id && span.id && s.id === span.id) || s.pageIndex !== span.pageIndex) return false;
     const otherY = s.baselineY || s.top;
     if (Math.abs(spanY - otherY) > 3) return false;
     // Spans are horizontally distinct columns (separated by at least 8pt)
@@ -375,10 +384,10 @@ export function extractAutomaticOutlineItems(
         isBold,
       });
 
-      // Heading criteria:
-      // 1. Matches numeric or section prefix pattern (e.g. 1. Intro, Chapter 1), or
-      // 2. Has heading level <= maxLevel and (effectiveSize >= 12.5 or level <= 2)
+      // Heading criteria based on explicit outline attribute, numbering prefix, or typographic weight
+      const hasExplicitOutlineTag = /\{:?\s*#(?:heading[\s_-]*[1-6]|h[1-6]|[A-Za-z0-9_-]+)(?:\b|\s|\})/i.test(text);
       const hasHeadingPattern =
+        hasExplicitOutlineTag ||
         /^(?:[IVXLCDM]+\.|\d+(\.\d+)*\.?)\s+[A-Z\u00C0-\u024F]/.test(text) ||
         /^(?:chapter|part|section|appendix|overview|summary|introduction|conclusion|references|background|methodology|evaluation|results|discussion|abstract|preface)\b/i.test(
           text
@@ -390,10 +399,14 @@ export function extractAutomaticOutlineItems(
         level <= maxLevel &&
         (hasHeadingPattern || effectiveSize >= 12.5 || level <= 2)
       ) {
+        const cleanTitle = text
+          .replace(/\s*\{:?\s*(?:-[\s}]*|[#.][A-Za-z0-9_.:-]+(?:\s+[A-Za-z0-9_.:\-=,"']+)*)\s*\}\s*$/, '')
+          .trim();
+        if (!cleanTitle) continue;
         // PDF destY: from bottom to top
         const destY = Math.max(0, pageH - span.top);
         candidates.push({
-          title: text,
+          title: cleanTitle,
           pageIndex: pageIdx,
           level,
           destY,
