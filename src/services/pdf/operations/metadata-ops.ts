@@ -406,7 +406,7 @@ export async function extractAllMetadata(
 ): Promise<DocumentMetadata> {
   const mod = engine.getModule();
 
-  // 1. Read standard PDFium metadata
+  // Read standard PDFium metadata
   const title = readPdfiumMetaText(engine, docHandle, 'Title');
   const author = readPdfiumMetaText(engine, docHandle, 'Author');
   const subject = readPdfiumMetaText(engine, docHandle, 'Subject');
@@ -443,7 +443,7 @@ export async function extractAllMetadata(
   if (rawTrapped === 1) trappedStr = 'True';
   else if (rawTrapped === 2) trappedStr = 'False';
 
-  // 2. Prepare dynamic key collections
+  // Prepare dynamic key collections
   const customMetadata: Record<string, string> = {};
   const allEntries: MetadataEntry[] = [];
   const standardDict: Record<string, string> = {
@@ -461,7 +461,7 @@ export async function extractAllMetadata(
   let hasXmp = false;
   let xmpString = '';
 
-  // 3. Inspect full buffer using pdf-lib if buffer is available
+  // Inspect full buffer using pdf-lib if buffer is available
   if (rawBuffer && rawBuffer.byteLength > 0) {
     try {
       const bytes = rawBuffer instanceof Uint8Array ? rawBuffer : new Uint8Array(rawBuffer);
@@ -478,9 +478,10 @@ export async function extractAllMetadata(
             const cleanKey = rawKeyStr.replace(/^\//, '').trim();
             const decodedVal = decodePdfObjectValue(val);
 
-            if (!decodedVal || decodedVal === '()' || decodedVal === '<>') continue;
+            if (!cleanKey || decodedVal === '()' || decodedVal === '<>') continue;
 
             const isStandard = STANDARD_INFO_KEYS.has(cleanKey);
+            if (isStandard && !decodedVal) continue;
             let formattedVal = decodedVal;
 
             if (cleanKey === 'CreationDate' || cleanKey === 'ModDate' || cleanKey === 'SourceModified') {
