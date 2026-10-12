@@ -2,6 +2,8 @@ import type { PdfiumEngine } from '../../../core/pdfium-engine';
 import { setPageObjectMatrix, getPageCropInfo } from '../../../core/pdfium-helpers';
 import { parseColor, buildTransformMatrix } from '../utils';
 import type { ShapeOptions } from './types';
+export type { SvgPathOptions } from './types';
+export { drawSvgPath, parseSvgPath, type SvgCommand } from './svg-path-parser';
 
 /**
  * Draws a rectangle shape on a PDF page.
