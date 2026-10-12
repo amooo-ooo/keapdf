@@ -11,19 +11,24 @@ import type {
 import {
   encodeUtf16Le,
   setPageObjectMatrix,
-  mapStandardFontName,
   calculateTextWidth,
   findTextObjectIndicesForSpan,
   removeTextObjectsByIndex,
   setTextObjectByIndex,
+  removeTextObjectsInBounds,
   getPageObjectMatrix,
   getPageCropInfo,
+  registerSpanDecorationObject,
+  removeSpanDecorationObjectsInBounds,
+  cleanSubsetPrefix,
 } from '../../../core/pdfium-helpers';
 import { FontCharsetIndex, extractBaseFontFamily, isStandard14Font } from '../font-charset-index';
 import { isColorEqual, sanitizePdfText, safeEncodeForStandardFont, parseColor } from '../utils';
 import { detectParagraphs } from './paragraph-detector';
 import { resolveStandardFont } from './draw-text';
+import { isolateSharedLineTextObjects } from './text-edit-ops';
 import { UNICODE_TRAILING_WS_REGEX, UNICODE_LEADING_WS_REGEX, findBestMatchingOrigLine } from '../../../utils/text-range-utils';
+import { calculateTrackedTextWidth } from '../../../core/typography-metrics';
 
 /**
  * Result metrics returned after reflowing a paragraph.
@@ -148,6 +153,251 @@ export function wrapTextToWidth(
 }
 
 /**
+ * Checks whether a word should be preceded by a whitespace separator relative to its predecessor.
+ *
+ * @param prev The preceding word on the line.
+ * @param curr The current word on the line.
+ * @return True if a space separates the two words.
+ */
+export function isWordPrecededBySpace(prev: TextWord, curr: TextWord): boolean {
+  if (curr.hasPrecedingSpace !== undefined) {
+    return Boolean(curr.hasPrecedingSpace);
+  }
+  if (
+    curr.charStartIndex > 0 &&
+    prev.charCount > 0 &&
+    curr.charStartIndex > prev.charStartIndex + prev.charCount
+  ) {
+    return true;
+  }
+  if (
+    curr.left <= prev.left + 0.5 &&
+    /[a-zA-Z0-9]$/.test(prev.text.trim()) &&
+    /^[a-zA-Z0-9]/.test(curr.text.trim())
+  ) {
+    return true;
+  }
+  const minFs = Math.min(prev.fontSize, curr.fontSize);
+  return curr.left - prev.right >= minFs * 0.18;
+}
+
+/**
+ * Reconstructs the normalised line string from an array of words, respecting unspaced sub-word boundaries.
+ *
+ * @param words Array of words on the line.
+ * @return Reconstructed line string.
+ */
+export function reconstructLineTextFromWords(words: TextWord[]): string {
+  let out = '';
+  let prevRendered: TextWord | null = null;
+  for (const w of words) {
+    const clean = sanitizePdfText(w.text);
+    if (!clean) continue;
+    if (prevRendered && isWordPrecededBySpace(prevRendered, w)) {
+      out += ' ';
+    }
+    out += clean;
+    prevRendered = w;
+  }
+  return out;
+}
+
+/**
+ * Collects a contiguous group of unspaced sub-word tokens starting at startIdx.
+ *
+ * @param words Array of words on the original line.
+ * @param startIdx Starting index in words.
+ * @return Compound word group, concatenated text, and exclusive end index.
+ */
+function collectCompoundWordGroup(
+  words: TextWord[],
+  startIdx: number
+): { group: TextWord[]; combinedText: string; endIdx: number } {
+  if (startIdx >= words.length) {
+    return { group: [], combinedText: '', endIdx: startIdx };
+  }
+  const group: TextWord[] = [words[startIdx]];
+  let combinedText = sanitizePdfText(words[startIdx].text);
+  let idx = startIdx + 1;
+  while (idx < words.length && !isWordPrecededBySpace(words[idx - 1], words[idx])) {
+    const clean = sanitizePdfText(words[idx].text);
+    if (clean) {
+      group.push(words[idx]);
+      combinedText += clean;
+    }
+    idx++;
+  }
+  return { group, combinedText, endIdx: idx };
+}
+
+/**
+ * Maps a line text string to styled TextWord tokens using an original TextLine template,
+ * preserving sub-word style boundaries (such as normal brackets around italic words).
+ *
+ * @param lineText The target line text to render.
+ * @param origLine The original line containing styled word templates.
+ * @param lineLeft Starting horizontal coordinate in points.
+ * @param lineBaselineY Baseline vertical coordinate in points.
+ * @param fallbackFontSize Fallback font size in points.
+ * @param startWordCursor Starting word index cursor in origLine.words.
+ * @return Mapped words and updated word cursor.
+ */
+export function mapLineTextToStyledWords(
+  lineText: string,
+  origLine: TextLine,
+  lineLeft: number,
+  lineBaselineY: number,
+  fallbackFontSize: number,
+  startWordCursor = 0
+): { words: TextWord[]; nextCursor: number } {
+  const origWords = origLine.words || [];
+  if (origWords.length === 0) {
+    return { words: [], nextCursor: startWordCursor };
+  }
+
+  const tokens = lineText.split(/([\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+)/);
+  const freshWords: TextWord[] = [];
+  let currentTokenLeft = lineLeft;
+  let pendingSpace = false;
+  let origWordIdx = startWordCursor;
+
+  const pushStyledSubWord = (
+    subText: string,
+    templateWord: TextWord | undefined,
+    hasSpaceBefore: boolean
+  ): void => {
+    if (!subText) return;
+    const wordFs = templateWord?.fontSize || origLine.fontSize || fallbackFontSize;
+    const approxCharW = wordFs * 0.52;
+    const wordW =
+      templateWord?.width &&
+      templateWord.width > 0 &&
+      sanitizePdfText(templateWord.text) === subText
+        ? templateWord.width
+        : subText.length * approxCharW;
+
+    if (hasSpaceBefore) {
+      currentTokenLeft += wordFs * 0.25;
+    }
+
+    freshWords.push({
+      text: subText,
+      left: currentTokenLeft,
+      top: templateWord?.top || origLine.top || 0,
+      right: currentTokenLeft + wordW,
+      bottom: (templateWord?.top || origLine.top || 0) + wordFs,
+      width: wordW,
+      height: templateWord?.height || origLine.height || wordFs,
+      fontSize: wordFs,
+      baselineY: lineBaselineY,
+      charStartIndex: 0,
+      charCount: subText.length,
+      fontFamily: templateWord?.fontFamily || origLine.fontFamily,
+      rawFontFamily: templateWord?.rawFontFamily || origLine.rawFontFamily,
+      matchedFontFamily: templateWord?.matchedFontFamily || origLine.matchedFontFamily,
+      color: templateWord?.color || origLine.color,
+      fontWeight: templateWord?.fontWeight || origLine.fontWeight,
+      fontStyle: templateWord?.fontStyle || origLine.fontStyle,
+      letterSpacing: templateWord?.letterSpacing || origLine.letterSpacing,
+      letterSpacingPts: templateWord?.letterSpacingPts ?? origLine.letterSpacingPts,
+      underline: templateWord?.underline ?? origLine.underline,
+      strikethrough: templateWord?.strikethrough ?? origLine.strikethrough,
+      backgroundColor: templateWord?.backgroundColor ?? origLine.backgroundColor,
+      hasPrecedingSpace: hasSpaceBefore,
+    });
+
+    currentTokenLeft += wordW;
+  };
+
+  for (const token of tokens) {
+    if (!token) continue;
+    if (/^[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+$/.test(token)) {
+      pendingSpace = true;
+      continue;
+    }
+    const clean = sanitizePdfText(token);
+    if (!clean) continue;
+
+    const tokenHasPrecedingSpace = pendingSpace || freshWords.length > 0;
+    let matchedCompound: { group: TextWord[]; endIdx: number } | null = null;
+
+    for (let k = origWordIdx; k < Math.min(origWords.length, origWordIdx + 6); k++) {
+      const candidate = collectCompoundWordGroup(origWords, k);
+      if (candidate.combinedText === clean) {
+        matchedCompound = { group: candidate.group, endIdx: candidate.endIdx };
+        break;
+      }
+      if (sanitizePdfText(origWords[k].text) === clean) {
+        matchedCompound = { group: [origWords[k]], endIdx: k + 1 };
+        break;
+      }
+    }
+
+    if (matchedCompound) {
+      for (let gIdx = 0; gIdx < matchedCompound.group.length; gIdx++) {
+        const subWord = matchedCompound.group[gIdx];
+        const subText =
+          matchedCompound.group.length === 1 ? clean : sanitizePdfText(subWord.text);
+        pushStyledSubWord(subText, subWord, gIdx === 0 ? tokenHasPrecedingSpace : false);
+      }
+      origWordIdx = matchedCompound.endIdx;
+      pendingSpace = false;
+      continue;
+    }
+
+    const currentGroup = collectCompoundWordGroup(
+      origWords,
+      Math.min(origWordIdx, origWords.length - 1)
+    );
+    if (currentGroup.group.length > 1) {
+      const firstSub = currentGroup.group[0];
+      const lastSub = currentGroup.group[currentGroup.group.length - 1];
+      const firstText = sanitizePdfText(firstSub.text);
+      const lastText = sanitizePdfText(lastSub.text);
+      const bodyTemplate =
+        currentGroup.group.find((w) => /[a-zA-Z0-9]/.test(w.text)) ??
+        currentGroup.group[Math.min(1, currentGroup.group.length - 1)];
+
+      if (
+        currentGroup.group.length >= 3 &&
+        firstText &&
+        lastText &&
+        clean.startsWith(firstText) &&
+        clean.endsWith(lastText) &&
+        clean.length > firstText.length + lastText.length
+      ) {
+        const midText = clean.slice(firstText.length, clean.length - lastText.length);
+        pushStyledSubWord(firstText, firstSub, tokenHasPrecedingSpace);
+        pushStyledSubWord(midText, bodyTemplate, false);
+        pushStyledSubWord(lastText, lastSub, false);
+      } else if (firstText && clean.startsWith(firstText) && clean.length > firstText.length) {
+        pushStyledSubWord(firstText, firstSub, tokenHasPrecedingSpace);
+        pushStyledSubWord(clean.slice(firstText.length), bodyTemplate, false);
+      } else if (lastText && clean.endsWith(lastText) && clean.length > lastText.length) {
+        pushStyledSubWord(
+          clean.slice(0, clean.length - lastText.length),
+          bodyTemplate,
+          tokenHasPrecedingSpace
+        );
+        pushStyledSubWord(lastText, lastSub, false);
+      } else {
+        pushStyledSubWord(clean, bodyTemplate, tokenHasPrecedingSpace);
+      }
+      origWordIdx = Math.max(origWordIdx + 1, currentGroup.endIdx);
+      pendingSpace = false;
+      continue;
+    }
+
+    const fallbackOrig = origWords[Math.min(origWordIdx, origWords.length - 1)];
+    pushStyledSubWord(clean, fallbackOrig, tokenHasPrecedingSpace);
+    origWordIdx++;
+    pendingSpace = false;
+  }
+
+  return { words: freshWords, nextCursor: origWordIdx };
+}
+
+/**
  * Replaces a paragraph block with newly edited/reflowed text and automatically
  * shifts all downstream content up or down to preserve natural vertical page whitespace.
  * Preserves embedded font subset in-place when characters and line structure permit.
@@ -157,7 +407,7 @@ export function wrapTextToWidth(
  * @param pageIndex Zero-based page index.
  * @param pageHandle Active page handle.
  * @param targetParagraph The paragraph span being edited.
- * @param options Mutation options with updated text, font, and color.
+ * @param options Mutation options with updated text, font, and colour.
  * @param charsetIndex Optional document font character availability index.
  * @return ReflowResult summary with line count and vertical delta.
  */
@@ -174,17 +424,24 @@ export function reflowAndReplaceParagraph(
 
   const updatedText = options.text !== undefined ? options.text : targetParagraph.text;
   const updatedFontSize = options.fontSize !== undefined ? options.fontSize : targetParagraph.fontSize;
-  const rawFontName = options.fontFamily || targetParagraph.fontFamily || 'Helvetica';
-  const standardFontName: StandardFontName = mapStandardFontName(
+  const effectiveParagraphFont =
+    targetParagraph.fontFamily && targetParagraph.fontFamily !== 'Helvetica'
+      ? targetParagraph.fontFamily
+      : targetParagraph.rawFontFamily || targetParagraph.fontFamily;
+  const rawFontName = options.fontFamily || effectiveParagraphFont || 'Helvetica';
+  const standardFontName: StandardFontName = resolveStandardFont(
     rawFontName,
-    options.fontWeight || targetParagraph.fontWeight,
-    options.fontStyle || targetParagraph.fontStyle
+    targetParagraph.rawFontFamily,
+    (options.fontWeight || targetParagraph.fontWeight) as 'bold' | 'normal' | undefined,
+    (options.fontStyle || targetParagraph.fontStyle) as 'italic' | 'normal' | undefined
   );
   const updatedColor: ColorRgba = options.color || targetParagraph.color;
   const targetLeft = options.left !== undefined ? options.left : targetParagraph.left;
   const lineHeight = options.lineHeight || targetParagraph.lineHeight || updatedFontSize * 1.25;
 
   const isDeletion = updatedText.trim().length === 0;
+  const isUnchangedTextAndSize =
+    updatedText === targetParagraph.text && Math.abs(updatedFontSize - targetParagraph.fontSize) < 0.1;
 
   // Determine wrapping width
   const isTargetBullet = targetParagraph.hasBulletPrefix && targetParagraph.bulletWord;
@@ -198,19 +455,25 @@ export function reflowAndReplaceParagraph(
     (!targetParagraph.lines || targetParagraph.lines.length <= 1) &&
     !updatedText.includes('\n');
 
+  const pageWidth = typeof mod.FPDF_GetPageWidthF === 'function'
+    ? mod.FPDF_GetPageWidthF(pageHandle)
+    : (typeof mod.FPDF_GetPageWidth === 'function' ? mod.FPDF_GetPageWidth(pageHandle) : 612);
+
   let wrapWidth: number;
   if (isTargetBullet) {
     wrapWidth = Math.max(20, targetParagraph.width - Math.max(0, firstLineTextLeft - targetParagraph.left));
   } else if (isSingleLineText) {
-    const pageWidth = mod.FPDF_GetPageWidthF(pageHandle);
-    const maxAvailableWidth = Math.max(targetParagraph.width, Math.min(pageWidth - targetParagraph.left - 36, 500));
+    const maxAvailableWidth = Math.max(
+      targetParagraph.width + updatedFontSize * 0.6,
+      Math.min(pageWidth - targetParagraph.left - 36, 500)
+    );
     wrapWidth = maxAvailableWidth;
   } else {
     const wrapBuffer = Math.max(6, updatedFontSize * 0.5);
     wrapWidth = targetParagraph.width + wrapBuffer;
   }
 
-  // 1. Wrap text into lines fitting column width
+  // Wrap text into lines fitting column width
   interface ReflowedLineItem {
     text: string;
     sourceLine?: TextLine;
@@ -226,7 +489,29 @@ export function reflowAndReplaceParagraph(
       const l = options.lines[idx];
       const lineText = l.text ? l.text.replace(/[\r\n]+/g, ' ').trim() : '';
       if (!lineText) continue;
-      const lineWrapW = idx === 0 ? firstLineWidth : wrapWidth;
+      const origTargetLine = targetParagraph.lines?.[idx];
+      const origTargetText = origTargetLine?.text
+        ? origTargetLine.text.replace(/[\r\n]+/g, ' ').trim()
+        : '';
+      const isLineUnchanged = Boolean(
+        origTargetLine &&
+          lineText === origTargetText &&
+          Math.abs((l.fontSize || updatedFontSize) - origTargetLine.fontSize) < 0.2
+      );
+      if (isUnchangedTextAndSize || isLineUnchanged) {
+        reflowedItems.push({
+          text: lineText,
+          sourceLine: l,
+          isContinuation: false,
+        });
+        continue;
+      }
+      const baseWrapW = idx === 0 ? firstLineWidth : wrapWidth;
+      const lineWrapW = Math.max(
+        baseWrapW,
+        (l.width || 0) + (l.fontSize || updatedFontSize) * 0.5,
+        (origTargetLine?.width || 0) + (l.fontSize || updatedFontSize) * 0.5
+      );
       const wrapped = wrapTextToWidth(lineText, lineWrapW, updatedFontSize, standardFontName).filter((s) => s.trim().length > 0);
       for (let wIdx = 0; wIdx < wrapped.length; wIdx++) {
         reflowedItems.push({
@@ -242,9 +527,17 @@ export function reflowAndReplaceParagraph(
     for (let idx = 0; idx < rawSegments.length; idx++) {
       const trimmedSegment = rawSegments[idx].trim();
       if (!trimmedSegment) continue;
+      const srcLine = findBestMatchingOrigLine(trimmedSegment, targetParagraph.lines, idx) || targetParagraph.lines?.[Math.min(idx, (targetParagraph.lines?.length || 1) - 1)];
+      if (isUnchangedTextAndSize && targetParagraph.lines && targetParagraph.lines.length > 0) {
+        reflowedItems.push({
+          text: trimmedSegment,
+          sourceLine: srcLine,
+          isContinuation: false,
+        });
+        continue;
+      }
       const lineWrapW = idx === 0 ? firstLineWidth : wrapWidth;
       const wrapped = wrapTextToWidth(trimmedSegment, lineWrapW, updatedFontSize, standardFontName).filter((s) => s.trim().length > 0);
-      const srcLine = findBestMatchingOrigLine(trimmedSegment, targetParagraph.lines, idx) || targetParagraph.lines?.[Math.min(idx, (targetParagraph.lines?.length || 1) - 1)];
       for (let wIdx = 0; wIdx < wrapped.length; wIdx++) {
         reflowedItems.push({
           text: wrapped[wIdx],
@@ -255,27 +548,37 @@ export function reflowAndReplaceParagraph(
     }
   } else {
     reflowedItems = [];
-    const initialWrapped = wrapTextToWidth(updatedText.trim(), firstLineWidth, updatedFontSize, standardFontName).filter((s) => s.trim().length > 0);
-    const srcLine = targetParagraph.lines?.[0];
-    if (initialWrapped.length > 1) {
-      reflowedItems.push({ text: initialWrapped[0], sourceLine: srcLine, isContinuation: false });
-      const restText = initialWrapped.slice(1).join(' ');
-      const restWrapped = wrapTextToWidth(restText, wrapWidth, updatedFontSize, standardFontName).filter((s) => s.trim().length > 0);
-      for (const w of restWrapped) {
-        reflowedItems.push({ text: w, sourceLine: srcLine, isContinuation: true });
+    if (isUnchangedTextAndSize && targetParagraph.lines && targetParagraph.lines.length === 1) {
+      reflowedItems.push({
+        text: updatedText.trim(),
+        sourceLine: targetParagraph.lines[0],
+        isContinuation: false,
+      });
+    } else {
+      const initialWrapped = wrapTextToWidth(updatedText.trim(), firstLineWidth, updatedFontSize, standardFontName).filter((s) => s.trim().length > 0);
+      const srcLine = targetParagraph.lines?.[0];
+      if (initialWrapped.length > 1) {
+        reflowedItems.push({ text: initialWrapped[0], sourceLine: srcLine, isContinuation: false });
+        const restText = initialWrapped.slice(1).join(' ');
+        const restWrapped = wrapTextToWidth(restText, wrapWidth, updatedFontSize, standardFontName).filter((s) => s.trim().length > 0);
+        for (const w of restWrapped) {
+          reflowedItems.push({ text: w, sourceLine: srcLine, isContinuation: true });
+        }
+      } else if (initialWrapped.length === 1) {
+        reflowedItems.push({ text: initialWrapped[0], sourceLine: srcLine, isContinuation: false });
       }
-    } else if (initialWrapped.length === 1) {
-      reflowedItems.push({ text: initialWrapped[0], sourceLine: srcLine, isContinuation: false });
     }
   }
   const reflowedLines: string[] = reflowedItems.map((item) => item.text);
 
-  // 2. Compute height and line change
+  // Compute height and line change
   const targetLines: Array<{
     left: number;
     baselineY: number;
     width: number;
     fontSize: number;
+    text?: string;
+    charStartIndex?: number;
     hasBulletPrefix?: boolean;
     bulletWord?: TextWord;
     color?: ColorRgba;
@@ -291,6 +594,8 @@ export function reflowAndReplaceParagraph(
         baselineY: targetParagraph.baselineY,
         width: targetParagraph.width,
         fontSize: targetParagraph.fontSize,
+        text: targetParagraph.text,
+        charStartIndex: targetParagraph.charStartIndex,
         hasBulletPrefix: targetParagraph.hasBulletPrefix,
         bulletWord: targetParagraph.bulletWord,
         color: targetParagraph.color,
@@ -299,6 +604,80 @@ export function reflowAndReplaceParagraph(
         fontWeight: targetParagraph.fontWeight,
         fontStyle: targetParagraph.fontStyle,
       }];
+
+  const effectiveAlign = options.textAlign || targetParagraph.textAlign;
+  const paraLeft = options.left !== undefined ? options.left : (targetParagraph.originalLeft ?? targetParagraph.left);
+  let maxTargetLineWidth = targetParagraph.width;
+  for (const l of targetLines) {
+    if (l.width > maxTargetLineWidth) maxTargetLineWidth = l.width;
+  }
+  const paraWidth =
+    targetLines.length === 1 && reflowedLines.length === 1 && maxTargetLineWidth <= targetLines[0].width + 4 && effectiveAlign
+      ? Math.max(maxTargetLineWidth, pageWidth - 2 * Math.min(paraLeft, 72))
+      : maxTargetLineWidth;
+
+  const computeAlignedLineDomLeft = (
+    lineIdx: number,
+    lineWidth: number,
+    fallbackLeft: number
+  ): number => {
+    if (!effectiveAlign) return fallbackLeft;
+    if (effectiveAlign === 'center') {
+      return paraLeft + Math.max(0, (paraWidth - lineWidth) / 2);
+    }
+    if (effectiveAlign === 'right') {
+      return paraLeft + Math.max(0, paraWidth - lineWidth);
+    }
+    return isTargetBullet && lineIdx === 0 ? firstLineTextLeft : paraLeft;
+  };
+
+  for (const line of targetLines) {
+    isolateSharedLineTextObjects(engine, mod, docHandle, pageIndex, pageHandle, {
+      left: line.left,
+      baselineY: line.baselineY,
+      width: line.width,
+      fontSize: line.fontSize,
+      text: line.text,
+      charStartIndex: line.charStartIndex,
+      color: line.color || targetParagraph.color,
+      fontFamily: line.fontFamily || targetParagraph.fontFamily,
+      rawFontFamily: line.rawFontFamily || targetParagraph.rawFontFamily,
+      fontWeight: line.fontWeight || targetParagraph.fontWeight,
+      fontStyle: line.fontStyle || targetParagraph.fontStyle,
+      words: line.words,
+      hasBulletPrefix: line.hasBulletPrefix,
+      bulletWord: line.bulletWord,
+    });
+  }
+
+  const findLineObjectIndices = (line: { left: number; baselineY: number; width: number; fontSize: number }): number[] => {
+    let indices = findTextObjectIndicesForSpan(
+      engine, mod, pageHandle,
+      line.left, line.baselineY, line.width, line.fontSize
+    );
+    if (indices.length === 0) {
+      const searchLeft = Math.min(paraLeft, targetParagraph.left, line.left);
+      const searchRight = Math.max(
+        paraLeft + paraWidth,
+        targetParagraph.left + targetParagraph.width,
+        line.left + line.width
+      );
+      indices = findTextObjectIndicesForSpan(
+        engine, mod, pageHandle,
+        searchLeft, line.baselineY, Math.max(line.width, searchRight - searchLeft), line.fontSize
+      );
+    }
+    if (indices.length === 0) {
+      for (const delta of [-2, 2, -4, 4]) {
+        indices = findTextObjectIndicesForSpan(
+          engine, mod, pageHandle,
+          Math.min(paraLeft, line.left), line.baselineY + delta, Math.max(line.width, paraWidth), line.fontSize
+        );
+        if (indices.length > 0) break;
+      }
+    }
+    return indices;
+  };
 
   const oldLineCount = targetLines.length;
   const newLineCount = isDeletion ? 0 : reflowedLines.length;
@@ -315,18 +694,30 @@ export function reflowAndReplaceParagraph(
     (options.lines && options.lines.some((l) => Math.abs(l.fontSize - options.lines![0].fontSize) > 0.2)) ||
     (options.lines && options.lines.some((l) => l.words && l.words.some((w) => Math.abs(w.fontSize - l.words[0].fontSize) > 0.2)));
 
-  // Check if options lines contain words with distinct styles (weights, styles, colors)
+  // Check if options or target paragraph lines contain words with distinct styles (fonts, weights, styles, colours, decorations)
+  const styleCheckLines =
+    options.lines && options.lines.length > 0 ? options.lines : targetParagraph.lines;
   const hasMixedStyleWords = Boolean(
-    options.lines &&
-    options.lines.some(
+    styleCheckLines &&
+    styleCheckLines.some(
       (l) =>
         l.words &&
         l.words.some(
           (w) =>
+            (w.fontFamily && w.fontFamily !== targetParagraph.fontFamily) ||
+            (w.rawFontFamily &&
+              cleanSubsetPrefix(w.rawFontFamily) !==
+                cleanSubsetPrefix(targetParagraph.rawFontFamily || '')) ||
             (w.fontWeight && w.fontWeight !== (targetParagraph.fontWeight || 'normal')) ||
             (w.fontStyle && w.fontStyle !== (targetParagraph.fontStyle || 'normal')) ||
             (w.color && !isColorEqual(w.color, targetParagraph.color)) ||
-            Boolean(w.backgroundColor)
+            Boolean(w.backgroundColor) ||
+            Boolean(w.underline) !== Boolean(targetParagraph.underline) ||
+            Boolean(w.strikethrough) !== Boolean(targetParagraph.strikethrough) ||
+            Math.abs(
+              (w.letterSpacingPts || 0) -
+                (targetParagraph.lines?.[0]?.words?.[0]?.letterSpacingPts || 0)
+            ) > 1.0
         )
     )
   );
@@ -337,10 +728,82 @@ export function reflowAndReplaceParagraph(
     !hasMixedFontSize &&
     !hasMixedStyleWords &&
     (options.fontSize === undefined || Math.abs(options.fontSize - targetParagraph.fontSize) < 0.1) &&
+    (options.letterSpacing === undefined || options.letterSpacing === targetParagraph.letterSpacing) &&
+    (options.lineHeight === undefined || Math.abs(options.lineHeight - (targetParagraph.lineHeight || updatedFontSize * 1.25)) < 0.1) &&
     (options.fontFamily === undefined ||
       options.fontFamily === targetParagraph.fontFamily ||
-      extractBaseFontFamily(options.fontFamily) === extractBaseFontFamily(targetParagraph.rawFontFamily)) &&
-    (options.color === undefined || isColorEqual(options.color, targetParagraph.color));
+      extractBaseFontFamily(options.fontFamily) === extractBaseFontFamily(targetParagraph.rawFontFamily || targetParagraph.fontFamily) ||
+      resolveStandardFont(options.fontFamily, targetParagraph.rawFontFamily) ===
+        resolveStandardFont(targetParagraph.fontFamily, targetParagraph.rawFontFamily)) &&
+    (options.color === undefined || isColorEqual(options.color, targetParagraph.color)) &&
+    (!options.fontWeight || options.fontWeight === (targetParagraph.fontWeight || 'normal')) &&
+    (!options.fontStyle || options.fontStyle === (targetParagraph.fontStyle || 'normal')) &&
+    options.underline === undefined &&
+    options.strikethrough === undefined &&
+    !targetParagraph.underline &&
+    !targetParagraph.strikethrough;
+
+  if (!isDeletion && isOnlyTextChanged && reflowedLines.length === targetLines.length && !options.backgroundColor) {
+    const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+    const hasHorizontalShift = options.left !== undefined || Boolean(effectiveAlign);
+
+    if (updatedText === targetParagraph.text && !options.forceTextRestore) {
+      let allFound = true;
+      const lineObjectGroups: number[][] = [];
+      for (let i = 0; i < targetLines.length; i++) {
+        const indices = findLineObjectIndices(targetLines[i]);
+        if (indices.length === 0) {
+          allFound = false;
+          break;
+        }
+        lineObjectGroups.push(indices);
+      }
+
+      if (allFound) {
+        if (hasHorizontalShift) {
+          for (let i = 0; i < targetLines.length; i++) {
+            const line = targetLines[i];
+            const indices = lineObjectGroups[i];
+            const lineW = line.width > 0
+              ? line.width
+              : calculateTextWidth(reflowedLines[i], line.fontSize || updatedFontSize, standardFontName);
+            const fallbackDomLeft = options.lines?.[i]?.left ?? line.left;
+            const desiredDomLeft = computeAlignedLineDomLeft(i, lineW, fallbackDomLeft);
+            const desiredPdfLeft = desiredDomLeft + cropInfo.cropLeft;
+
+            const firstObj = mod.FPDFPage_GetObject(pageHandle, indices[0]);
+            const firstMat = firstObj ? getPageObjectMatrix(engine, mod, firstObj) : null;
+            const currentBasePdfX = firstMat
+              ? (Math.abs(firstMat.e - (line.left + cropInfo.cropLeft)) <= 3.0
+                  ? line.left + cropInfo.cropLeft
+                  : firstMat.e)
+              : line.left + cropInfo.cropLeft;
+            const deltaLineX = desiredPdfLeft - currentBasePdfX;
+
+            if (Math.abs(deltaLineX) > 0.01) {
+              for (const objIdx of indices) {
+                const objHandle = mod.FPDFPage_GetObject(pageHandle, objIdx);
+                if (!objHandle) continue;
+                const mat = getPageObjectMatrix(engine, mod, objHandle);
+                if (mat) {
+                  setPageObjectMatrix(engine, mod, objHandle, {
+                    ...mat,
+                    e: mat.e + deltaLineX,
+                  });
+                }
+              }
+            }
+          }
+          mod.FPDFPage_GenerateContent(pageHandle);
+        }
+        return {
+          reflowedLines,
+          newHeight,
+          deltaY: 0,
+          affectedSpansCount: 0,
+        };
+      }
+    }
 
   if (!isDeletion && isOnlyTextChanged && reflowedLines.length === targetLines.length) {
     let charsAvailable = false;
