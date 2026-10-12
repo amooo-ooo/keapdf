@@ -398,10 +398,10 @@ export async function cropPages(
     if (pageIdx < 0 || pageIdx >= totalPages) continue;
 
     const page = pdfDoc.getPage(pageIdx);
-    const mediaBox = page.getMediaBox();
+    const baseBox = page.getCropBox() ?? page.getMediaBox();
     const rotationAngle = page.getRotation().angle;
 
-    const cropBox = computeRotationAwareCropBox(mediaBox, rotationAngle, options.margins);
+    const cropBox = computeRotationAwareCropBox(baseBox, rotationAngle, options.margins);
     page.setCropBox(cropBox.x, cropBox.y, cropBox.width, cropBox.height);
   }
 
