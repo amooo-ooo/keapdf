@@ -481,3 +481,495 @@ function buildDescendingHeadingTiers(
   const profiles: TypographyStyleProfile[] = [];
   const seenSizes = new Set<number>();
 
+  for (const cluster of clusters) {
+    const profile = buildStyleProfileFromSpans(
+      cluster.spans,
+      cluster.anchorSize,
+      'bold',
+      bodyProfile.fontFamily,
+      bodyProfile.color
+    );
+    profile.fontWeight = 'bold';
+    if (profile.fontSize > bodyProfile.fontSize && !seenSizes.has(profile.fontSize)) {
+      seenSizes.add(profile.fontSize);
+      profiles.push(profile);
+    }
+  }
+
+  return profiles.sort((a, b) => b.fontSize - a.fontSize);
+}
+
+/**
+ * Semantically analyses document text spans to determine dominant body text,
+ * caption, title, subtitle, and heading typography profiles across all tiers.
+ *
+ * @param spans Collection of all editable text spans across document pages.
+ * @return Inferred document typography profile with strict monotonic size hierarchy.
+ */
+export function analyzeDocumentTypography(spans: EditableTextSpan[]): DocumentTypographyProfile {
+  const defaultBody: TypographyStyleProfile = {
+    fontSize: 12,
+    fontFamily: 'Helvetica',
+    fontWeight: 'normal',
+    fontStyle: 'normal',
+    color: '#000000',
+    textAlign: 'left',
+  };
+
+  const defaultTitle: TypographyStyleProfile = {
+    fontSize: 28,
+    fontFamily: 'Helvetica',
+    fontWeight: 'bold',
+    fontStyle: 'normal',
+    color: '#000000',
+    textAlign: 'left',
+  };
+
+  const defaultSubtitle: TypographyStyleProfile = {
+    fontSize: 15,
+    fontFamily: 'Helvetica',
+    fontWeight: 'normal',
+    fontStyle: 'normal',
+    color: '#000000',
+    textAlign: 'left',
+  };
+
+  const defaultH1: TypographyStyleProfile = {
+    fontSize: 22,
+    fontFamily: 'Helvetica',
+    fontWeight: 'bold',
+    fontStyle: 'normal',
+    color: '#000000',
+    textAlign: 'left',
+  };
+
+  const defaultH2: TypographyStyleProfile = {
+    fontSize: 18,
+    fontFamily: 'Helvetica',
+    fontWeight: 'bold',
+    fontStyle: 'normal',
+    color: '#000000',
+    textAlign: 'left',
+  };
+
+  const defaultH3: TypographyStyleProfile = {
+    fontSize: 14,
+    fontFamily: 'Helvetica',
+    fontWeight: 'bold',
+    fontStyle: 'normal',
+    color: '#000000',
+    textAlign: 'left',
+  };
+
+  const defaultCaption: TypographyStyleProfile = {
+    fontSize: 10,
+    fontFamily: 'Helvetica',
+    fontWeight: 'normal',
+    fontStyle: 'normal',
+    color: '#000000',
+    textAlign: 'left',
+  };
+
+  if (!spans || spans.length === 0) {
+    return {
+      title: defaultTitle,
+      subtitle: defaultSubtitle,
+      body: defaultBody,
+      caption: defaultCaption,
+      headings: { 1: defaultH1, 2: defaultH2, 3: defaultH3 },
+      h1: defaultH1,
+      h2: defaultH2,
+      h3: defaultH3,
+    };
+  }
+
+  const spansByPage = new Map<number, EditableTextSpan[]>();
+  for (const span of spans) {
+    const pageList = spansByPage.get(span.pageIndex);
+    if (pageList) {
+      pageList.push(span);
+    } else {
+      spansByPage.set(span.pageIndex, [span]);
+    }
+  }
+
+  const contentSpans: EditableTextSpan[] = [];
+  for (const span of spans) {
+    const text = (span.text || '').trim();
+    if (text.length <= 1) continue;
+    if (/^\d{1,4}$/.test(text)) continue;
+    if (isTableValueOrDataCell(text)) continue;
+    const pageSpans = spansByPage.get(span.pageIndex) ?? [span];
+    if (isSpanInTableRow(span, pageSpans)) continue;
+    contentSpans.push(span);
+  }
+
+  if (contentSpans.length === 0) {
+    return {
+      title: defaultTitle,
+      subtitle: defaultSubtitle,
+      body: defaultBody,
+      caption: defaultCaption,
+      headings: { 1: defaultH1, 2: defaultH2, 3: defaultH3 },
+      h1: defaultH1,
+      h2: defaultH2,
+      h3: defaultH3,
+    };
+  }
+
+  // Identify standard prose spans (9pt to 14pt, non-bold or multi-line paragraph, legible colour)
+  const legibleProseSpans = contentSpans.filter(
+    (s) =>
+      s.fontSize >= 9 &&
+      s.fontSize <= 14 &&
+      (!isSpanBold(s) || Boolean(s.isParagraph)) &&
+      isLegibleTextColorOnLightPage(s.color)
+  );
+  const fallbackProseSpans = contentSpans.filter(
+    (s) => s.fontSize >= 9 && s.fontSize <= 14 && (!isSpanBold(s) || Boolean(s.isParagraph))
+  );
+  const mediumSpans = contentSpans.filter(
+    (s) => s.fontSize <= 14 && isLegibleTextColorOnLightPage(s.color)
+  );
+
+  const bodyCandidateSpans =
+    legibleProseSpans.length > 0
+      ? legibleProseSpans
+      : fallbackProseSpans.length > 0
+        ? fallbackProseSpans
+        : mediumSpans.length > 0
+          ? mediumSpans
+          : contentSpans;
+
+  const bodyProfile = buildStyleProfileFromSpans(
+    bodyCandidateSpans,
+    12,
+    'normal',
+    'Helvetica',
+    '#000000'
+  );
+  bodyProfile.fontWeight = 'normal';
+
+  // Identify caption / fine-print spans strictly smaller than body text
+  const captionCandidates = contentSpans.filter(
+    (s) =>
+      s.fontSize > 0 &&
+      s.fontSize <= bodyProfile.fontSize - 1 &&
+      s.fontSize <= 10.5 &&
+      isLegibleTextColorOnLightPage(s.color)
+  );
+  const defaultCaptionSize = roundToHalf(
+    Math.max(8, Math.min(bodyProfile.fontSize - 1.5, bodyProfile.fontSize * 0.85))
+  );
+  const captionProfile =
+    captionCandidates.length > 0
+      ? buildStyleProfileFromSpans(
+          captionCandidates,
+          defaultCaptionSize,
+          'normal',
+          bodyProfile.fontFamily,
+          bodyProfile.color
+        )
+      : deriveTierProfile(bodyProfile, defaultCaptionSize, 'normal');
+  captionProfile.fontWeight = 'normal';
+
+  // Identify heading candidates strictly larger than body text
+  const headingCandidates = contentSpans.filter((s) => {
+    const text = s.text.trim();
+    if (text.length > 180) return false;
+    const bold = isSpanBold(s);
+    if (s.fontSize >= bodyProfile.fontSize + 3) return true;
+    if (s.isParagraph) return false;
+    if (s.fontSize >= Math.max(13, bodyProfile.fontSize + 1.5)) return true;
+    if (bold && s.fontSize >= bodyProfile.fontSize + 0.5) return true;
+    return false;
+  });
+
+  const tiers = buildDescendingHeadingTiers(headingCandidates, bodyProfile);
+
+  const fallbackH1Size = Math.max(20, roundToHalf(bodyProfile.fontSize * 1.8));
+  const fallbackH2Size = Math.max(16, roundToHalf(bodyProfile.fontSize * 1.4));
+  const fallbackH3Size = Math.max(13, roundToHalf(bodyProfile.fontSize * 1.15));
+
+  let titleProfile: TypographyStyleProfile;
+  let h1Profile: TypographyStyleProfile;
+  let h2Profile: TypographyStyleProfile;
+  let h3Profile: TypographyStyleProfile;
+
+  if (tiers.length === 0) {
+    h1Profile = deriveTierProfile(bodyProfile, fallbackH1Size, 'bold');
+    h2Profile = deriveTierProfile(bodyProfile, fallbackH2Size, 'bold');
+    h3Profile = deriveTierProfile(bodyProfile, fallbackH3Size, 'bold');
+    titleProfile = deriveTierProfile(
+      h1Profile,
+      Math.max(26, roundToHalf(h1Profile.fontSize * 1.25)),
+      'bold'
+    );
+  } else if (tiers.length === 1) {
+    h1Profile = tiers[0];
+    titleProfile = deriveTierProfile(
+      h1Profile,
+      Math.max(h1Profile.fontSize + 4, roundToHalf(h1Profile.fontSize * 1.25)),
+      'bold'
+    );
+    const targetH2 = Math.min(h1Profile.fontSize - 2, fallbackH2Size);
+    h2Profile = deriveTierProfile(
+      bodyProfile,
+      Math.max(bodyProfile.fontSize + 2, targetH2),
+      'bold'
+    );
+    const targetH3 = Math.min(h2Profile.fontSize - 1.5, fallbackH3Size);
+    h3Profile = deriveTierProfile(
+      bodyProfile,
+      Math.max(bodyProfile.fontSize + 1, targetH3),
+      'bold'
+    );
+  } else if (tiers.length === 2) {
+    if (tiers[0].fontSize >= 24 && tiers[1].fontSize >= 16) {
+      titleProfile = tiers[0];
+      h1Profile = tiers[1];
+      const targetH2 = Math.min(h1Profile.fontSize - 2, fallbackH2Size);
+      h2Profile = deriveTierProfile(
+        bodyProfile,
+        Math.max(bodyProfile.fontSize + 2, targetH2),
+        'bold'
+      );
+      const targetH3 = Math.min(h2Profile.fontSize - 1.5, fallbackH3Size);
+      h3Profile = deriveTierProfile(
+        bodyProfile,
+        Math.max(bodyProfile.fontSize + 1, targetH3),
+        'bold'
+      );
+    } else {
+      h1Profile = tiers[0];
+      h2Profile = tiers[1];
+      titleProfile = deriveTierProfile(
+        h1Profile,
+        Math.max(h1Profile.fontSize + 4, roundToHalf(h1Profile.fontSize * 1.25)),
+        'bold'
+      );
+      const targetH3 = Math.min(h2Profile.fontSize - 1, fallbackH3Size);
+      h3Profile = deriveTierProfile(
+        bodyProfile,
+        Math.max(bodyProfile.fontSize + 1, targetH3),
+        'bold'
+      );
+    }
+  } else if (tiers.length === 3) {
+    if (tiers[0].fontSize >= 24 && tiers[1].fontSize >= 16) {
+      titleProfile = tiers[0];
+      h1Profile = tiers[1];
+      h2Profile = tiers[2];
+      const targetH3 = Math.min(h2Profile.fontSize - 1, fallbackH3Size);
+      h3Profile = deriveTierProfile(
+        bodyProfile,
+        Math.max(bodyProfile.fontSize + 1, targetH3),
+        'bold'
+      );
+    } else {
+      h1Profile = tiers[0];
+      h2Profile = tiers[1];
+      h3Profile = tiers[2];
+      titleProfile = deriveTierProfile(
+        h1Profile,
+        Math.max(h1Profile.fontSize + 4, roundToHalf(h1Profile.fontSize * 1.25)),
+        'bold'
+      );
+    }
+  } else {
+    titleProfile = tiers[0];
+    h1Profile = tiers[1];
+    h2Profile = tiers[2];
+    h3Profile = tiers[3];
+  }
+
+  // Enforce strict monotonic size ordering across all hierarchical tiers
+  captionProfile.fontSize = roundToHalf(
+    Math.min(captionProfile.fontSize, Math.max(6, bodyProfile.fontSize - 1))
+  );
+  h3Profile.fontSize = roundToHalf(Math.max(h3Profile.fontSize, bodyProfile.fontSize + 1));
+  h2Profile.fontSize = roundToHalf(Math.max(h2Profile.fontSize, h3Profile.fontSize + 1.5));
+  h1Profile.fontSize = roundToHalf(Math.max(h1Profile.fontSize, h2Profile.fontSize + 2));
+  titleProfile.fontSize = roundToHalf(Math.max(titleProfile.fontSize, h1Profile.fontSize + 3));
+
+  // Build subtitle profile (normal weight, sized between body and H1)
+  const subtitleCandidates = contentSpans.filter(
+    (s) =>
+      !isSpanBold(s) &&
+      s.fontSize >= bodyProfile.fontSize + 1 &&
+      s.fontSize <= h1Profile.fontSize - 1 &&
+      s.text.trim().length <= 180 &&
+      isLegibleTextColorOnLightPage(s.color)
+  );
+  const defaultSubtitleSize = roundToHalf(
+    Math.max(
+      bodyProfile.fontSize + 1.5,
+      Math.min(h1Profile.fontSize - 1.5, bodyProfile.fontSize * 1.25)
+    )
+  );
+  const subtitleProfile =
+    subtitleCandidates.length > 0
+      ? buildStyleProfileFromSpans(
+          subtitleCandidates,
+          defaultSubtitleSize,
+          'normal',
+          bodyProfile.fontFamily,
+          bodyProfile.color
+        )
+      : deriveTierProfile(bodyProfile, defaultSubtitleSize, 'normal');
+  subtitleProfile.fontWeight = 'normal';
+  subtitleProfile.fontSize = roundToHalf(
+    Math.max(
+      bodyProfile.fontSize + 1,
+      Math.min(h1Profile.fontSize - 1, subtitleProfile.fontSize)
+    )
+  );
+
+  const headings: Record<number, TypographyStyleProfile> = {
+    1: h1Profile,
+    2: h2Profile,
+    3: h3Profile,
+  };
+
+  for (let i = 4; i < Math.min(7, tiers.length + 1); i++) {
+    const extraTier = tiers[i];
+    if (extraTier) {
+      headings[i] = extraTier;
+    }
+  }
+
+  return {
+    title: titleProfile,
+    subtitle: subtitleProfile,
+    body: bodyProfile,
+    caption: captionProfile,
+    headings,
+    h1: h1Profile,
+    h2: h2Profile,
+    h3: h3Profile,
+  };
+}
+
+/**
+ * Resolves the typography style profile for a given text preset identifier.
+ *
+ * @param presetId Semantic preset identifier.
+ * @param typography Optional document typography profile (falls back to defaults).
+ * @return Resolved typography style profile for the preset.
+ */
+export function getPresetStyleProfile(
+  presetId: TextStylePresetId,
+  typography?: DocumentTypographyProfile | null
+): TypographyStyleProfile {
+  const profile = typography ?? analyzeDocumentTypography([]);
+  switch (presetId) {
+    case 'title':
+      return profile.title;
+    case 'subtitle':
+      return profile.subtitle;
+    case 'heading':
+      return profile.h1;
+    case 'subheading':
+      return profile.h2;
+    case 'body':
+      return profile.body;
+    case 'caption':
+      return profile.caption;
+  }
+}
+
+/**
+ * Builds a complete canvas element placement and drag payload for a text preset.
+ *
+ * @param presetId Semantic preset identifier.
+ * @param typography Optional document typography profile.
+ * @return ElementDropPayload with calculated dimensions and typographic properties.
+ */
+export function resolveTextPresetPayload(
+  presetId: TextStylePresetId,
+  typography?: DocumentTypographyProfile | null
+): ElementDropPayload & {
+  kind: 'text';
+  text: string;
+  label: string;
+  fontSize: number;
+  fontWeight: 'normal' | 'bold';
+  fontStyle: 'normal' | 'italic';
+  fontFamily: string;
+  rawFontFamily?: string;
+  color: string;
+  textAlign: 'left' | 'center' | 'right';
+  lineHeight?: number;
+  width: number;
+  height: number;
+} {
+  const meta = TEXT_STYLE_PRESETS.find((p) => p.id === presetId) ?? TEXT_STYLE_PRESETS[4];
+  const style = getPresetStyleProfile(presetId, typography);
+  const width = Math.max(meta.minWidth, Math.round(style.fontSize * meta.widthMultiplier));
+  const height = Math.ceil(style.fontSize * meta.heightMultiplier);
+
+  return {
+    kind: 'text',
+    text: meta.defaultText,
+    label: meta.label,
+    fontSize: style.fontSize,
+    fontWeight: style.fontWeight,
+    fontStyle: style.fontStyle,
+    fontFamily: style.fontFamily,
+    rawFontFamily: style.rawFontFamily,
+    color: style.color,
+    textAlign: style.textAlign,
+    lineHeight: style.lineHeight,
+    width,
+    height,
+  };
+}
+
+/**
+ * Detects which semantic text preset matches the given typographic attributes.
+ *
+ * @param current Active font size, weight, and style from the selection.
+ * @param typography Optional document typography profile.
+ * @return Matching preset identifier or 'custom' if no preset matches.
+ */
+export function detectMatchingTextPreset(
+  current: {
+    fontSize?: number;
+    fontWeight?: 'normal' | 'bold';
+    fontStyle?: 'normal' | 'italic';
+  },
+  typography?: DocumentTypographyProfile | null
+): TextStylePresetId | 'custom' {
+  if (!current.fontSize || Number.isNaN(current.fontSize)) {
+    return 'custom';
+  }
+
+  const profile = typography ?? analyzeDocumentTypography([]);
+  const currentWeight = current.fontWeight || 'normal';
+  const orderedIds: TextStylePresetId[] = [
+    'title',
+    'heading',
+    'subheading',
+    'subtitle',
+    'body',
+    'caption',
+  ];
+
+  let bestExactMatch: { id: TextStylePresetId; diff: number } | null = null;
+  for (const id of orderedIds) {
+    const style = getPresetStyleProfile(id, profile);
+    const diff = Math.abs(current.fontSize - style.fontSize);
+    if (diff <= 0.75 && style.fontWeight === currentWeight) {
+      if (!bestExactMatch || diff < bestExactMatch.diff) {
+        bestExactMatch = { id, diff };
+      }
+    }
+  }
+
+  if (bestExactMatch) {
+    return bestExactMatch.id;
+  }
+
+  return 'custom';
+}
+
