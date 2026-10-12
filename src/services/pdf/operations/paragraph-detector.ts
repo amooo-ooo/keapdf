@@ -2,13 +2,19 @@ import type { PdfiumEngine } from '../../../core/pdfium-engine';
 import type {
   ColorRgba,
   EditableTextSpan,
+  PageCropInfo,
   TextLine,
   TextWord,
 } from '../../../core/types';
 import {
-  readCharFontName,
+  readCharFontInfo,
   readCharFillColor,
+  readCharMatrixScaleY,
   mapStandardFontName,
+  cleanSubsetPrefix,
+  extractBaseFontFamily,
+  isBoldFontName,
+  isItalicFontName,
   getPageCropInfo,
   pdfBoxToDomBounds,
   pdfToDomCoords,
@@ -19,6 +25,15 @@ import {
   isControlOrUnidentified,
   sanitizePdfText,
 } from '../utils';
+import {
+  estimateWordTrackingPoints,
+  formatLetterSpacingPoints,
+  computeLineTypographicMetrics,
+  computeClusterBaseLineHeight,
+  calibrateClusterLineHeights,
+  resolveMatrixScaledFontSize,
+  UNIT_FONT_SIZE_THRESHOLD,
+} from '../../../core/typography-metrics';
 
 /**
  * Raw character metrics extracted directly from PDFium text stream.
@@ -34,6 +49,9 @@ interface RawChar {
   originY: number;
   fontSize: number;
   fontWeight: number;
+  fontFlags: number;
+  isBold: boolean;
+  isItalic: boolean;
   fontFamily: string;
   rawFontFamily: string;
   color: ColorRgba;
@@ -48,7 +66,7 @@ interface RawChar {
 }
 
 /**
- * Normalizes an angle in radians from PDFium to degrees in the range [0, 360).
+ * Normalises an angle in radians from PDFium to degrees in the range [0, 360).
  *
  * @param angleRad Character rotation angle in radians.
  * @return Angle in degrees.
@@ -85,13 +103,72 @@ export function isVerticalRotation(rotation: number): boolean {
 }
 
 /**
+ * Calibrates character font sizes when PDFium reports a unit or near-zero Tf size (<= 1.5)
+ * because the visual point size is encoded in the text transformation matrix Tm.
+ *
+ * Acts as a glyph box fallback only; characters whose text matrix was readable already
+ * carry a matrix-scaled size from `resolveMatrixScaledFontSize` and are skipped.
+ *
+ * @param chars Extracted raw characters on the page.
+ */
+function calibrateMatrixScaledCharFontSizes(chars: RawChar[]): void {
+  let i = 0;
+  while (i < chars.length) {
+    if (chars[i].fontSize > 1.5) {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (
+      j < chars.length &&
+      chars[j].fontSize <= 1.5 &&
+      chars[j].isVertical === chars[i].isVertical &&
+      Math.abs(chars[j].domBaseline - chars[i].domBaseline) <= 4.0 &&
+      chars[j].rawFontFamily === chars[i].rawFontFamily
+    ) {
+      j++;
+    }
+
+    let maxAscent = 0;
+    for (let k = i; k < j; k++) {
+      const ch = chars[k];
+      const boxSpan = ch.isVertical
+        ? Math.abs(ch.right - ch.left)
+        : Math.max(Math.abs(ch.top - ch.originY), Math.abs(ch.top - ch.bottom) * 0.85);
+      if (boxSpan > maxAscent) {
+        maxAscent = boxSpan;
+      }
+    }
+
+    if (maxAscent > 1.5) {
+      const calibratedFs = Math.max(4, Math.round((maxAscent / 0.72) * 2) / 2);
+      for (let k = i; k < j; k++) {
+        const ch = chars[k];
+        ch.fontSize = calibratedFs;
+        const cp = ch.unicode.codePointAt(0) || 0;
+        if (!ch.isVertical) {
+          if (ch.domBottom - ch.domTop < calibratedFs * 0.2) {
+            ch.domTop = Math.max(0, ch.domBaseline - calibratedFs * 0.85);
+            ch.domBottom = ch.domBaseline + calibratedFs * 0.25;
+          }
+          if (ch.domRight - ch.domLeft < calibratedFs * 0.1 && !isZeroWidthOrInvisible(cp)) {
+            ch.domRight = ch.domLeft + calibratedFs * 0.28;
+            ch.right = ch.left + calibratedFs * 0.28;
+          }
+        }
+      }
+    }
+
+    i = j;
+  }
+}
+
+/**
  * Detects and clusters characters on a PDF page into semantic multi-line paragraphs.
  *
- * Uses deterministic multi-pass spatial analysis:
- * 1. Glyph extraction, orientation normalization, and coordinate mapping
- * 2. Orientation-isolated word tokenization
- * 3. Directional line assembly (horizontal vs vertical lines)
- * 4. Orientation-partitioned paragraph and block clustering
+ * Uses deterministic multi-pass spatial analysis covering glyph extraction and
+ * orientation normalisation, word tokenisation, directional line assembly, and
+ * orientation-partitioned paragraph and table block clustering.
  *
  * @param engine The PDFium engine instance.
  * @param pageIndex Zero-based page index.
@@ -122,6 +199,7 @@ export function detectParagraphs(
     const bottomPtr = engine.allocateMemory(8);
     const xPtr = engine.allocateMemory(8);
     const yPtr = engine.allocateMemory(8);
+    const matrixPtr = engine.allocateMemory(24);
 
     const rawChars: RawChar[] = [];
 
@@ -130,7 +208,7 @@ export function detectParagraphs(
         const charCode = mod.FPDFText_GetUnicode(textPageHandle, i);
         if (charCode === 0 || isControlOrUnidentified(charCode)) continue;
 
-        const rawFontName = readCharFontName(engine, mod, textPageHandle, i);
+        const { fontName: rawFontName, fontFlags } = readCharFontInfo(engine, mod, textPageHandle, i);
         let charStr = String.fromCodePoint(charCode);
         if (charCode === 0xf0b7) {
           charStr = '\u2022';
@@ -139,10 +217,25 @@ export function detectParagraphs(
         } else if (charCode === 0xf0d8) {
           charStr = '\u25B8';
         }
-        const fontSize = mod.FPDFText_GetFontSize(textPageHandle, i) || 12;
-        const fontWeight = mod.FPDFText_GetFontWeight(textPageHandle, i) || 400;
+        const reportedFontSize = mod.FPDFText_GetFontSize(textPageHandle, i) || 12;
+        const fontSize =
+          resolveMatrixScaledFontSize(
+            reportedFontSize,
+            reportedFontSize <= UNIT_FONT_SIZE_THRESHOLD
+              ? readCharMatrixScaleY(mod, textPageHandle, i, matrixPtr)
+              : null
+          ) ?? reportedFontSize;
+        const rawWeight = mod.FPDFText_GetFontWeight(textPageHandle, i);
+        const isBold = isBoldFontName(rawFontName, rawWeight > 0 ? rawWeight : undefined, fontFlags);
+        const isItalic = isItalicFontName(rawFontName, undefined, fontFlags);
+        const fontWeight = rawWeight > 0 ? rawWeight : isBold ? 700 : 400;
 
-        const detectedFont = mapStandardFontName(rawFontName);
+        const detectedFont = mapStandardFontName(
+          rawFontName,
+          isBold ? 'bold' : undefined,
+          isItalic ? 'italic' : undefined,
+          fontFlags
+        );
         const charColor = readCharFillColor(engine, mod, textPageHandle, i);
 
         mod.FPDFText_GetCharBox(textPageHandle, i, leftPtr, rightPtr, bottomPtr, topPtr);
@@ -216,6 +309,9 @@ export function detectParagraphs(
           originY,
           fontSize,
           fontWeight,
+          fontFlags,
+          isBold,
+          isItalic,
           fontFamily: detectedFont,
           rawFontFamily: rawFontName,
           color: charColor,
@@ -236,9 +332,12 @@ export function detectParagraphs(
       engine.freeMemory(bottomPtr);
       engine.freeMemory(xPtr);
       engine.freeMemory(yPtr);
+      engine.freeMemory(matrixPtr);
     }
 
     if (rawChars.length === 0) return [];
+
+    calibrateMatrixScaledCharFontSizes(rawChars);
 
     // Pass 2: Word Formation
     const words = formWords(rawChars);
@@ -249,7 +348,8 @@ export function detectParagraphs(
     if (lines.length === 0) return [];
 
     // Pass 4: Paragraph & Block Clustering
-    return clusterParagraphs(lines, pageIndex);
+    const barriers = extractHorizontalBarriers(engine, pageHandle, cropInfo);
+    return clusterParagraphs(lines, pageIndex, barriers);
   } finally {
     if (textPageHandle) {
       mod.FPDFText_ClosePage(textPageHandle);
@@ -365,8 +465,8 @@ function hasAlphaNumericChar(str: string): boolean {
 }
 
 /**
- * Computes the dominant font, weight, style, and color from a set of characters or words,
- * prioritizing alphanumeric body characters over bullet symbols or icons.
+ * Computes the dominant font, weight, style, and colour from a set of characters or words,
+ * prioritising alphanumeric body characters over bullet symbols or icons.
  */
 function getDominantTypography(items: Array<{
   unicode?: string;
@@ -375,6 +475,10 @@ function getDominantTypography(items: Array<{
   rawFontFamily?: string;
   color?: ColorRgba;
   fontWeight?: number | string;
+  fontStyle?: string;
+  fontFlags?: number;
+  isBold?: boolean;
+  isItalic?: boolean;
 }>): {
   fontFamily: string;
   rawFontFamily: string;
@@ -398,12 +502,14 @@ function getDominantTypography(items: Array<{
     const it = items[0];
     const raw = it.rawFontFamily || 'Helvetica';
     const detected = it.fontFamily || 'Helvetica';
-    const rawLower = raw.toLowerCase();
     const isBold =
-      typeof it.fontWeight === 'number'
-        ? it.fontWeight >= 600 || rawLower.includes('bold')
-        : it.fontWeight === 'bold' || rawLower.includes('bold');
-    const isItalic = rawLower.includes('italic') || rawLower.includes('oblique');
+      it.isBold !== undefined
+        ? it.isBold
+        : isBoldFontName(`${raw} ${detected}`, it.fontWeight, it.fontFlags);
+    const isItalic =
+      it.isItalic !== undefined
+        ? it.isItalic
+        : isItalicFontName(`${raw} ${detected}`, it.fontStyle, it.fontFlags);
     return {
       fontFamily: detected,
       rawFontFamily: raw,
@@ -430,14 +536,18 @@ function getDominantTypography(items: Array<{
     }
   }
 
-  const fontCounts = new Map<string, { count: number; raw: string; detected: string; isBold: boolean }>();
-  // 32-bit integer key for RGBA colors: (r << 24) | (g << 16) | (b << 8) | a
+  const fontCounts = new Map<
+    string,
+    { count: number; raw: string; detected: string; isBold: boolean; isItalic: boolean }
+  >();
+  // 32-bit integer key for RGBA colours: (r << 24) | (g << 16) | (b << 8) | a
   const colorCounts = new Map<number, { count: number; color: ColorRgba }>();
 
   for (let i = 0; i < len; i++) {
     const item = items[i];
     const rawFont = item.rawFontFamily || 'Helvetica';
-    const isSym = isSymbolFont(rawFont);
+    const cleanFont = cleanSubsetPrefix(rawFont);
+    const isSym = isSymbolFont(cleanFont);
     const str = item.unicode || item.text || '';
     const isAlpha = hasAlphaNumericChar(str);
 
@@ -449,17 +559,28 @@ function getDominantTypography(items: Array<{
     }
 
     const detectedFont = item.fontFamily || 'Helvetica';
-    const rawLower = rawFont.toLowerCase();
     const isBold =
-      typeof item.fontWeight === 'number'
-        ? item.fontWeight >= 600 || rawLower.includes('bold')
-        : item.fontWeight === 'bold' || rawLower.includes('bold');
+      item.isBold !== undefined
+        ? item.isBold
+        : isBoldFontName(`${cleanFont} ${detectedFont}`, item.fontWeight, item.fontFlags);
+    const isItalic =
+      item.isItalic !== undefined
+        ? item.isItalic
+        : isItalicFontName(`${cleanFont} ${detectedFont}`, item.fontStyle, item.fontFlags);
+    const fontKey = `${cleanFont}|${isBold ? 'b' : 'n'}|${isItalic ? 'i' : 'n'}`;
+    const weightCount = Math.max(1, str.length);
 
-    const entry = fontCounts.get(rawFont);
+    const entry = fontCounts.get(fontKey);
     if (entry) {
-      entry.count++;
+      entry.count += weightCount;
     } else {
-      fontCounts.set(rawFont, { count: 1, raw: rawFont, detected: detectedFont, isBold });
+      fontCounts.set(fontKey, {
+        count: weightCount,
+        raw: rawFont,
+        detected: detectedFont,
+        isBold,
+        isItalic,
+      });
     }
 
     if (item.color) {
@@ -467,15 +588,15 @@ function getDominantTypography(items: Array<{
       const colorKey = ((c.r & 0xff) << 24) | ((c.g & 0xff) << 16) | ((c.b & 0xff) << 8) | (c.a & 0xff);
       const colorEntry = colorCounts.get(colorKey);
       if (colorEntry) {
-        colorEntry.count++;
+        colorEntry.count += weightCount;
       } else {
-        colorCounts.set(colorKey, { count: 1, color: c });
+        colorCounts.set(colorKey, { count: weightCount, color: c });
       }
     }
   }
 
   let maxFontCount = -1;
-  let bestFont = { raw: 'Helvetica', detected: 'Helvetica', isBold: false };
+  let bestFont = { raw: 'Helvetica', detected: 'Helvetica', isBold: false, isItalic: false };
   for (const entry of fontCounts.values()) {
     if (entry.count > maxFontCount) {
       maxFontCount = entry.count;
@@ -492,21 +613,18 @@ function getDominantTypography(items: Array<{
     }
   }
 
-  const rawLower = bestFont.raw.toLowerCase();
-  const isItalic = rawLower.includes('italic') || rawLower.includes('oblique');
-
   return {
     fontFamily: bestFont.detected,
     rawFontFamily: bestFont.raw,
     color: bestColor,
     fontWeight: bestFont.isBold ? 'bold' : 'normal',
-    fontStyle: isItalic ? 'italic' : 'normal',
+    fontStyle: bestFont.isItalic ? 'italic' : 'normal',
   };
 }
 
 /**
  * Calculates the dominant (modal or character-weighted) font size from a list of words or characters.
- * Prioritizes alphanumeric body characters over bullet markers, symbols, or small-caps capital letters
+ * Prioritises alphanumeric body characters over bullet markers, symbols, or small-caps capital letters
  * to prevent outliers from distorting the line or span font size.
  *
  * @param items Array of text words or characters with fontSize property.
@@ -574,8 +692,23 @@ function getDominantFontSize(
 }
 
 /**
+ * Measures the signed separation between two intervals on one axis regardless of
+ * their order, so vertical glyph runs reading top-to-bottom (90 degrees) and
+ * bottom-to-top (270 degrees) share one gap metric.
+ *
+ * @param aStart Start of the first interval.
+ * @param aEnd End of the first interval.
+ * @param bStart Start of the second interval.
+ * @param bEnd End of the second interval.
+ * @return Positive gap between disjoint intervals, or negative overlap depth.
+ */
+function measureAxisSeparation(aStart: number, aEnd: number, bStart: number, bEnd: number): number {
+  return Math.max(bStart - aEnd, aStart - bEnd);
+}
+
+/**
  * Groups adjacent characters into words based on baseline alignment, orientation, and spacing.
- * Separates bullet/symbol tokens if they have different colors or symbol fonts.
+ * Separates bullet/symbol tokens if they have different colours or symbol fonts.
  * Guarantees that characters with different rotations or orientations are never merged.
  *
  * @param chars Raw characters from PDF page.
@@ -614,6 +747,18 @@ function formWords(chars: RawChar[]): TextWord[] {
     if (sanitized.length > 0 && firstChar && (minLeft < maxRight || minTop < maxBottom || firstChar.isVertical)) {
       const typo = getDominantTypography(currentWordChars);
       const exactFontSize = Math.round((sumFontSize / currentWordChars.length) * 10) / 10;
+      const wordWidth = Math.max(1, maxRight - minLeft);
+      const wordTrackingPts = firstChar.isVertical
+        ? 0
+          : estimateWordTrackingPoints(
+              sanitized,
+              currentWordChars.map((c) => (Number.isFinite(c.originX) ? c.originX : c.domLeft)),
+              wordWidth,
+              exactFontSize,
+              typo.rawFontFamily || typo.fontFamily || 'Helvetica',
+              typo.fontWeight === 'bold'
+            );
+      const wordLetterSpacing = formatLetterSpacingPoints(wordTrackingPts);
 
       words.push({
         text: sanitized,
@@ -621,18 +766,22 @@ function formWords(chars: RawChar[]): TextWord[] {
         top: minTop,
         right: maxRight,
         bottom: maxBottom,
-        width: Math.max(1, maxRight - minLeft),
+        width: wordWidth,
         height: Math.max(1, maxBottom - minTop),
         fontSize: exactFontSize,
         baselineY: firstChar.isVertical ? firstChar.originX : sumOriginY / currentWordChars.length,
         domBaseline: firstChar.isVertical ? firstChar.domBaseline : sumDomBaseline / currentWordChars.length,
         charStartIndex: firstChar.charIndex,
         charCount: sanitized.length,
+        charIndices: currentWordChars.map((c) => c.charIndex),
         fontFamily: typo.fontFamily,
         rawFontFamily: typo.rawFontFamily,
         color: typo.color,
         fontWeight: typo.fontWeight,
         fontStyle: typo.fontStyle,
+        ...(wordLetterSpacing !== 'normal'
+          ? { letterSpacing: wordLetterSpacing, letterSpacingPts: wordTrackingPts }
+          : {}),
         angle: firstChar.angle,
         rotation: firstChar.rotation,
         isVertical: firstChar.isVertical,
@@ -657,11 +806,13 @@ function formWords(chars: RawChar[]): TextWord[] {
       continue;
     }
 
-    const isCurrentBullet = isBulletChar(c.unicode) || isSymbolFont(c.rawFontFamily);
+    const isCurrentBullet =
+      (isBulletChar(c.unicode) && c.unicode !== '-') || isSymbolFont(c.rawFontFamily);
 
     if (currentWordChars.length > 0) {
       const prev = currentWordChars[currentWordChars.length - 1];
-      const isPrevBullet = isBulletChar(prev.unicode) || isSymbolFont(prev.rawFontFamily);
+      const isPrevBullet =
+        (isBulletChar(prev.unicode) && prev.unicode !== '-') || isSymbolFont(prev.rawFontFamily);
 
       // Never merge characters with differing rotations or orientations
       if (c.rotation !== prev.rotation || c.isVertical !== prev.isVertical) {
@@ -672,24 +823,27 @@ function formWords(chars: RawChar[]): TextWord[] {
 
       const fontDiff = Math.abs(c.fontSize - prev.fontSize);
       const colorDiff = Math.abs(c.color.r - prev.color.r) + Math.abs(c.color.g - prev.color.g) + Math.abs(c.color.b - prev.color.b);
-      const isFontChanged = c.rawFontFamily !== prev.rawFontFamily;
-      const isWeightChanged = Math.abs(c.fontWeight - prev.fontWeight) >= 150;
+      const isFontChanged = cleanSubsetPrefix(c.rawFontFamily || '') !== cleanSubsetPrefix(prev.rawFontFamily || '');
+      const isWeightChanged = Math.abs(c.fontWeight - prev.fontWeight) >= 150 || c.isBold !== prev.isBold;
+      const isStyleChanged = c.isItalic !== prev.isItalic;
 
       if (c.isVertical) {
         // Vertical word flow: spacing along vertical axis, alignment along horizontal axis
         const xDiff = Math.abs(c.domLeft - prev.domLeft);
-        const verticalGap = Math.abs(c.domTop - prev.domBottom);
+        const verticalGap = measureAxisSeparation(prev.domTop, prev.domBottom, c.domTop, c.domBottom);
 
         if (
           isCurrentBullet !== isPrevBullet ||
           colorDiff > 40 ||
           xDiff > 3.0 ||
           verticalGap > prev.fontSize * 0.35 ||
+          verticalGap < -2.0 ||
           fontDiff > 0.5 ||
           isFontChanged ||
-          isWeightChanged
+          isWeightChanged ||
+          isStyleChanged
         ) {
-          if (verticalGap >= prev.fontSize * 0.25) {
+          if (verticalGap >= Math.min(prev.fontSize, c.fontSize) * 0.18) {
             pendingPrecedingSpace = true;
           }
           flushWord();
@@ -698,18 +852,27 @@ function formWords(chars: RawChar[]): TextWord[] {
         // Horizontal word flow: spacing along horizontal axis, alignment along vertical baseline
         const baselineDiff = Math.abs(c.domBaseline - prev.domBaseline);
         const gap = c.domLeft - prev.domRight;
+        const originAdvance =
+          Number.isFinite(c.originX) && Number.isFinite(prev.originX)
+            ? Math.abs(c.originX - prev.originX)
+            : Infinity;
+        const maxWordCharGap =
+          originAdvance <= prev.fontSize * 0.68
+            ? prev.fontSize * 0.55
+            : prev.fontSize * 0.35;
 
         if (
           isCurrentBullet !== isPrevBullet ||
           colorDiff > 40 ||
           baselineDiff > 2.5 ||
-          gap > prev.fontSize * 0.35 ||
+          gap > maxWordCharGap ||
           gap < -2.0 ||
           fontDiff > 0.5 ||
           isFontChanged ||
-          isWeightChanged
+          isWeightChanged ||
+          isStyleChanged
         ) {
-          if (gap >= prev.fontSize * 0.25) {
+          if (gap >= Math.min(prev.fontSize, c.fontSize) * 0.18) {
             pendingPrecedingSpace = true;
           }
           flushWord();
@@ -807,6 +970,22 @@ function detectVerticalGutters(
 }
 
 /**
+ * Checks whether a text fragment is a standalone tabular value such as a number,
+ * currency figure, percentage, date, or short alphanumeric table code.
+ *
+ * @param text Text string to inspect.
+ * @return True if the fragment matches a tabular data value pattern.
+ */
+function isTabularDataCellText(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 28) return false;
+  if (/^[$+\-\u00A3\u00A5\u20AC\u20B9]?\s*\d[\d,.\s/%-]*[$%\u00A3\u00A5\u20AC\u20B9]?$/.test(trimmed)) return true;
+  if (/^[A-Z]{1,4}[-/]?\d{2,6}[A-Z0-9-]*$/i.test(trimmed)) return true;
+  if (/^\(\s*[$\u00A3\u00A5\u20AC\u20B9]?\d[\d,.]*\s*\)$/.test(trimmed)) return true;
+  return false;
+}
+
+/**
  * Evaluates whether two adjacent words on the same baseline are typographically compatible
  * to belong to the same text line, preventing merging of code blocks, captions, and body text.
  *
@@ -820,20 +999,37 @@ function isTypographicallyCompatible(w1: TextWord, w2: TextWord, gap: number): b
     return false;
   }
 
+  const minFontSize = Math.min(w1.fontSize, w2.fontSize);
   const isMono1 = /mono|courier|cmtt|consolas|menlo/i.test(w1.fontFamily || w1.rawFontFamily || '');
   const isMono2 = /mono|courier|cmtt|consolas|menlo/i.test(w2.fontFamily || w2.rawFontFamily || '');
 
   if (isMono1 !== isMono2) {
-    const monoGapTolerance = Math.min(24, Math.max(10, w1.fontSize * 1.2));
+    const monoGapTolerance = Math.min(20, Math.max(8, minFontSize * 0.95));
     if (gap > monoGapTolerance) {
       return false;
     }
   }
 
-  const isBold1 = (w1.fontWeight && (w1.fontWeight === 'bold' || Number(w1.fontWeight) >= 600)) || /bold|black|medi/i.test(w1.fontFamily || w1.rawFontFamily || '');
-  const isBold2 = (w2.fontWeight && (w2.fontWeight === 'bold' || Number(w2.fontWeight) >= 600)) || /bold|black|medi/i.test(w2.fontFamily || w2.rawFontFamily || '');
+  const base1 = extractBaseFontFamily(w1.rawFontFamily || w1.fontFamily || 'Helvetica');
+  const base2 = extractBaseFontFamily(w2.rawFontFamily || w2.fontFamily || 'Helvetica');
+  if (base1 !== base2 && gap >= Math.max(8.0, minFontSize * 0.85)) {
+    return false;
+  }
+
+  const isBold1 = isBoldFontName(`${w1.rawFontFamily || ''} ${w1.fontFamily || ''}`, w1.fontWeight);
+  const isBold2 = isBoldFontName(`${w2.rawFontFamily || ''} ${w2.fontFamily || ''}`, w2.fontWeight);
   if (isBold1 !== isBold2 && gap > 24.0) {
     return false;
+  }
+
+  if (w1.color && w2.color) {
+    const colorDist =
+      Math.abs(w1.color.r - w2.color.r) +
+      Math.abs(w1.color.g - w2.color.g) +
+      Math.abs(w1.color.b - w2.color.b);
+    if (colorDist > 55 && gap >= Math.max(8.0, minFontSize * 0.85)) {
+      return false;
+    }
   }
 
   return true;
@@ -981,8 +1177,9 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
     const firstWord = currentGroup[0];
     const baselineDiff = Math.abs(word.baselineY - firstWord.baselineY);
     const topDiff = Math.abs(word.top - firstWord.top);
+    const hasFontSizeStep = Math.abs(word.fontSize - firstWord.fontSize) > 1.5;
 
-    if (baselineDiff <= 3.5 || topDiff <= 4.5) {
+    if (baselineDiff <= 3.5 || (hasFontSizeStep && topDiff <= 4.5)) {
       currentGroup.push(word);
     } else {
       lineGroups.push(currentGroup);
@@ -994,10 +1191,15 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
     lineGroups.push(currentGroup);
   }
 
-  const lines: TextLine[] = [];
-
   for (const group of lineGroups) {
     group.sort((a, b) => a.left - b.left);
+  }
+
+  const lines: TextLine[] = [];
+
+  for (let gIdx = 0; gIdx < lineGroups.length; gIdx++) {
+    const group = lineGroups[gIdx];
+    const groupBaseline = group[0]?.baselineY ?? 0;
 
     const subGroups: TextWord[][] = [];
     let currentSubGroup: TextWord[] = [];
@@ -1011,12 +1213,55 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
 
       const prevWord = currentSubGroup[currentSubGroup.length - 1];
       const horizontalGap = word.left - prevWord.right;
+      const minFontSize = Math.min(prevWord.fontSize, word.fontSize);
       const maxIntraLineGap = Math.min(32, Math.max(16, prevWord.fontSize * 1.8));
       const minNegativeGap = -Math.max(6, prevWord.fontSize * 0.65);
 
       const isTypoMatch = isTypographicallyCompatible(prevWord, word, horizontalGap);
 
-      if (horizontalGap > maxIntraLineGap || horizontalGap < minNegativeGap || !isTypoMatch) {
+      let isColumnTabSplit = false;
+      if (horizontalGap >= Math.max(7.0, minFontSize * 0.72)) {
+        const isTabularTokenTransition =
+          horizontalGap >= Math.max(9.0, minFontSize * 0.9) &&
+          (isTabularDataCellText(word.text) || isTabularDataCellText(prevWord.text));
+
+        if (isTabularTokenTransition) {
+          isColumnTabSplit = true;
+        } else {
+          for (let otherIdx = 0; otherIdx < lineGroups.length; otherIdx++) {
+            if (otherIdx === gIdx) continue;
+            const otherGroup = lineGroups[otherIdx];
+            if (otherGroup.length < 2) continue;
+            const otherBaseline = otherGroup[0].baselineY;
+            if (Math.abs(otherBaseline - groupBaseline) > 55.0) continue;
+
+            for (let ow = 1; ow < otherGroup.length; ow++) {
+              const otherWord = otherGroup[ow];
+              const otherPrev = otherGroup[ow - 1];
+              const otherGap = otherWord.left - otherPrev.right;
+              if (otherGap < Math.max(6.5, Math.min(otherPrev.fontSize, otherWord.fontSize) * 0.68)) {
+                continue;
+              }
+              const leftAligned = Math.abs(otherWord.left - word.left) <= 2.5;
+              const rightAligned =
+                Math.abs(otherWord.right - word.right) <= 2.5 &&
+                (isTabularDataCellText(word.text) || isTabularDataCellText(otherWord.text));
+              if (leftAligned || rightAligned) {
+                isColumnTabSplit = true;
+                break;
+              }
+            }
+            if (isColumnTabSplit) break;
+          }
+        }
+      }
+
+      if (
+        horizontalGap > maxIntraLineGap ||
+        horizontalGap < minNegativeGap ||
+        !isTypoMatch ||
+        isColumnTabSplit
+      ) {
         subGroups.push(currentSubGroup);
         currentSubGroup = [word];
       } else {
