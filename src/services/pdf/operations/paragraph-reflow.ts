@@ -805,7 +805,6 @@ export function reflowAndReplaceParagraph(
       }
     }
 
-  if (!isDeletion && isOnlyTextChanged && reflowedLines.length === targetLines.length) {
     let charsAvailable = false;
     const font = targetParagraph.rawFontFamily || targetParagraph.fontFamily;
     const hasWhitespace = updatedText.includes(' ') || updatedText.includes('\t') || updatedText.includes('\n') || updatedText.includes('\r');
@@ -821,68 +820,106 @@ export function reflowAndReplaceParagraph(
     }
 
     if (charsAvailable) {
-      let allUpdated = true;
+      const singleLineIndices: number[] = [];
+      let allSingleObject = true;
       for (let i = 0; i < reflowedLines.length; i++) {
-        const line = targetLines[i];
-        const lineIndices = findTextObjectIndicesForSpan(
-          engine, mod, pageHandle,
-          line.left, line.baselineY, line.width, line.fontSize
-        );
+        const lineIndices = findLineObjectIndices(targetLines[i]);
         if (lineIndices.length !== 1) {
-          allUpdated = false;
+          allSingleObject = false;
           break;
         }
-        // lineIndices are already sorted geometrically (left-to-right)
-        const ok = setTextObjectByIndex(engine, mod, pageHandle, lineIndices[0], reflowedLines[i]);
-        if (!ok) {
-          allUpdated = false;
-          break;
-        }
-        for (let k = 1; k < lineIndices.length; k++) {
-          setTextObjectByIndex(engine, mod, pageHandle, lineIndices[k], ' ');
-        }
+        singleLineIndices.push(lineIndices[0]);
       }
 
-      if (allUpdated) {
-        mod.FPDFPage_GenerateContent(pageHandle);
-        return {
-          reflowedLines,
-          newHeight,
-          deltaY: 0,
-          affectedSpansCount: 0,
-        };
+      if (allSingleObject) {
+        let allUpdated = true;
+        for (let i = 0; i < reflowedLines.length; i++) {
+          const line = targetLines[i];
+          const objIdx = singleLineIndices[i];
+          const lineW = reflowedLines[i] === targetParagraph.lines?.[i]?.text && line.width > 0
+            ? line.width
+            : calculateTextWidth(reflowedLines[i], line.fontSize || updatedFontSize, standardFontName);
+          const fallbackDomLeft = options.lines?.[i]?.left ?? line.left;
+          const desiredDomLeft = computeAlignedLineDomLeft(i, lineW, fallbackDomLeft);
+          const desiredPdfLeft = desiredDomLeft + cropInfo.cropLeft;
+          const firstObj = mod.FPDFPage_GetObject(pageHandle, objIdx);
+          const firstMat = firstObj ? getPageObjectMatrix(engine, mod, firstObj) : null;
+          const currentBasePdfX = firstMat
+            ? (Math.abs(firstMat.e - (line.left + cropInfo.cropLeft)) <= 3.0
+                ? line.left + cropInfo.cropLeft
+                : firstMat.e)
+            : line.left + cropInfo.cropLeft;
+          const deltaLineX = hasHorizontalShift ? desiredPdfLeft - currentBasePdfX : 0;
+          const updatedMatrix = firstMat && Math.abs(deltaLineX) > 0.01
+            ? { ...firstMat, e: firstMat.e + deltaLineX }
+            : undefined;
+
+          const ok = setTextObjectByIndex(engine, mod, pageHandle, objIdx, reflowedLines[i], updatedMatrix);
+          if (!ok) {
+            allUpdated = false;
+            break;
+          }
+        }
+
+        if (allUpdated) {
+          mod.FPDFPage_GenerateContent(pageHandle);
+          return {
+            reflowedLines,
+            newHeight,
+            deltaY: 0,
+            affectedSpansCount: 0,
+          };
+        }
       }
     }
   }
 
-  // 3. Find all spans on the page to identify downstream paragraphs that need shifting
+  // Find all spans on the page to identify downstream paragraphs that need shifting
   const allPageSpans = detectParagraphs(engine, pageIndex, pageHandle);
 
-  // Identify downstream paragraphs sharing the column
-  const downstreamSpans = allPageSpans
-    .filter((s) => {
-      if (s.id === targetParagraph.id) return false;
-      const isBelow = s.top >= targetParagraph.top + targetParagraph.height - 4.0 || s.baselineY < targetParagraph.baselineY - (oldLineCount - 1) * lineHeight - 4.0;
-      if (!isBelow) return false;
+  const hasTableRowPeers = (span: EditableTextSpan): boolean => {
+    const rowPeers = allPageSpans.filter(
+      (other) =>
+        other.id !== span.id &&
+        Math.abs(other.baselineY - span.baselineY) <= 4.0 &&
+        (other.left > span.left + span.width + 4.0 || other.left + other.width < span.left - 4.0)
+    );
+    if (rowPeers.length >= 2 && span.width < 180.0) return true;
+    if (rowPeers.length >= 1 && span.width < 135.0 && rowPeers.some((p) => p.width < 135.0)) {
+      return true;
+    }
+    return false;
+  };
+  const isTargetTableCell = hasTableRowPeers(targetParagraph);
 
-      // Column overlap check: require positive overlap and substantial width coverage
-      const minColWidth = Math.min(s.width, targetParagraph.width);
-      const overlap = Math.min(s.left + s.width, targetParagraph.left + targetParagraph.width) - Math.max(s.left, targetParagraph.left);
-      return overlap > 15.0 && overlap > minColWidth * 0.25;
-    })
-    .sort((a, b) => a.top - b.top);
+  // Identify downstream paragraphs sharing the column
+  const downstreamSpans = isTargetTableCell
+    ? []
+    : allPageSpans
+        .filter((s) => {
+          if (s.id === targetParagraph.id) return false;
+          const isBelow =
+            s.top >= targetParagraph.top + targetParagraph.height - 4.0 ||
+            s.baselineY < targetParagraph.baselineY - (oldLineCount - 1) * lineHeight - 4.0;
+          if (!isBelow) return false;
+
+          // Column overlap check: require positive overlap and substantial width coverage
+          const minColWidth = Math.min(s.width, targetParagraph.width);
+          const overlap =
+            Math.min(s.left + s.width, targetParagraph.left + targetParagraph.width) -
+            Math.max(s.left, targetParagraph.left);
+          return overlap > 15.0 && overlap > minColWidth * 0.25 && !hasTableRowPeers(s);
+        })
+        .sort((a, b) => a.top - b.top);
 
   const needsDownstreamShift = Math.abs(deltaY) > 0.5 && downstreamSpans.length > 0;
 
-  // 4. Collect ALL backing PDF text objects to remove in one batch
+  // Collect ALL backing PDF text objects to remove in one batch
   const allIndicesToRemove = new Set<number>();
   let origMatrix: PdfMatrix | null = null;
 
   for (const line of targetLines) {
-    const indices = findTextObjectIndicesForSpan(
-      engine, mod, pageHandle,
-      line.left, line.baselineY, line.width, line.fontSize
-    );
+    const indices = findLineObjectIndices(line);
     for (const idx of indices) {
       allIndicesToRemove.add(idx);
       if (!origMatrix) {
@@ -915,14 +952,36 @@ export function reflowAndReplaceParagraph(
     }
   }
 
+  // Purge any existing background highlight, underline, or strikethrough rectangles in target lines
+  for (const line of targetLines) {
+    removeSpanDecorationObjectsInBounds(
+      engine,
+      mod,
+      pageHandle,
+      line.left,
+      line.baselineY,
+      Math.max(line.width, paraWidth),
+      line.fontSize || updatedFontSize
+    );
+  }
+
   // Remove all targeted objects in one atomic batch
   if (allIndicesToRemove.size > 0) {
     removeTextObjectsByIndex(mod, pageHandle, Array.from(allIndicesToRemove));
+  } else {
+    // note: spatial bounds removal fallback ensuring original objects are purged before inserting replacements
+    for (const line of targetLines) {
+      removeTextObjectsInBounds(
+        engine, mod, pageHandle,
+        line.left, line.baselineY, Math.max(line.width, paraWidth), line.fontSize || updatedFontSize
+      );
+    }
   }
 
-  // 5. Insert reflowed replacement lines for target paragraph
+  // Insert reflowed replacement lines for target paragraph
   let fontHandle = 0;
   const newObjectHandles = new Set<number>();
+  const fallbackCropInfo = getPageCropInfo(engine, mod, pageHandle);
   try {
     if (!isDeletion && reflowedLines.length > 0) {
       fontHandle = mod.FPDFText_LoadStandardFont(docHandle, standardFontName);
@@ -941,16 +1000,49 @@ export function reflowAndReplaceParagraph(
         return h;
       };
 
+      const isLineHeightUnchanged =
+        options.top === undefined &&
+        (options.lineHeight === undefined ||
+          (targetParagraph.lineHeight !== undefined &&
+            Math.abs(options.lineHeight - targetParagraph.lineHeight) < 0.1));
+      const nonEmptyReflowedCount = reflowedItems.filter((it) => it.text.trim().length > 0).length;
+      const canPreserveExactLineBaselines =
+        isLineHeightUnchanged && nonEmptyReflowedCount === targetLines.length;
+
+      const sourceLineWordCursor = new WeakMap<TextLine, number>();
+      let currentBaselineY = targetParagraph.baselineY;
+      let prevRenderedSourceLine: TextLine | undefined = undefined;
       let renderedLineIdx = 0;
       for (let i = 0; i < reflowedItems.length; i++) {
         const item = reflowedItems[i];
         const lineText = item.text;
         if (lineText.trim().length === 0) continue;
 
-        // Use direct PDF baseline coordinates
-        const lineBaselineY = targetParagraph.baselineY - renderedLineIdx * lineHeight;
-
         const origLine = item.sourceLine || findBestMatchingOrigLine(lineText, options.lines || targetParagraph.lines, renderedLineIdx) || options.lines?.[renderedLineIdx] || (targetParagraph.lines && targetParagraph.lines[renderedLineIdx] ? targetParagraph.lines[renderedLineIdx] : undefined);
+
+        // Preserve exact per-line PDF baseline coordinates and non-uniform inter-paragraph steps
+        let lineBaselineY: number;
+        if (canPreserveExactLineBaselines && targetLines[renderedLineIdx]?.baselineY !== undefined) {
+          lineBaselineY = targetLines[renderedLineIdx].baselineY;
+        } else if (renderedLineIdx === 0) {
+          lineBaselineY = targetParagraph.baselineY;
+        } else if (
+          isLineHeightUnchanged &&
+          !item.isContinuation &&
+          prevRenderedSourceLine &&
+          origLine &&
+          prevRenderedSourceLine !== origLine &&
+          prevRenderedSourceLine.baselineY !== undefined &&
+          origLine.baselineY !== undefined &&
+          prevRenderedSourceLine.baselineY > origLine.baselineY
+        ) {
+          lineBaselineY = currentBaselineY - (prevRenderedSourceLine.baselineY - origLine.baselineY);
+        } else {
+          const stepLh = isLineHeightUnchanged && origLine?.lineHeight ? origLine.lineHeight : lineHeight;
+          lineBaselineY = currentBaselineY - stepLh;
+        }
+        currentBaselineY = lineBaselineY;
+        prevRenderedSourceLine = origLine;
         renderedLineIdx++;
 
         let lineLeft = targetLeft;
@@ -964,63 +1056,31 @@ export function reflowAndReplaceParagraph(
           lineLeft = targetLeft;
         }
 
-        const isExactLineWords = Boolean(origLine?.words && !item.isContinuation && origLine.text === lineText);
+        const normalizedLineWordsText = origLine?.words
+          ? reconstructLineTextFromWords(origLine.words)
+          : '';
+        const normalizedTargetLineText = sanitizePdfText(lineText).trim().replace(/\s+/g, ' ');
+        const isExactLineWords = Boolean(
+          origLine?.words &&
+          origLine.words.length > 0 &&
+          !item.isContinuation &&
+          (origLine.text === lineText || normalizedLineWordsText === normalizedTargetLineText)
+        );
         let wordsToRender: TextWord[] | undefined;
         if (isExactLineWords && origLine?.words) {
           wordsToRender = origLine.words;
-        } else if (item.sourceLine?.words && item.sourceLine.words.length > 0) {
-          wordsToRender = item.sourceLine.words;
         } else if (origLine?.words && origLine.words.length > 0) {
-          const tokens = lineText.split(/([\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+)/);
-          const freshWords: TextWord[] = [];
-          let currentTokenLeft = lineLeft;
-          let pendingSpace = false;
-          let origWordIdx = 0;
-
-          for (const token of tokens) {
-            if (!token) continue;
-            if (/^[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+$/.test(token)) {
-              pendingSpace = true;
-              continue;
-            }
-            const clean = sanitizePdfText(token);
-            if (!clean) continue;
-
-            const matchedOrig = origLine.words.find((w) => w.text === clean) || origLine.words[Math.min(origWordIdx, origLine.words.length - 1)];
-            origWordIdx++;
-
-            const wordFs = matchedOrig?.fontSize || origLine.fontSize || updatedFontSize;
-            const approxCharW = wordFs * 0.52;
-            const wordW = matchedOrig?.width && matchedOrig.width > 0 ? matchedOrig.width : clean.length * approxCharW;
-
-            if (pendingSpace) {
-              currentTokenLeft += wordFs * 0.25;
-            }
-
-            freshWords.push({
-              text: clean,
-              left: currentTokenLeft,
-              top: matchedOrig?.top || origLine.top || 0,
-              right: currentTokenLeft + wordW,
-              bottom: (matchedOrig?.top || origLine.top || 0) + wordFs,
-              width: wordW,
-              height: matchedOrig?.height || origLine.height || wordFs,
-              fontSize: wordFs,
-              baselineY: matchedOrig?.baselineY || lineBaselineY,
-              charStartIndex: 0,
-              charCount: clean.length,
-              fontFamily: matchedOrig?.fontFamily || origLine.fontFamily,
-              rawFontFamily: matchedOrig?.rawFontFamily || origLine.rawFontFamily,
-              color: matchedOrig?.color || origLine.color,
-              fontWeight: matchedOrig?.fontWeight || origLine.fontWeight,
-              fontStyle: matchedOrig?.fontStyle || origLine.fontStyle,
-              hasPrecedingSpace: pendingSpace || freshWords.length > 0,
-            });
-
-            currentTokenLeft += wordW;
-            pendingSpace = false;
-          }
-          wordsToRender = freshWords;
+          const origWordIdx = sourceLineWordCursor.get(origLine) ?? 0;
+          const mapped = mapLineTextToStyledWords(
+            lineText,
+            origLine,
+            lineLeft,
+            lineBaselineY,
+            updatedFontSize,
+            origWordIdx
+          );
+          sourceLineWordCursor.set(origLine, mapped.nextCursor);
+          wordsToRender = mapped.words;
         }
 
         const hasMultiStyleWords =
@@ -1029,14 +1089,60 @@ export function reflowAndReplaceParagraph(
           wordsToRender.some(
             (w: TextWord) =>
               Math.abs(w.fontSize - wordsToRender[0].fontSize) > 0.2 ||
+              (w.fontFamily && w.fontFamily !== wordsToRender[0].fontFamily) ||
+              (w.rawFontFamily && cleanSubsetPrefix(w.rawFontFamily) !== cleanSubsetPrefix(wordsToRender[0].rawFontFamily || '')) ||
               (w.fontWeight && w.fontWeight !== wordsToRender[0].fontWeight) ||
               (w.fontStyle && w.fontStyle !== wordsToRender[0].fontStyle) ||
-              (w.color && wordsToRender[0].color && !isColorEqual(w.color, wordsToRender[0].color))
+              !isColorEqual(
+                w.color || targetParagraph.color,
+                wordsToRender[0].color || targetParagraph.color
+              ) ||
+              Boolean(w.underline) !== Boolean(wordsToRender[0].underline) ||
+              Boolean(w.strikethrough) !== Boolean(wordsToRender[0].strikethrough) ||
+              (w.backgroundColor !== wordsToRender[0].backgroundColor) ||
+              Math.abs((w.letterSpacingPts || 0) - (wordsToRender[0].letterSpacingPts || 0)) > 1.0
           ));
 
+        const effectiveLetterSpacing = options.letterSpacing ?? targetParagraph.letterSpacing;
+        const effectiveWordSpacing = options.wordSpacing ?? targetParagraph.wordSpacing;
+
         if (hasMultiStyleWords && wordsToRender) {
-          // Draw individual styled words to preserve multiple distinct font sizes and colors on the line
-          let currentWordX = lineLeft;
+          // Compute total width of multi-style words on the line for horizontal alignment
+          let totalMultiWordWidth = 0;
+          let previewLastWord: TextWord | null = null;
+          for (let wIdx = 0; wIdx < wordsToRender.length; wIdx++) {
+            const word = wordsToRender[wIdx];
+            const cleanWord = sanitizePdfText(word.text);
+            if (!cleanWord || cleanWord.length === 0) continue;
+            let needsSpace = false;
+            if (previewLastWord) {
+              const endsWithWs = UNICODE_TRAILING_WS_REGEX.test(previewLastWord.text);
+              const startsWithWs = UNICODE_LEADING_WS_REGEX.test(cleanWord);
+              needsSpace =
+                !endsWithWs &&
+                !startsWithWs &&
+                isWordPrecededBySpace(previewLastWord, word);
+            }
+            const wordFontSize = options.fontSize !== undefined && Math.abs(options.fontSize - targetParagraph.fontSize) > 0.1
+              ? Math.max(1, word.fontSize * (options.fontSize / targetParagraph.fontSize))
+              : word.fontSize;
+            const wordFontName = resolveStandardFont(
+              word.fontFamily || origLine?.fontFamily || rawFontName,
+              word.rawFontFamily || origLine?.rawFontFamily || targetParagraph.rawFontFamily,
+              (word.fontWeight as 'bold' | 'normal') || (origLine?.fontWeight as 'bold' | 'normal') || options.fontWeight || (targetParagraph.fontWeight as 'bold' | 'normal'),
+              (word.fontStyle as 'italic' | 'normal') || (origLine?.fontStyle as 'italic' | 'normal') || options.fontStyle || (targetParagraph.fontStyle as 'italic' | 'normal')
+            );
+            const wordLs = word.letterSpacing ?? origLine?.letterSpacing ?? effectiveLetterSpacing;
+            const wordWs = origLine?.wordSpacing ?? effectiveWordSpacing;
+            const textToRender = needsSpace ? ` ${cleanWord}` : cleanWord;
+            totalMultiWordWidth += calculateTrackedTextWidth(textToRender, wordFontSize, wordFontName, wordLs, wordWs);
+            previewLastWord = word;
+          }
+
+          // Draw individual styled words to preserve multiple distinct font sizes and colours on the line
+          let currentWordX =
+            computeAlignedLineDomLeft(renderedLineIdx - 1, totalMultiWordWidth, lineLeft) +
+            fallbackCropInfo.cropLeft;
           let lastRenderedWord: TextWord | null = null;
           for (let wIdx = 0; wIdx < wordsToRender.length; wIdx++) {
             const word = wordsToRender[wIdx];
@@ -1045,14 +1151,12 @@ export function reflowAndReplaceParagraph(
 
             let needsSpace = false;
             if (lastRenderedWord) {
-              const gap = word.left - lastRenderedWord.right;
-              const minFs = Math.min(lastRenderedWord.fontSize, word.fontSize);
               const endsWithWs = UNICODE_TRAILING_WS_REGEX.test(lastRenderedWord.text);
               const startsWithWs = UNICODE_LEADING_WS_REGEX.test(cleanWord);
               needsSpace =
                 !endsWithWs &&
                 !startsWithWs &&
-                (Boolean(word.hasPrecedingSpace) || gap >= minFs * 0.12 || gap >= 0.5);
+                isWordPrecededBySpace(lastRenderedWord, word);
             }
 
             const wordFontSize = options.fontSize !== undefined && Math.abs(options.fontSize - targetParagraph.fontSize) > 0.1
@@ -1066,14 +1170,18 @@ export function reflowAndReplaceParagraph(
               (word.fontStyle as 'italic' | 'normal') || (origLine?.fontStyle as 'italic' | 'normal') || options.fontStyle || (targetParagraph.fontStyle as 'italic' | 'normal')
             );
             const wordFontHandle = getStandardFontHandle(wordFontName);
+            const wordLs = word.letterSpacing ?? origLine?.letterSpacing ?? effectiveLetterSpacing;
+            const wordWs = origLine?.wordSpacing ?? effectiveWordSpacing;
 
             // Prepend space glyph to encoded string when space is needed so PDFium creates explicit space character in stream
-            const spaceW = needsSpace ? calculateTextWidth(' ', wordFontSize, wordFontName) : 0;
+            const spaceW = needsSpace ? calculateTextWidth(' ', wordFontSize, wordFontName) + (wordWs ?? 0) : 0;
             const textToRender = needsSpace ? ` ${cleanWord}` : cleanWord;
-            const fullRenderedWidth = calculateTextWidth(textToRender, wordFontSize, wordFontName);
-            const wordWidthOnly = calculateTextWidth(cleanWord, wordFontSize, wordFontName);
+            const fullRenderedWidth = calculateTrackedTextWidth(textToRender, wordFontSize, wordFontName, wordLs, wordWs);
+            const wordWidthOnly = calculateTrackedTextWidth(cleanWord, wordFontSize, wordFontName, wordLs);
 
-            const wordBgColorStr = word.backgroundColor || options.backgroundColor;
+            const wordBgColorStr = word.backgroundColor !== undefined
+              ? (word.backgroundColor === 'transparent' ? undefined : word.backgroundColor)
+              : (options.backgroundColor === 'transparent' ? undefined : options.backgroundColor);
             if (wordBgColorStr) {
               const bgCol = parseColor(wordBgColorStr);
               if (bgCol.a > 0) {
@@ -1085,6 +1193,57 @@ export function reflowAndReplaceParagraph(
                   mod.FPDFPath_SetDrawMode(bgRect, 1, false);
                   mod.FPDFPage_InsertObject(pageHandle, bgRect);
                   newObjectHandles.add(bgRect);
+                  registerSpanDecorationObject(bgRect, currentWordX + spaceW, rectBottom, wordWidthOnly, rectH);
+                }
+              }
+            }
+
+            const isWordUnderline = word.underline !== undefined
+              ? Boolean(word.underline)
+              : Boolean(origLine?.underline ?? options.underline ?? targetParagraph.underline);
+            const isWordStrike = word.strikethrough !== undefined
+              ? Boolean(word.strikethrough)
+              : Boolean(origLine?.strikethrough ?? options.strikethrough ?? targetParagraph.strikethrough);
+
+            if (isWordUnderline || isWordStrike) {
+              const lineThick = Math.max(0.75, wordFontSize * 0.065);
+              const wCol = word.color || origLine?.color || updatedColor;
+              const prevUnderline = lastRenderedWord
+                ? (lastRenderedWord.underline !== undefined
+                    ? Boolean(lastRenderedWord.underline)
+                    : Boolean(origLine?.underline ?? options.underline ?? targetParagraph.underline))
+                : false;
+              const prevStrike = lastRenderedWord
+                ? (lastRenderedWord.strikethrough !== undefined
+                    ? Boolean(lastRenderedWord.strikethrough)
+                    : Boolean(origLine?.strikethrough ?? options.strikethrough ?? targetParagraph.strikethrough))
+                : false;
+
+              if (isWordUnderline) {
+                const uStartX = needsSpace && prevUnderline ? currentWordX : currentWordX + spaceW;
+                const uWidth = needsSpace && prevUnderline ? fullRenderedWidth : wordWidthOnly;
+                const uBottom = Math.max(0, lineBaselineY - lineThick * 1.5);
+                const uRect = mod.FPDFPageObj_CreateNewRect(uStartX, uBottom, uWidth, lineThick);
+                if (uRect) {
+                  mod.FPDFPageObj_SetFillColor(uRect, wCol.r, wCol.g, wCol.b, wCol.a);
+                  mod.FPDFPath_SetDrawMode(uRect, 1, false);
+                  mod.FPDFPage_InsertObject(pageHandle, uRect);
+                  newObjectHandles.add(uRect);
+                  registerSpanDecorationObject(uRect, uStartX, uBottom, uWidth, lineThick);
+                }
+              }
+
+              if (isWordStrike) {
+                const sStartX = needsSpace && prevStrike ? currentWordX : currentWordX + spaceW;
+                const sWidth = needsSpace && prevStrike ? fullRenderedWidth : wordWidthOnly;
+                const sBottom = lineBaselineY + wordFontSize * 0.28;
+                const sRect = mod.FPDFPageObj_CreateNewRect(sStartX, sBottom, sWidth, lineThick);
+                if (sRect) {
+                  mod.FPDFPageObj_SetFillColor(sRect, wCol.r, wCol.g, wCol.b, wCol.a);
+                  mod.FPDFPath_SetDrawMode(sRect, 1, false);
+                  mod.FPDFPage_InsertObject(pageHandle, sRect);
+                  newObjectHandles.add(sRect);
+                  registerSpanDecorationObject(sRect, sStartX, sBottom, sWidth, lineThick);
                 }
               }
             }
@@ -1096,11 +1255,14 @@ export function reflowAndReplaceParagraph(
                 mod.FPDFText_SetText(wordObjHandle, wordBuf.ptr);
                 const wCol = word.color || origLine?.color || updatedColor;
                 mod.FPDFPageObj_SetFillColor(wordObjHandle, wCol.r, wCol.g, wCol.b, wCol.a);
+                const scaleX = origMatrix ? Math.hypot(origMatrix.a, origMatrix.b) : 1;
+                const scaleY = origMatrix ? Math.hypot(origMatrix.c, origMatrix.d) : 1;
+                const shouldNorm = Boolean(origMatrix && wordFontSize > 2.0 && scaleX > 1.8 && scaleY > 1.8);
                 const matrix = {
-                  a: origMatrix ? origMatrix.a : 1,
-                  b: origMatrix ? origMatrix.b : 0,
-                  c: origMatrix ? origMatrix.c : 0,
-                  d: origMatrix ? origMatrix.d : 1,
+                  a: origMatrix ? (shouldNorm ? origMatrix.a / scaleX : origMatrix.a) : 1,
+                  b: origMatrix ? (shouldNorm ? origMatrix.b / scaleX : origMatrix.b) : 0,
+                  c: origMatrix ? (shouldNorm ? origMatrix.c / scaleY : origMatrix.c) : 0,
+                  d: origMatrix ? (shouldNorm ? origMatrix.d / scaleY : origMatrix.d) : 1,
                   e: currentWordX,
                   f: lineBaselineY
                 };
@@ -1111,36 +1273,76 @@ export function reflowAndReplaceParagraph(
             } finally {
               wordBuf.dispose();
             }
-            currentWordX += fullRenderedWidth;
+            const naturalRenderedWidth = calculateTextWidth(textToRender, wordFontSize, wordFontName);
+            currentWordX += Math.max(fullRenderedWidth, naturalRenderedWidth);
             lastRenderedWord = word;
           }
         } else {
           // Draw uniform single-style line
+          const singleWord = wordsToRender && wordsToRender.length > 0 ? wordsToRender[0] : undefined;
           const lineFontSize = options.fontSize !== undefined && Math.abs(options.fontSize - targetParagraph.fontSize) > 0.1
             ? (origLine?.fontSize ? Math.max(1, origLine.fontSize * (options.fontSize / targetParagraph.fontSize)) : options.fontSize)
-            : (origLine?.fontSize || updatedFontSize);
+            : (singleWord?.fontSize || origLine?.fontSize || updatedFontSize);
 
           const lineFontName = resolveStandardFont(
-            origLine?.fontFamily || rawFontName,
-            origLine?.rawFontFamily || targetParagraph.rawFontFamily,
-            (origLine?.fontWeight as 'bold' | 'normal') || options.fontWeight || (targetParagraph.fontWeight as 'bold' | 'normal'),
-            (origLine?.fontStyle as 'italic' | 'normal') || options.fontStyle || (targetParagraph.fontStyle as 'italic' | 'normal')
+            singleWord?.fontFamily || origLine?.fontFamily || rawFontName,
+            singleWord?.rawFontFamily || origLine?.rawFontFamily || targetParagraph.rawFontFamily,
+            (singleWord?.fontWeight as 'bold' | 'normal') || (origLine?.fontWeight as 'bold' | 'normal') || options.fontWeight || (targetParagraph.fontWeight as 'bold' | 'normal'),
+            (singleWord?.fontStyle as 'italic' | 'normal') || (origLine?.fontStyle as 'italic' | 'normal') || options.fontStyle || (targetParagraph.fontStyle as 'italic' | 'normal')
           );
           const lineFontHandle = getStandardFontHandle(lineFontName);
+          const lineLs = singleWord?.letterSpacing ?? origLine?.letterSpacing ?? effectiveLetterSpacing;
+          const lineWs = origLine?.wordSpacing ?? effectiveWordSpacing;
+          const lineWidth = calculateTrackedTextWidth(lineText, lineFontSize, lineFontName, lineLs, lineWs);
+          const alignedLineLeft =
+            computeAlignedLineDomLeft(renderedLineIdx - 1, lineWidth, lineLeft) +
+            fallbackCropInfo.cropLeft;
 
-          const lineBgColorStr = origLine?.backgroundColor || options.backgroundColor;
+          const rawLineBg = origLine?.backgroundColor ?? singleWord?.backgroundColor ?? options.backgroundColor;
+          const lineBgColorStr = rawLineBg === 'transparent' ? undefined : rawLineBg;
           if (lineBgColorStr) {
             const bgCol = parseColor(lineBgColorStr);
             if (bgCol.a > 0) {
-              const lineWidth = calculateTextWidth(lineText, lineFontSize, lineFontName);
               const rectBottom = Math.max(0, lineBaselineY - lineFontSize * 0.25);
               const rectH = lineFontSize * 1.25;
-              const bgRect = mod.FPDFPageObj_CreateNewRect(lineLeft, rectBottom, lineWidth, rectH);
+              const bgRect = mod.FPDFPageObj_CreateNewRect(alignedLineLeft, rectBottom, lineWidth, rectH);
               if (bgRect) {
                 mod.FPDFPageObj_SetFillColor(bgRect, bgCol.r, bgCol.g, bgCol.b, bgCol.a);
                 mod.FPDFPath_SetDrawMode(bgRect, 1, false);
                 mod.FPDFPage_InsertObject(pageHandle, bgRect);
                 newObjectHandles.add(bgRect);
+                registerSpanDecorationObject(bgRect, alignedLineLeft, rectBottom, lineWidth, rectH);
+              }
+            }
+          }
+
+          const isLineUnderline = Boolean(singleWord?.underline ?? origLine?.underline ?? options.underline ?? targetParagraph.underline);
+          const isLineStrike = Boolean(singleWord?.strikethrough ?? origLine?.strikethrough ?? options.strikethrough ?? targetParagraph.strikethrough);
+          if (isLineUnderline || isLineStrike) {
+            const lineThick = Math.max(0.75, lineFontSize * 0.065);
+            const lineCol = singleWord?.color || origLine?.color || updatedColor;
+
+            if (isLineUnderline) {
+              const uBottom = Math.max(0, lineBaselineY - lineThick * 1.5);
+              const uRect = mod.FPDFPageObj_CreateNewRect(alignedLineLeft, uBottom, lineWidth, lineThick);
+              if (uRect) {
+                mod.FPDFPageObj_SetFillColor(uRect, lineCol.r, lineCol.g, lineCol.b, lineCol.a);
+                mod.FPDFPath_SetDrawMode(uRect, 1, false);
+                mod.FPDFPage_InsertObject(pageHandle, uRect);
+                newObjectHandles.add(uRect);
+                registerSpanDecorationObject(uRect, alignedLineLeft, uBottom, lineWidth, lineThick);
+              }
+            }
+
+            if (isLineStrike) {
+              const sBottom = lineBaselineY + lineFontSize * 0.28;
+              const sRect = mod.FPDFPageObj_CreateNewRect(alignedLineLeft, sBottom, lineWidth, lineThick);
+              if (sRect) {
+                mod.FPDFPageObj_SetFillColor(sRect, lineCol.r, lineCol.g, lineCol.b, lineCol.a);
+                mod.FPDFPath_SetDrawMode(sRect, 1, false);
+                mod.FPDFPage_InsertObject(pageHandle, sRect);
+                newObjectHandles.add(sRect);
+                registerSpanDecorationObject(sRect, alignedLineLeft, sBottom, lineWidth, lineThick);
               }
             }
           }
@@ -1150,14 +1352,17 @@ export function reflowAndReplaceParagraph(
             const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, lineFontHandle, lineFontSize);
             if (textObjHandle) {
               mod.FPDFText_SetText(textObjHandle, textBuf.ptr);
-              const lineCol = origLine?.color || updatedColor;
+              const lineCol = singleWord?.color || origLine?.color || updatedColor;
               mod.FPDFPageObj_SetFillColor(textObjHandle, lineCol.r, lineCol.g, lineCol.b, lineCol.a);
+              const scaleX = origMatrix ? Math.hypot(origMatrix.a, origMatrix.b) : 1;
+              const scaleY = origMatrix ? Math.hypot(origMatrix.c, origMatrix.d) : 1;
+              const shouldNorm = Boolean(origMatrix && lineFontSize > 2.0 && scaleX > 1.8 && scaleY > 1.8);
               const matrix = {
-                a: origMatrix ? origMatrix.a : 1,
-                b: origMatrix ? origMatrix.b : 0,
-                c: origMatrix ? origMatrix.c : 0,
-                d: origMatrix ? origMatrix.d : 1,
-                e: lineLeft,
+                a: origMatrix ? (shouldNorm ? origMatrix.a / scaleX : origMatrix.a) : 1,
+                b: origMatrix ? (shouldNorm ? origMatrix.b / scaleX : origMatrix.b) : 0,
+                c: origMatrix ? (shouldNorm ? origMatrix.c / scaleY : origMatrix.c) : 0,
+                d: origMatrix ? (shouldNorm ? origMatrix.d / scaleY : origMatrix.d) : 1,
+                e: alignedLineLeft,
                 f: lineBaselineY
               };
               setPageObjectMatrix(engine, mod, textObjHandle, matrix);
@@ -1171,7 +1376,7 @@ export function reflowAndReplaceParagraph(
       }
     }
 
-    // 6. Shift downstream spans in-place by adjusting transform matrix
+    // Shift downstream spans in-place by adjusting transform matrix
     if (needsDownstreamShift) {
       const handlesToShift = new Set<number>();
 
@@ -1241,7 +1446,7 @@ export function reflowAndReplaceParagraph(
       }
     }
 
-    // 7. Commit page stream modifications
+    // Commit page stream modifications
     mod.FPDFPage_GenerateContent(pageHandle);
   } finally {
     // Standard fonts do not need manual release
