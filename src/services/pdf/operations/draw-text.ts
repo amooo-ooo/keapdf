@@ -3,11 +3,13 @@ import {
   encodeUtf16Le,
   setPageObjectMatrix,
   mapStandardFontName,
-  calculateTextWidth,
   findPageFontHandle,
   extractBaseFontFamily,
   getPageCropInfo,
+  isBoldFontName,
+  isItalicFontName,
 } from '../../../core/pdfium-helpers';
+import { calculateTrackedTextWidth } from '../../../core/typography-metrics';
 import type { PageCropInfo } from '../../../core/types';
 import { parseColor, sanitizePdfText, safeEncodeForStandardFont, buildTransformMatrix } from '../utils';
 import type { StandardFontName } from '../../../core/types';
@@ -31,25 +33,45 @@ export function resolveStandardFont(
   fontWeight?: 'normal' | 'bold',
   fontStyle?: 'normal' | 'italic'
 ): StandardFontName {
-  if (rawFontFamily && !fontWeight && !fontStyle) {
+  if (!fontFamily && rawFontFamily && !fontWeight && !fontStyle) {
     const directMap = mapStandardFontName(rawFontFamily);
     if (directMap !== 'Helvetica' || rawFontFamily.toLowerCase().includes('helvetica')) {
       return directMap;
     }
   }
 
-  const baseFont = mapStandardFontName(fontFamily || rawFontFamily || 'Helvetica');
+  let baseFont = mapStandardFontName(fontFamily || rawFontFamily || 'Helvetica');
+  if (
+    baseFont === 'Helvetica' &&
+    rawFontFamily &&
+    (!fontFamily ||
+      (!fontFamily.toLowerCase().includes('helvetica') &&
+        !fontFamily.toLowerCase().includes('arial') &&
+        !fontFamily.toLowerCase().includes('sans') &&
+        !fontFamily.toLowerCase().includes('calibri') &&
+        !fontFamily.toLowerCase().includes('verdana') &&
+        !fontFamily.toLowerCase().includes('tahoma') &&
+        !fontFamily.toLowerCase().includes('trebuchet') &&
+        !fontFamily.toLowerCase().includes('segoe')))
+  ) {
+    const rawMapped = mapStandardFontName(rawFontFamily);
+    if (rawMapped !== 'Helvetica') {
+      baseFont = rawMapped;
+    }
+  }
+
+  const combinedName = `${fontFamily || ''} ${rawFontFamily || ''} ${baseFont}`;
   const isBold =
     fontWeight !== undefined
       ? fontWeight === 'bold'
-      : (fontFamily || rawFontFamily || '').toLowerCase().includes('bold');
+      : isBoldFontName(combinedName);
   const isItalic =
     fontStyle !== undefined
       ? fontStyle === 'italic'
-      : (fontFamily || rawFontFamily || '').toLowerCase().includes('italic') ||
-        (fontFamily || rawFontFamily || '').toLowerCase().includes('oblique');
+      : isItalicFontName(combinedName);
 
   if (baseFont === 'Symbol') return 'Symbol';
+  if (baseFont === 'ZapfDingbats') return 'ZapfDingbats';
 
   if (baseFont.startsWith('Times')) {
     if (isBold && isItalic) return 'Times-BoldItalic';
@@ -152,7 +174,14 @@ export function drawText(
 
         const cropX = cropInfo.hasCropBox ? cropInfo.cropLeft : 0;
         const cropY = cropInfo.hasCropBox ? cropInfo.cropBottom : 0;
-        const elemW = options.width || calculateTextWidth(cleanText, options.fontSize, standardFont);
+        const trackedTextWidth = calculateTrackedTextWidth(
+          cleanText,
+          options.fontSize,
+          standardFont,
+          options.letterSpacing,
+          options.wordSpacing
+        );
+        const elemW = options.width || trackedTextWidth;
         const elemH = options.height || options.fontSize * 1.25;
         const elemCx = options.x + cropX + elemW / 2;
         const elemCy = options.y + elemH / 2;
@@ -170,7 +199,14 @@ export function drawText(
 
         // Baseline in unrotated DOM page coordinate frame
         const domBaselineY = options.y + options.fontSize * 0.82;
-        const domBaselineX = options.x + cropX;
+        let domBaselineX = options.x + cropX;
+
+        const textW = trackedTextWidth;
+        if (options.textAlign === 'center') {
+          domBaselineX += Math.max(0, (elemW - textW) / 2);
+        } else if (options.textAlign === 'right') {
+          domBaselineX += Math.max(0, elemW - textW);
+        }
 
         const dx = domBaselineX - elemCx;
         const dy = domBaselineY - elemCy;
@@ -201,6 +237,49 @@ export function drawText(
               );
               setPageObjectMatrix(engine, mod, bgRect, bgMatrix);
               mod.FPDFPage_InsertObject(pageHandle, bgRect);
+            }
+          }
+        }
+
+        if (options.underline || options.strikethrough) {
+          const lineCol = parseColor(options.color || '#000000');
+          const lineThick = Math.max(0.75, options.fontSize * 0.065);
+
+          if (options.underline) {
+            const uDomBaselineY = options.y + options.fontSize * 0.94;
+            const uDomBaselineX = domBaselineX;
+            const uDx = uDomBaselineX - elemCx;
+            const uDy = uDomBaselineY - elemCy;
+            const uRotDx = uDx * cos - uDy * sin;
+            const uRotDy = uDx * sin + uDy * cos;
+            const uPdfX = elemCx + uRotDx * sx;
+            const uPdfY = (pageHeight - elemCy) + cropY - uRotDy * sy;
+            const uRect = mod.FPDFPageObj_CreateNewRect(0, 0, textW, lineThick);
+            if (uRect) {
+              mod.FPDFPageObj_SetFillColor(uRect, lineCol.r, lineCol.g, lineCol.b, lineCol.a);
+              mod.FPDFPath_SetDrawMode(uRect, 1, false);
+              const uMatrix = { a, b, c, d, e: uPdfX, f: uPdfY };
+              setPageObjectMatrix(engine, mod, uRect, uMatrix);
+              mod.FPDFPage_InsertObject(pageHandle, uRect);
+            }
+          }
+
+          if (options.strikethrough) {
+            const sDomBaselineY = options.y + options.fontSize * 0.52;
+            const sDomBaselineX = domBaselineX;
+            const sDx = sDomBaselineX - elemCx;
+            const sDy = sDomBaselineY - elemCy;
+            const sRotDx = sDx * cos - sDy * sin;
+            const sRotDy = sDx * sin + sDy * cos;
+            const sPdfX = elemCx + sRotDx * sx;
+            const sPdfY = (pageHeight - elemCy) + cropY - sRotDy * sy;
+            const sRect = mod.FPDFPageObj_CreateNewRect(0, 0, textW, lineThick);
+            if (sRect) {
+              mod.FPDFPageObj_SetFillColor(sRect, lineCol.r, lineCol.g, lineCol.b, lineCol.a);
+              mod.FPDFPath_SetDrawMode(sRect, 1, false);
+              const sMatrix = { a, b, c, d, e: sPdfX, f: sPdfY };
+              setPageObjectMatrix(engine, mod, sRect, sMatrix);
+              mod.FPDFPage_InsertObject(pageHandle, sRect);
             }
           }
         }
@@ -259,6 +338,8 @@ function drawMultiSegmentText(
     left: number;
     height: number;
     fontSize: number;
+    letterSpacing?: string;
+    wordSpacing?: number;
     segments: TextSegment[];
   }> = [];
 
@@ -270,6 +351,8 @@ function drawMultiSegmentText(
       const lH = line.lineHeight || options.lineHeight || (lineFontSize * 1.25);
       const lineTop = line.top !== undefined ? line.top : runningY;
       const lineLeft = line.left !== undefined ? line.left : 0;
+      const lineLetterSpacing = line.letterSpacing ?? options.letterSpacing;
+      const lineWordSpacing = line.wordSpacing ?? options.wordSpacing;
 
       const segs: TextSegment[] =
         line.segments && line.segments.length > 0
@@ -283,6 +366,11 @@ function drawMultiSegmentText(
                 color: options.color,
                 fontWeight: options.fontWeight,
                 fontStyle: options.fontStyle,
+                underline: line.underline ?? options.underline,
+                strikethrough: line.strikethrough ?? options.strikethrough,
+                backgroundColor: line.backgroundColor ?? options.backgroundColor,
+                letterSpacing: lineLetterSpacing,
+                wordSpacing: lineWordSpacing,
               },
             ];
 
@@ -291,6 +379,8 @@ function drawMultiSegmentText(
         left: lineLeft,
         height: line.height || lH,
         fontSize: lineFontSize,
+        letterSpacing: lineLetterSpacing,
+        wordSpacing: lineWordSpacing,
         segments: segs,
       });
 
@@ -302,6 +392,8 @@ function drawMultiSegmentText(
       left: 0,
       height: options.height || options.fontSize * 1.25,
       fontSize: options.fontSize,
+      letterSpacing: options.letterSpacing,
+      wordSpacing: options.wordSpacing,
       segments: options.segments,
     });
   } else if (options.text && options.text.includes('\n')) {
@@ -313,6 +405,8 @@ function drawMultiSegmentText(
         left: 0,
         height: lH,
         fontSize: options.fontSize,
+        letterSpacing: options.letterSpacing,
+        wordSpacing: options.wordSpacing,
         segments: [
           {
             text: splitLines[i],
@@ -322,6 +416,8 @@ function drawMultiSegmentText(
             color: options.color,
             fontWeight: options.fontWeight,
             fontStyle: options.fontStyle,
+            letterSpacing: options.letterSpacing,
+            wordSpacing: options.wordSpacing,
           },
         ],
       });
@@ -340,7 +436,34 @@ function drawMultiSegmentText(
   };
 
   for (const line of linesToDraw) {
-    let currentLineX = line.left;
+    let lineTotalWidth = 0;
+    for (const seg of line.segments) {
+      if (!seg.text || seg.text.length === 0) continue;
+      const clean = sanitizePdfText(seg.text);
+      if (!clean || clean.length === 0) continue;
+      const segFs = seg.fontSize || line.fontSize || options.fontSize;
+      const segStdFont = resolveStandardFont(
+        seg.fontFamily || options.fontFamily,
+        seg.rawFontFamily || options.rawFontFamily,
+        seg.fontWeight || options.fontWeight,
+        seg.fontStyle || options.fontStyle
+      );
+      const segLs = seg.letterSpacing ?? line.letterSpacing ?? options.letterSpacing;
+      const segWs = seg.wordSpacing ?? line.wordSpacing ?? options.wordSpacing;
+      const segW = (seg.width !== undefined && seg.width > 0)
+        ? seg.width
+        : calculateTrackedTextWidth(clean, segFs, segStdFont, segLs, segWs);
+      lineTotalWidth += segW;
+    }
+
+    let lineAlignOffset = 0;
+    if (options.textAlign === 'center') {
+      lineAlignOffset = Math.max(0, (elemW - lineTotalWidth) / 2);
+    } else if (options.textAlign === 'right') {
+      lineAlignOffset = Math.max(0, elemW - lineTotalWidth);
+    }
+
+    let currentLineX = line.left + lineAlignOffset;
 
     for (const segment of line.segments) {
       if (!segment.text || segment.text.length === 0) continue;
@@ -356,10 +479,14 @@ function drawMultiSegmentText(
         segment.fontStyle || options.fontStyle
       );
 
-      const segWidth = (segment.width !== undefined && segment.width > 0) ? segment.width : calculateTextWidth(cleanText, segFontSize, segStandardFont);
+      const segLs = segment.letterSpacing ?? line.letterSpacing ?? options.letterSpacing;
+      const segWs = segment.wordSpacing ?? line.wordSpacing ?? options.wordSpacing;
+      const segWidth = (segment.width !== undefined && segment.width > 0)
+        ? segment.width
+        : calculateTrackedTextWidth(cleanText, segFontSize, segStandardFont, segLs, segWs);
       const segRelX =
         segment.left !== undefined && line.segments.length > 1 && segment.left > 0
-          ? segment.left
+          ? segment.left + lineAlignOffset
           : currentLineX;
       const segRelY = segment.top !== undefined ? segment.top : line.top;
 
