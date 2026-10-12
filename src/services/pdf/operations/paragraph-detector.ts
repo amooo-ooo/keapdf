@@ -2047,12 +2047,14 @@ function isTableRowSeparationBetween(
  * @param lines Sorted array of horizontal text lines.
  * @param pageIndex Zero-based page index.
  * @param rotation Cardinal rotation angle (0 or 180).
+ * @param barriers Extracted horizontal vector barrier segments in DOM space.
  * @return Array of EditableTextSpan objects representing paragraphs.
  */
 function clusterHorizontalParagraphs(
   lines: TextLine[],
   pageIndex: number,
-  rotation: number
+  rotation: number,
+  barriers: HorizontalBarrierSegment[] = []
 ): EditableTextSpan[] {
   if (lines.length === 0) return [];
 
@@ -2067,21 +2069,50 @@ function clusterHorizontalParagraphs(
     const isNextBullet = isBulletOrListItem(nextLine);
     const isPrevBullet = isBulletOrListItem(prevLine);
 
-    // RULE 1: Each bullet point is its OWN separate block
+    if (hasHorizontalBarrierBetween(prevLine, nextLine, barriers)) {
+      paragraphClusters.push(currentCluster);
+      currentCluster = [nextLine];
+      continue;
+    }
+
+    // Each bullet point starts its own separate block
     if (isNextBullet) {
       paragraphClusters.push(currentCluster);
       currentCluster = [nextLine];
       continue;
     }
 
-    // RULE 2: If previous line was a bullet point, next line can ONLY merge if indented
+    // Continuations of a list item never outdent past its marker
+    if (isOutdentedFromListItem(currentCluster[0], nextLine)) {
+      paragraphClusters.push(currentCluster);
+      currentCluster = [nextLine];
+      continue;
+    }
+
+    if (isTableRowSeparationBetween(prevLine, nextLine, unifiedLines)) {
+      paragraphClusters.push(currentCluster);
+      currentCluster = [nextLine];
+      continue;
+    }
+
+    // If previous line was a bullet point, next line can only merge if indented
     if (isPrevBullet) {
       const isIndentedWrap = nextLine.left >= prevLine.left - 4.0 && nextLine.left <= prevLine.left + 35.0;
       const verticalGap = nextLine.top - prevLine.bottom;
       const avgFontSize = (prevLine.fontSize + nextLine.fontSize) / 2;
-      const isTightLeading = verticalGap >= -avgFontSize * 0.3 && verticalGap <= avgFontSize * 1.25;
+      const baselineDiff = Math.abs(nextLine.baselineY - prevLine.baselineY);
+      // A wrapped line must step down by a real line advance, otherwise it sits beside the marker
+      const isTightLeading =
+        verticalGap >= -avgFontSize * 0.3 &&
+        verticalGap <= Math.max(8.0, avgFontSize * 0.85) &&
+        baselineDiff >= avgFontSize * 0.75 &&
+        baselineDiff <= avgFontSize * 1.85;
+      const isHeadingToBodyTransition =
+        prevLine.fontSize > nextLine.fontSize + 0.8 &&
+        prevLine.fontWeight === 'bold' &&
+        verticalGap > avgFontSize * 0.5;
 
-      if (isIndentedWrap && isTightLeading && Math.abs(nextLine.fontSize - prevLine.fontSize) <= 1.5) {
+      if (isIndentedWrap && isTightLeading && !isHeadingToBodyTransition && Math.abs(nextLine.fontSize - prevLine.fontSize) <= 1.2) {
         currentCluster.push(nextLine);
       } else {
         paragraphClusters.push(currentCluster);
@@ -2090,7 +2121,7 @@ function clusterHorizontalParagraphs(
       continue;
     }
 
-    // RULE 3: Regular body paragraph lines merge based on reading geometry
+    // Regular body paragraph lines merge based on reading geometry
     const verticalGap = nextLine.top - prevLine.bottom;
     const avgFontSize = (prevLine.fontSize + nextLine.fontSize) / 2;
     const baselineDiff = Math.abs(nextLine.baselineY - prevLine.baselineY);
@@ -2099,21 +2130,34 @@ function clusterHorizontalParagraphs(
     const isBaselineValid = baselineDiff >= avgFontSize * 0.75 && baselineDiff <= avgFontSize * 2.2;
 
     const leftMarginDiff = Math.abs(nextLine.left - prevLine.left);
-    const isLeftAligned = leftMarginDiff <= 24.0;
+    const isOutdentedNextLine = nextLine.left < prevLine.left - 6.0;
+    const isLeftAligned = !isOutdentedNextLine && leftMarginDiff <= 24.0;
     const isIndentedFirstLine =
       currentCluster.length === 1 &&
-      nextLine.left < prevLine.left &&
-      prevLine.left - nextLine.left <= 36.0;
+      isOutdentedNextLine &&
+      prevLine.left - nextLine.left <= 36.0 &&
+      /^[A-Z\u00C0-\u00DC"'\u2018\u2019\u201C\u201D\u00AB(]/.test(prevLine.text.trim()) &&
+      prevLine.right >= nextLine.right - Math.max(40.0, avgFontSize * 4.5) &&
+      !/^\d+\b/.test(nextLine.text.trim());
 
     const horizontalOverlap = Math.min(prevLine.right, nextLine.right) - Math.max(prevLine.left, nextLine.left);
     const minLineWidth = Math.min(prevLine.width, nextLine.width);
-    const hasColumnOverlap = horizontalOverlap > Math.min(20.0, minLineWidth * 0.25);
+    const hasColumnOverlap = !isOutdentedNextLine && horizontalOverlap > Math.min(20.0, minLineWidth * 0.25);
 
     const isSeparateColumn = nextLine.left > prevLine.right + 12.0 || nextLine.right < prevLine.left - 12.0;
     const isFontParity = Math.abs(nextLine.fontSize - prevLine.fontSize) <= 1.8;
+    const isStyleIncompatible = hasIncompatibleLineStyle(prevLine, nextLine);
+
+    const isCenterAlignedPair =
+      Math.abs((prevLine.left + prevLine.right) / 2 - (nextLine.left + nextLine.right) / 2) <= 12.0;
+    const isRightAlignedPair = Math.abs(prevLine.right - nextLine.right) <= 12.0;
 
     const prevEndsWithPunctuation = /[.?!:][\s\u200B-\u200F\uFEFF\u2060]*$/.test(prevLine.text);
-    const isIndentedNewParagraph = prevEndsWithPunctuation && nextLine.left >= prevLine.left + Math.max(10.0, avgFontSize * 0.8);
+    const isIndentedNewParagraph =
+      prevEndsWithPunctuation &&
+      nextLine.left >= prevLine.left + Math.max(10.0, avgFontSize * 0.8) &&
+      !isCenterAlignedPair &&
+      !(isRightAlignedPair && nextLine.width < prevLine.width - 15.0);
     const isShortTerminalLine = prevEndsWithPunctuation && prevLine.right < nextLine.right - Math.max(25.0, avgFontSize * 2.5) && verticalGap > avgFontSize * 0.45;
     const isParagraphBreak = isShortTerminalLine || isIndentedNewParagraph;
     const isLargeBreak = verticalGap > Math.max(8.0, avgFontSize * 0.85);
@@ -2121,15 +2165,43 @@ function clusterHorizontalParagraphs(
     const isPrevHeading = prevLine.text.length < 35 && prevLine.fontSize > nextLine.fontSize + 1.5;
     const isLargeBreakAfterHeading = isPrevHeading && verticalGap > avgFontSize * 0.5;
 
+    let isInconsistentBaselineStep = false;
+    if (currentCluster.length >= 2) {
+      const prevStep = Math.abs(
+        currentCluster[currentCluster.length - 1].baselineY -
+          currentCluster[currentCluster.length - 2].baselineY
+      );
+      if (prevStep > 0 && baselineDiff > prevStep * 1.25 && baselineDiff - prevStep > 2.5) {
+        isInconsistentBaselineStep = true;
+      }
+    } else if (currentCluster.length === 1 && i + 1 < unifiedLines.length) {
+      const followingLine = unifiedLines[i + 1];
+      const isFollowingSameCol =
+        Math.abs(followingLine.left - nextLine.left) <= 24.0 &&
+        Math.abs(followingLine.fontSize - nextLine.fontSize) <= 1.5;
+      const followingStep = Math.abs(nextLine.baselineY - followingLine.baselineY);
+      if (
+        isFollowingSameCol &&
+        followingStep >= avgFontSize * 0.8 &&
+        followingStep <= avgFontSize * 1.65 &&
+        baselineDiff > followingStep * 1.25 &&
+        baselineDiff - followingStep > 2.5
+      ) {
+        isInconsistentBaselineStep = true;
+      }
+    }
+
     const shouldMerge =
       !isSeparateColumn &&
       !isParagraphBreak &&
       !isLargeBreak &&
       !isLargeBreakAfterHeading &&
+      !isInconsistentBaselineStep &&
+      !isStyleIncompatible &&
       isFontParity &&
       isLeadingValid &&
       isBaselineValid &&
-      (isLeftAligned || isIndentedFirstLine || hasColumnOverlap);
+      (isLeftAligned || isIndentedFirstLine || hasColumnOverlap || isCenterAlignedPair || isRightAlignedPair);
 
     if (shouldMerge) {
       currentCluster.push(nextLine);
@@ -2178,10 +2250,69 @@ function clusterHorizontalParagraphs(
     const typo = getDominantTypography(allClusterWords.length > 0 ? allClusterWords : cluster);
     const dominantSpanFontSize = getDominantFontSize(allClusterWords.length > 0 ? allClusterWords : cluster);
 
-    const calculatedLineHeight =
+    const spanBoxHeight = Math.max(dominantSpanFontSize * 1.2, maxBottom - minTop);
+    const fallbackMeanLh =
       cluster.length > 1
         ? Math.abs(firstLine.baselineY - lastLine.baselineY) / (cluster.length - 1)
-        : dominantSpanFontSize * 1.25;
+        : spanBoxHeight;
+    const calculatedLineHeight =
+      cluster.length > 1
+        ? computeClusterBaseLineHeight(cluster, fallbackMeanLh)
+        : spanBoxHeight;
+    const effectiveLineHeight =
+      calculatedLineHeight > 0 ? calculatedLineHeight : spanBoxHeight;
+
+    // Calibrate individual line heights within the cluster to match baseline-to-baseline leading
+    calibrateClusterLineHeights(cluster, effectiveLineHeight);
+
+    const spanLetterSpacing =
+      cluster.length === 1
+        ? firstLine.letterSpacing
+        : cluster.every((l) => l.letterSpacing && l.letterSpacing === firstLine.letterSpacing)
+          ? firstLine.letterSpacing
+          : undefined;
+    const spanWordSpacing =
+      cluster.length === 1
+        ? firstLine.wordSpacing
+        : cluster.every(
+            (l) =>
+              l.wordSpacing !== undefined &&
+              firstLine.wordSpacing !== undefined &&
+              Math.abs(l.wordSpacing - firstLine.wordSpacing) <= 0.25
+          )
+          ? firstLine.wordSpacing
+          : undefined;
+    const spanScaleX =
+      cluster.length === 1
+        ? firstLine.scaleX
+        : cluster.every(
+            (l) =>
+              l.scaleX !== undefined &&
+              firstLine.scaleX !== undefined &&
+              Math.abs(l.scaleX - firstLine.scaleX) <= 0.03
+          )
+          ? firstLine.scaleX
+          : undefined;
+
+    const clusterWidth = Math.max(10, maxRight - minLeft);
+    let inferredTextAlign: 'left' | 'center' | 'right' | undefined = undefined;
+    if (cluster.length > 1 && !firstLine.hasBulletPrefix) {
+      const narrowLines = cluster.filter((l) => l.width < clusterWidth - 12.0);
+      if (narrowLines.length > 0) {
+        const clusterCenter = (minLeft + maxRight) / 2;
+        const allCentered = narrowLines.every(
+          (l) => l.left > minLeft + 5.0 && Math.abs((l.left + l.right) / 2 - clusterCenter) <= 8.0
+        );
+        const allRightAligned = narrowLines.every(
+          (l) => l.left > minLeft + 8.0 && Math.abs(l.right - maxRight) <= 8.0
+        );
+        if (allCentered) {
+          inferredTextAlign = 'center';
+        } else if (allRightAligned) {
+          inferredTextAlign = 'right';
+        }
+      }
+    }
 
     spans.push({
       type: 'text',
@@ -2190,8 +2321,8 @@ function clusterHorizontalParagraphs(
       text: combinedText,
       left: minLeft,
       top: minTop,
-      width: Math.max(10, maxRight - minLeft),
-      height: Math.max(dominantSpanFontSize * 1.2, maxBottom - minTop),
+      width: clusterWidth,
+      height: spanBoxHeight,
       fontSize: dominantSpanFontSize,
       fontFamily: typo.fontFamily,
       rawFontFamily: typo.rawFontFamily,
@@ -2201,10 +2332,20 @@ function clusterHorizontalParagraphs(
       charStartIndex: firstLine.charStartIndex,
       charCount: totalChars,
       lines: cluster,
-      lineHeight: calculatedLineHeight > 0 ? calculatedLineHeight : dominantSpanFontSize * 1.25,
+      lineHeight: effectiveLineHeight,
+      ...(spanLetterSpacing && spanLetterSpacing !== 'normal'
+        ? { letterSpacing: spanLetterSpacing }
+        : {}),
+      ...(spanWordSpacing !== undefined && Math.abs(spanWordSpacing) >= 0.05
+        ? { wordSpacing: spanWordSpacing }
+        : {}),
+      ...(spanScaleX !== undefined && Math.abs(spanScaleX - 1.0) >= 0.02
+        ? { scaleX: spanScaleX }
+        : {}),
       isParagraph: cluster.length > 1,
       fontWeight: typo.fontWeight,
       fontStyle: typo.fontStyle,
+      ...(inferredTextAlign ? { textAlign: inferredTextAlign } : {}),
       hasBulletPrefix: firstLine.hasBulletPrefix,
       bulletWord: firstLine.bulletWord,
       rotation,
@@ -2293,6 +2434,7 @@ function clusterVerticalParagraphs(
     }
 
     const firstLine = cluster[0];
+    const lastLine = cluster[cluster.length - 1];
     const totalChars = cluster.reduce((sum, l) => sum + l.charCount, 0);
 
     const spanId = `span_p_${pageIndex}_${firstLine.charStartIndex}_${totalChars}`;
@@ -2300,6 +2442,15 @@ function clusterVerticalParagraphs(
 
     const typo = getDominantTypography(allClusterWords.length > 0 ? allClusterWords : cluster);
     const dominantSpanFontSize = getDominantFontSize(allClusterWords.length > 0 ? allClusterWords : cluster);
+    const calculatedVerticalLineHeight =
+      cluster.length > 1
+        ? Math.abs(firstLine.baselineY - lastLine.baselineY) / (cluster.length - 1)
+        : dominantSpanFontSize * 1.25;
+    const effectiveVerticalLineHeight =
+      calculatedVerticalLineHeight > 0
+        ? calculatedVerticalLineHeight
+        : dominantSpanFontSize * 1.25;
+    calibrateClusterLineHeights(cluster, effectiveVerticalLineHeight);
 
     spans.push({
       type: 'text',
@@ -2319,7 +2470,7 @@ function clusterVerticalParagraphs(
       charStartIndex: firstLine.charStartIndex,
       charCount: totalChars,
       lines: cluster,
-      lineHeight: dominantSpanFontSize * 1.25,
+      lineHeight: effectiveVerticalLineHeight,
       isParagraph: cluster.length > 1,
       fontWeight: typo.fontWeight,
       fontStyle: typo.fontStyle,
@@ -2340,9 +2491,14 @@ function clusterVerticalParagraphs(
  *
  * @param lines Sorted array of text lines.
  * @param pageIndex Zero-based page index.
+ * @param barriers Extracted horizontal vector barrier segments in DOM space.
  * @return Array of EditableTextSpan objects.
  */
-function clusterParagraphs(lines: TextLine[], pageIndex: number): EditableTextSpan[] {
+function clusterParagraphs(
+  lines: TextLine[],
+  pageIndex: number,
+  barriers: HorizontalBarrierSegment[] = []
+): EditableTextSpan[] {
   if (lines.length === 0) return [];
 
   const linesByRotation = new Map<number, TextLine[]>();
@@ -2359,7 +2515,7 @@ function clusterParagraphs(lines: TextLine[], pageIndex: number): EditableTextSp
     if (rot === 90 || rot === 270) {
       allSpans.push(...clusterVerticalParagraphs(bucketLines, pageIndex, rot));
     } else {
-      allSpans.push(...clusterHorizontalParagraphs(bucketLines, pageIndex, rot));
+      allSpans.push(...clusterHorizontalParagraphs(bucketLines, pageIndex, rot, barriers));
     }
   }
 
