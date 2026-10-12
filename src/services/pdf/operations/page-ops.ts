@@ -61,6 +61,16 @@ export interface RenderOptions {
    * If provided, the canvas dimensions and style are updated in-place.
    */
   targetCanvas?: HTMLCanvasElement;
+  /**
+   * Optional active PDFium form fill environment handle.
+   * When provided, FPDF_FFLDraw renders interactive form appearances onto the bitmap.
+   */
+  formHandle?: number;
+  /**
+   * Whether to render the page bitmap with a transparent paper background
+   * so canvas elements stacked in the back band (zIndex < 10) remain visible beneath PDF content.
+   */
+  transparentBackground?: boolean;
 }
 
 /**
@@ -116,8 +126,12 @@ export function render(
   if (!bitmapHandle) throw new Error('Failed to create PDFium bitmap handle.');
 
   try {
-    mod.FPDFBitmap_FillRect(bitmapHandle, 0, 0, pixelWidth, pixelHeight, 0xffffffff);
+    const fillColour = options?.transparentBackground ? 0x00000000 : 0xffffffff;
+    mod.FPDFBitmap_FillRect(bitmapHandle, 0, 0, pixelWidth, pixelHeight, fillColour);
     mod.FPDF_RenderPageBitmap(bitmapHandle, pageHandle, 0, 0, pixelWidth, pixelHeight, 0, 0x01);
+    if (options?.formHandle) {
+      engine.drawFormFill(options.formHandle, bitmapHandle, pageHandle, 0, 0, pixelWidth, pixelHeight, 0, 0x01);
+    }
 
     const bufferPtr = mod.FPDFBitmap_GetBuffer(bitmapHandle);
     const pixelCount = pixelWidth * pixelHeight;
@@ -139,6 +153,7 @@ export function render(
       if (canvas.style.height !== cssHeight) {
         canvas.style.height = cssHeight;
       }
+      canvas.style.display = 'block';
     }
 
     const ctx = canvas.getContext('2d');
@@ -168,9 +183,20 @@ export function render(
     }
     const dst32 = new Uint32Array(imgData.data.buffer);
 
-    for (let i = 0; i < pixelCount; i++) {
-      const px = src32[i];
-      dst32[i] = (px & 0xff00ff00) | ((px & 0x000000ff) << 16) | ((px & 0x00ff0000) >> 16);
+    if (options?.transparentBackground) {
+      for (let i = 0; i < pixelCount; i++) {
+        const px = src32[i];
+        if (px === 0xffffffff || (px >>> 24) === 0) {
+          dst32[i] = 0x00000000;
+        } else {
+          dst32[i] = (px & 0xff00ff00) | ((px & 0x000000ff) << 16) | ((px & 0x00ff0000) >> 16);
+        }
+      }
+    } else {
+      for (let i = 0; i < pixelCount; i++) {
+        const px = src32[i];
+        dst32[i] = (px & 0xff00ff00) | ((px & 0x000000ff) << 16) | ((px & 0x00ff0000) >> 16);
+      }
     }
 
     ctx.putImageData(imgData, 0, 0);
