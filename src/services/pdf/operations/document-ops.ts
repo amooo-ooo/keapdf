@@ -228,16 +228,18 @@ export async function importImageAsPage(
   const imgDataResult = await new Promise<{ width: number; height: number; imgData: ImageData }>((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
+      const targetW = img.naturalWidth || img.width || 595;
+      const targetH = img.naturalHeight || img.height || 842;
       const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
+      canvas.width = targetW;
+      canvas.height = targetH;
       const ctx = canvas.getContext('2d');
       if (!ctx) return reject(new Error('Failed to get canvas context.'));
-      ctx.drawImage(img, 0, 0);
+      ctx.drawImage(img, 0, 0, targetW, targetH);
       resolve({
-        width: img.naturalWidth,
-        height: img.naturalHeight,
-        imgData: ctx.getImageData(0, 0, img.naturalWidth, img.naturalHeight)
+        width: targetW,
+        height: targetH,
+        imgData: ctx.getImageData(0, 0, targetW, targetH)
       });
     };
     img.onerror = () => reject(new Error('Failed to load image for dimensions.'));
@@ -269,10 +271,10 @@ export async function importImageAsPage(
   const { width, height, imgData } = imgDataResult;
   const rgba = imgData.data;
   const pixelCount = width * height;
-  const bmpPtr = engine.allocateMemory(pixelCount * 4);
-
+  let bmpPtr = 0;
   let bitmapHandle = 0;
   try {
+    bmpPtr = engine.allocateMemory(pixelCount * 4);
     const heap = mod.pdfium.HEAPU8;
     for (let i = 0; i < pixelCount; i++) {
       const idx = i * 4;
@@ -298,7 +300,7 @@ export async function importImageAsPage(
     mod.FPDFPage_GenerateContent(pageHandle);
   } finally {
     if (bitmapHandle) mod.FPDFBitmap_Destroy(bitmapHandle);
-    engine.freeMemory(bmpPtr);
+    if (bmpPtr) engine.freeMemory(bmpPtr);
     mod.FPDF_ClosePage(pageHandle);
   }
 }
