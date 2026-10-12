@@ -1301,7 +1301,11 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
         if (wIdx > 0) {
           const prev = textWords[wIdx - 1];
           const gap = w.left - prev.right;
-          if (w.hasPrecedingSpace || gap >= Math.min(prev.fontSize, w.fontSize) * 0.18) {
+          const hasSpace =
+            w.hasPrecedingSpace !== undefined
+              ? Boolean(w.hasPrecedingSpace)
+              : gap >= Math.min(prev.fontSize, w.fontSize) * 0.18;
+          if (hasSpace) {
             fullLineText += ' ';
           }
         }
@@ -1322,6 +1326,11 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
       const avgBaselineY = sumBaselineY / textWords.length;
       const avgDomBaseline = sumDomBaseline > 0 ? sumDomBaseline / textWords.length : undefined;
       const lineHeight = dominantLineFontSize * 1.25;
+      const lineMetrics = computeLineTypographicMetrics(
+        textWords,
+        dominantLineFontSize,
+        typo.fontFamily || typo.rawFontFamily || 'Helvetica'
+      );
 
       lines.push({
         text: fullLineText,
@@ -1343,6 +1352,15 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
         color: typo.color,
         fontWeight: typo.fontWeight,
         fontStyle: typo.fontStyle,
+        ...(lineMetrics.letterSpacing !== 'normal'
+          ? { letterSpacing: lineMetrics.letterSpacing }
+          : {}),
+        ...(lineMetrics.wordSpacing !== undefined && Math.abs(lineMetrics.wordSpacing) >= 0.05
+          ? { wordSpacing: lineMetrics.wordSpacing }
+          : {}),
+        ...(Math.abs(lineMetrics.scaleX - 1.0) >= 0.02
+          ? { scaleX: lineMetrics.scaleX }
+          : {}),
         hasBulletPrefix: hasBullet,
         bulletWord,
         rotation,
@@ -1353,6 +1371,29 @@ function assembleHorizontalLines(words: TextWord[], rotation: number): TextLine[
   }
 
   return segmentLayoutColumns(lines);
+}
+
+/**
+ * Sorts the words of one vertical line into reading order in place.
+ *
+ * Words are first ordered top-to-bottom; when the content stream order of the
+ * sorted words predominantly decreases, the run reads bottom-to-top (text rotated
+ * anticlockwise) and the order is reversed so the line text matches visual reading.
+ *
+ * @param words Words sharing one vertical line axis.
+ */
+function sortVerticalWordsInReadingOrder(words: TextWord[]): void {
+  words.sort((a, b) => a.top - b.top);
+  let ascending = 0;
+  let descending = 0;
+  for (let k = 1; k < words.length; k++) {
+    const delta = words[k].charStartIndex - words[k - 1].charStartIndex;
+    if (delta > 0) ascending++;
+    else if (delta < 0) descending++;
+  }
+  if (descending > ascending) {
+    words.reverse();
+  }
 }
 
 /**
@@ -1400,7 +1441,7 @@ function assembleVerticalLines(words: TextWord[], rotation: number): TextLine[] 
   const lines: TextLine[] = [];
 
   for (const group of lineGroups) {
-    group.sort((a, b) => a.top - b.top);
+    sortVerticalWordsInReadingOrder(group);
 
     const subGroups: TextWord[][] = [];
     let currentSubGroup: TextWord[] = [];
@@ -1413,7 +1454,7 @@ function assembleVerticalLines(words: TextWord[], rotation: number): TextLine[] 
       }
 
       const prevWord = currentSubGroup[currentSubGroup.length - 1];
-      const verticalGap = word.top - prevWord.bottom;
+      const verticalGap = measureAxisSeparation(prevWord.top, prevWord.bottom, word.top, word.bottom);
       const columnGutterThreshold = Math.max(24, prevWord.fontSize * 2.0);
 
       if (verticalGap > columnGutterThreshold) {
@@ -1455,7 +1496,7 @@ function assembleVerticalLines(words: TextWord[], rotation: number): TextLine[] 
         const w = textWords[wIdx];
         if (wIdx > 0) {
           const prev = textWords[wIdx - 1];
-          const gap = w.top - prev.bottom;
+          const gap = measureAxisSeparation(prev.top, prev.bottom, w.top, w.bottom);
           if (w.hasPrecedingSpace || gap >= Math.min(prev.fontSize, w.fontSize) * 0.18) {
             fullLineText += ' ';
           }
@@ -1542,6 +1583,153 @@ function assembleLines(words: TextWord[]): TextLine[] {
 }
 
 /**
+ * Horizontal vector barrier segment in DOM coordinates (y increasing downward).
+ */
+interface HorizontalBarrierSegment {
+  left: number;
+  right: number;
+  domY: number;
+}
+
+/**
+ * Extracts horizontal vector path barriers (table grid borders, cell box top/bottom
+ * edges, and horizontal divider rules) from a PDF page in DOM coordinates.
+ *
+ * @param engine Initialised PdfiumEngine instance.
+ * @param pageHandle Native handle to the open PDF page.
+ * @param cropInfo Active page crop and rotation geometry.
+ * @return Array of horizontal barrier segments in DOM coordinates.
+ */
+function extractHorizontalBarriers(
+  engine: PdfiumEngine,
+  pageHandle: number,
+  cropInfo: PageCropInfo
+): HorizontalBarrierSegment[] {
+  const mod = engine.getModule();
+  if (
+    typeof mod.FPDFPage_CountObjects !== 'function' ||
+    typeof mod.FPDFPage_GetObject !== 'function' ||
+    typeof mod.FPDFPageObj_GetType !== 'function' ||
+    typeof mod.FPDFPageObj_GetBounds !== 'function'
+  ) {
+    return [];
+  }
+
+  const objCount = mod.FPDFPage_CountObjects(pageHandle);
+  if (objCount <= 0) return [];
+
+  const lPtr = engine.allocateMemory(4);
+  const bPtr = engine.allocateMemory(4);
+  const rPtr = engine.allocateMemory(4);
+  const tPtr = engine.allocateMemory(4);
+  const barriers: HorizontalBarrierSegment[] = [];
+
+  try {
+    const heightPts = cropInfo.cropHeight || mod.FPDF_GetPageHeightF(pageHandle);
+    for (let i = 0; i < objCount; i++) {
+      const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
+      if (!objHandle) continue;
+
+      const objType = mod.FPDFPageObj_GetType(objHandle);
+      // FPDF_PAGEOBJ_PATH = 2 (FPDF_PAGEOBJ_TEXT = 1)
+      if (objType !== 2) continue;
+
+      const ok = mod.FPDFPageObj_GetBounds(objHandle, lPtr, bPtr, rPtr, tPtr);
+      if (!ok) continue;
+
+      const pdfLeft = mod.pdfium.HEAPF32[lPtr >> 2];
+      const pdfBottom = mod.pdfium.HEAPF32[bPtr >> 2];
+      const pdfRight = mod.pdfium.HEAPF32[rPtr >> 2];
+      const pdfTop = mod.pdfium.HEAPF32[tPtr >> 2];
+
+      let domLeft: number;
+      let domRight: number;
+      let domTop: number;
+      let domBottom: number;
+
+      if (cropInfo.rotation !== 0) {
+        const bounds = pdfBoxToDomBounds(pdfLeft, pdfBottom, pdfRight, pdfTop, cropInfo);
+        domLeft = bounds.left;
+        domRight = bounds.right;
+        domTop = bounds.top;
+        domBottom = bounds.bottom;
+      } else {
+        domLeft = Math.min(pdfLeft, pdfRight) - cropInfo.cropLeft;
+        domRight = Math.max(pdfLeft, pdfRight) - cropInfo.cropLeft;
+        domTop = heightPts - (Math.max(pdfTop, pdfBottom) - cropInfo.cropBottom);
+        domBottom = heightPts - (Math.min(pdfTop, pdfBottom) - cropInfo.cropBottom);
+      }
+
+      const width = domRight - domLeft;
+      const height = domBottom - domTop;
+      if (width < 18.0) continue;
+
+      if (height <= 3.5) {
+        barriers.push({
+          left: domLeft,
+          right: domRight,
+          domY: (domTop + domBottom) / 2,
+        });
+      } else if (height >= 8.0 && height <= 450.0 && width >= 24.0) {
+        barriers.push({ left: domLeft, right: domRight, domY: domTop });
+        barriers.push({ left: domLeft, right: domRight, domY: domBottom });
+      }
+    }
+  } finally {
+    engine.freeMemory(lPtr);
+    engine.freeMemory(bPtr);
+    engine.freeMemory(rPtr);
+    engine.freeMemory(tPtr);
+  }
+
+  return barriers;
+}
+
+/**
+ * Checks whether a horizontal vector barrier (table row border or cell boundary)
+ * lies vertically between two candidate lines and overlaps their horizontal span.
+ *
+ * @param prevLine Preceding line in reading order.
+ * @param nextLine Candidate line below prevLine.
+ * @param barriers Extracted horizontal barrier segments in DOM space.
+ * @return True if a horizontal border separates prevLine and nextLine.
+ */
+function hasHorizontalBarrierBetween(
+  prevLine: TextLine,
+  nextLine: TextLine,
+  barriers: HorizontalBarrierSegment[]
+): boolean {
+  if (barriers.length === 0) return false;
+
+  const prevDomBaseline = prevLine.domBaseline ?? prevLine.bottom - prevLine.fontSize * 0.2;
+  const nextDomBaseline = nextLine.domBaseline ?? nextLine.bottom - nextLine.fontSize * 0.2;
+  const minY = Math.min(prevDomBaseline, prevLine.bottom) - prevLine.fontSize * 0.1;
+  const maxY = Math.max(nextLine.top + nextLine.fontSize * 0.25, nextDomBaseline - nextLine.fontSize * 0.35);
+  if (maxY <= minY) return false;
+
+  const spanLeft = Math.min(prevLine.left, nextLine.left);
+  const spanRight = Math.max(prevLine.right, nextLine.right);
+  const minRequiredOverlap = Math.min(16.0, Math.min(prevLine.width, nextLine.width) * 0.45);
+
+  for (const b of barriers) {
+    if (b.domY <= minY || b.domY >= maxY) continue;
+
+    const overlap = Math.min(spanRight, b.right) - Math.max(spanLeft, b.left);
+    if (overlap < minRequiredOverlap) continue;
+
+    const barrierWidth = b.right - b.left;
+    const isInlineUnderline =
+      b.domY - prevDomBaseline <= prevLine.fontSize * 0.26 &&
+      barrierWidth <= prevLine.width + 6.0;
+    if (isInlineUnderline) continue;
+
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Merges horizontally adjacent co-linear line fragments on the same baseline into single lines.
  *
  * @param lines Array of TextLine objects sorted in reading order.
@@ -1557,12 +1745,26 @@ export function mergeColinearLines(lines: TextLine[]): TextLine[] {
     const next = lines[i];
     const baselineDiff = Math.abs(current.baselineY - next.baselineY);
     const avgFontSize = (current.fontSize + next.fontSize) / 2;
+    const colinearGap = next.left - current.right;
+    const maxColinearGap = Math.min(10.0, avgFontSize * 0.95);
+    const lastCurrentWord =
+      current.words && current.words.length > 0
+        ? current.words[current.words.length - 1]
+        : null;
+    const firstNextWord =
+      next.words && next.words.length > 0 ? next.words[0] : null;
+    const wordsCompatible =
+      !lastCurrentWord ||
+      !firstNextWord ||
+      isTypographicallyCompatible(lastCurrentWord, firstNextWord, colinearGap);
 
     const isColinear =
       baselineDiff <= 3.0 &&
       next.left >= current.left - 2.0 &&
-      next.left <= current.right + Math.max(36.0, avgFontSize * 2.5) &&
-      Math.abs(current.fontSize - next.fontSize) <= 3.0;
+      next.left <= current.right + maxColinearGap &&
+      Math.abs(current.fontSize - next.fontSize) <= 1.8 &&
+      wordsCompatible &&
+      !hasIncompatibleLineStyle(current, next);
 
     if (isColinear) {
       const minLeft = Math.min(current.left, next.left);
@@ -1581,6 +1783,22 @@ export function mergeColinearLines(lines: TextLine[]): TextLine[] {
       });
       const combinedWords = [...(current.words || []).map((w) => ({ ...w })), ...nextWordsCloned];
 
+      const mergedFontSize = getDominantFontSize(combinedWords);
+      const mergedTypo = getDominantTypography(combinedWords);
+      const mergedMetrics = computeLineTypographicMetrics(
+        combinedWords,
+        mergedFontSize,
+        mergedTypo.fontFamily || mergedTypo.rawFontFamily || 'Helvetica'
+      );
+      const mergedLetterSpacing =
+        mergedMetrics.letterSpacing !== 'normal'
+          ? mergedMetrics.letterSpacing
+          : current.letterSpacing || next.letterSpacing;
+      const mergedWordSpacing =
+        mergedMetrics.wordSpacing !== undefined && Math.abs(mergedMetrics.wordSpacing) >= 0.05
+          ? mergedMetrics.wordSpacing
+          : current.wordSpacing ?? next.wordSpacing;
+
       current = {
         ...current,
         text: combinedText,
@@ -1593,7 +1811,14 @@ export function mergeColinearLines(lines: TextLine[]): TextLine[] {
         height: maxBottom - minTop,
         charCount: combinedText.length,
         charStartIndex: Math.min(current.charStartIndex, next.charStartIndex),
-        fontSize: Math.max(current.fontSize, next.fontSize),
+        fontSize: mergedFontSize,
+        fontFamily: mergedTypo.fontFamily,
+        rawFontFamily: mergedTypo.rawFontFamily,
+        color: mergedTypo.color,
+        fontWeight: mergedTypo.fontWeight,
+        fontStyle: mergedTypo.fontStyle,
+        ...(mergedLetterSpacing ? { letterSpacing: mergedLetterSpacing } : {}),
+        ...(mergedWordSpacing !== undefined ? { wordSpacing: mergedWordSpacing } : {}),
       };
     } else {
       merged.push(current);
@@ -1602,6 +1827,218 @@ export function mergeColinearLines(lines: TextLine[]): TextLine[] {
   }
   merged.push(current);
   return merged;
+}
+
+/** Maximum leftward drift (pt) a list item continuation may have relative to its marker. */
+const LIST_CONTINUATION_OUTDENT_TOLERANCE_PT = 2.0;
+
+/**
+ * Detects a candidate line that starts left of the marker of the list item opening
+ * the current cluster, which can never be a hanging-indent continuation.
+ *
+ * @param clusterAnchor The first line of the current cluster.
+ * @param nextLine The candidate line.
+ * @return True when the cluster is a list item and the candidate outdents past it.
+ */
+function isOutdentedFromListItem(clusterAnchor: TextLine, nextLine: TextLine): boolean {
+  return (
+    isBulletOrListItem(clusterAnchor) &&
+    nextLine.left < clusterAnchor.left - LIST_CONTINUATION_OUTDENT_TOLERANCE_PT
+  );
+}
+
+/**
+ * Checks whether a line has a uniform base font family across all of its words.
+ *
+ * @param line Target text line.
+ * @return Normalised base font family when uniform, or null when mixed.
+ */
+function getUniformLineBaseFont(line: TextLine): string | null {
+  const base = extractBaseFontFamily(line.rawFontFamily || line.fontFamily || 'Helvetica');
+  if (!line.words || line.words.length <= 1) return base;
+  for (const w of line.words) {
+    if (extractBaseFontFamily(w.rawFontFamily || w.fontFamily || line.fontFamily || 'Helvetica') !== base) {
+      return null;
+    }
+  }
+  return base;
+}
+
+/**
+ * Checks whether a line has a uniform fill colour across all of its words.
+ *
+ * @param line Target text line.
+ * @return Line colour when uniform, or null when mixed.
+ */
+function getUniformLineColor(line: TextLine): ColorRgba | null {
+  const base = line.color;
+  if (!base) return null;
+  if (!line.words || line.words.length <= 1) return base;
+  for (const w of line.words) {
+    if (!w.color) continue;
+    const dist =
+      Math.abs(w.color.r - base.r) +
+      Math.abs(w.color.g - base.g) +
+      Math.abs(w.color.b - base.b);
+    if (dist > 30) return null;
+  }
+  return base;
+}
+
+/**
+ * Determines whether two candidate lines have incompatible line-level typography
+ * (distinct uniform base font families, distinct uniform colours, or a weight
+ * transition accompanied by a font size step) that would cause paragraph
+ * clustering to normalise unrelated lines to the wrong font or colour.
+ *
+ * @param prevLine Preceding line in the cluster.
+ * @param nextLine Candidate line to merge.
+ * @return True when the two lines should not be merged into one paragraph.
+ */
+function hasIncompatibleLineStyle(prevLine: TextLine, nextLine: TextLine): boolean {
+  const prevFont = getUniformLineBaseFont(prevLine);
+  const nextFont = getUniformLineBaseFont(nextLine);
+  if (prevFont && nextFont && prevFont !== nextFont) {
+    return true;
+  }
+
+  const prevColor = getUniformLineColor(prevLine);
+  const nextColor = getUniformLineColor(nextLine);
+  if (prevColor && nextColor) {
+    const colorDist =
+      Math.abs(prevColor.r - nextColor.r) +
+      Math.abs(prevColor.g - nextColor.g) +
+      Math.abs(prevColor.b - nextColor.b);
+    if (colorDist > 60) {
+      return true;
+    }
+  }
+
+  const prevWeight = prevLine.fontWeight || 'normal';
+  const nextWeight = nextLine.fontWeight || 'normal';
+  if (prevWeight !== nextWeight && Math.abs(prevLine.fontSize - nextLine.fontSize) >= 0.75) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Checks whether all words in a line share the same font weight.
+ *
+ * @param line Target text line.
+ * @return Uniform weight ('bold' or 'normal') or null when mixed.
+ */
+function getUniformLineWeight(line: TextLine): 'bold' | 'normal' | null {
+  const base = line.fontWeight === 'bold' ? 'bold' : 'normal';
+  if (!line.words || line.words.length <= 1) return base;
+  for (const w of line.words) {
+    const wWeight = w.fontWeight === 'bold' ? 'bold' : 'normal';
+    if (wWeight !== base) return null;
+  }
+  return base;
+}
+
+/**
+ * Finds horizontal row peers sharing the same baseline as a target line.
+ *
+ * @param target Line to inspect.
+ * @param allLines All assembled horizontal lines on the page.
+ * @return Array of peer lines on the same row baseline.
+ */
+function findRowPeerLines(target: TextLine, allLines: TextLine[]): TextLine[] {
+  const peers: TextLine[] = [];
+  for (const candidate of allLines) {
+    if (candidate === target) continue;
+    const tol = Math.max(3.5, Math.min(candidate.fontSize, target.fontSize) * 0.35);
+    if (Math.abs(candidate.baselineY - target.baselineY) > tol) continue;
+    if (candidate.left > target.right + 4.0 || candidate.right < target.left - 4.0) {
+      peers.push(candidate);
+    }
+  }
+  return peers;
+}
+
+/**
+ * Determines whether two vertically consecutive lines within a column belong to
+ * distinct table or key-value rows and therefore must not be merged into a single
+ * multi-line paragraph span.
+ *
+ * @param prevLine Preceding line in the current cluster.
+ * @param nextLine Candidate line below prevLine.
+ * @param allLines All unified horizontal lines on the page.
+ * @return True when prevLine and nextLine belong to separate table rows.
+ */
+function isTableRowSeparationBetween(
+  prevLine: TextLine,
+  nextLine: TextLine,
+  allLines: TextLine[]
+): boolean {
+  if (isTabularDataCellText(prevLine.text) && isTabularDataCellText(nextLine.text)) {
+    return true;
+  }
+
+  const prevPeers = findRowPeerLines(prevLine, allLines);
+  const nextPeers = findRowPeerLines(nextLine, allLines);
+
+  const prevUniformWeight = getUniformLineWeight(prevLine);
+  const nextUniformWeight = getUniformLineWeight(nextLine);
+  if (
+    prevUniformWeight &&
+    nextUniformWeight &&
+    prevUniformWeight !== nextUniformWeight &&
+    (prevPeers.length > 0 || nextPeers.length > 0 || prevLine.width < 150.0)
+  ) {
+    return true;
+  }
+
+  if (nextPeers.length === 0) {
+    return false;
+  }
+
+  const hasTabularOrShortPeer = (peers: TextLine[]): boolean =>
+    peers.some(
+      (p) =>
+        isTabularDataCellText(p.text) ||
+        ((p.words?.length ?? 1) <= 2 && p.width < 110.0)
+    );
+
+  // Transition from a wrapped continuation line (fewer peers) to a new table row
+  if (nextPeers.length > prevPeers.length && hasTabularOrShortPeer(nextPeers)) {
+    return true;
+  }
+
+  if (prevPeers.length >= 1 && nextPeers.length >= 1) {
+    if (
+      (prevPeers.length >= 2 || nextPeers.length >= 2) &&
+      prevLine.width < 180.0 &&
+      nextLine.width < 180.0
+    ) {
+      return true;
+    }
+
+    if (
+      isTabularDataCellText(prevLine.text) ||
+      isTabularDataCellText(nextLine.text) ||
+      hasTabularOrShortPeer(prevPeers) ||
+      hasTabularOrShortPeer(nextPeers)
+    ) {
+      return true;
+    }
+
+    const prevWordCount = prevLine.words?.length ?? 1;
+    const nextWordCount = nextLine.words?.length ?? 1;
+    if (
+      prevWordCount <= 3 &&
+      nextWordCount <= 3 &&
+      prevLine.width < 135.0 &&
+      nextLine.width < 135.0
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
