@@ -1,27 +1,42 @@
 import forge from 'node-forge';
 import {
-  PDFDocument,
-  PDFName,
-  PDFHexString,
-  PDFString,
-  PDFArray,
-  PDFNumber,
-  PDFDict,
-  PDFRawStream,
-  rgb,
-  StandardFonts,
-} from 'pdf-lib';
+  SIGNATURE_PLACEHOLDER_LENGTH,
+  buildIncrementalSignatureRevision,
+  buildInitialSignatureRevision,
+  hasPopulatedSignatures,
+} from './signature-revision-ops';
+import type { PdfEncryptionContext } from '../encryption/pdf-lib-encryption';
 
 /** Standard Object Identifiers (OIDs) for PKCS#7, CAdES, and X.509 extensions. */
+export const OID_MD5 = '1.2.840.113549.2.5';
+export const OID_SHA1 = '1.3.14.3.2.26';
 export const OID_SHA256 = '2.16.840.1.101.3.4.2.1';
+export const OID_SHA384 = '2.16.840.1.101.3.4.2.2';
+export const OID_SHA512 = '2.16.840.1.101.3.4.2.3';
 export const OID_ID_DATA = '1.2.840.113549.1.7.1';
+export const OID_SIGNING_CERTIFICATE_V1 = '1.2.840.113549.1.9.16.2.12';
 export const OID_SIGNING_CERTIFICATE_V2 = '1.2.840.113549.1.9.16.2.47';
 export const OID_TIMESTAMP_TOKEN = '1.2.840.113549.1.9.16.2.14';
+export const OID_TST_INFO = '1.2.840.113549.1.9.16.1.4';
 export const OID_ADOBE_DOC_SIGNING = '1.2.840.113583.1.1.5';
 export const OID_TIME_STAMPING = '1.3.6.1.5.5.7.3.8';
 export const OID_CRL_DIST_POINTS = '2.5.29.31';
 export const OID_AUTHORITY_INFO_ACCESS = '1.3.6.1.5.5.7.1.1';
 export const OID_OCSP = '1.3.6.1.5.5.7.48.1';
+
+/** Supported cryptographic message digest algorithms for CMS and PAdES signatures. */
+export type SignatureDigestAlgorithm = 'SHA-1' | 'SHA-256' | 'SHA-384' | 'SHA-512' | 'MD5';
+
+/** ISO 32000-1 Clause 12.8.2 signature reference transform methods. */
+export type SignatureTransformMethod = 'DocMDP' | 'UR3' | 'UR' | 'FieldMDP';
+
+/**
+ * ISO 32000-1 Table 254 DocMDP access permissions:
+ * 1 = No changes to the document are permitted.
+ * 2 = Filling in forms, instantiating page templates, and signing are permitted.
+ * 3 = Same as 2, plus annotation creation, deletion, and modification.
+ */
+export type DocMdpPermissionLevel = 1 | 2 | 3;
 
 /**
  * Options for generating a self-signed digital certificate.
@@ -100,8 +115,10 @@ export interface VisualSignatureOptions {
   height: number;
   /** Optional transparent PNG Data URL representing the handwritten signature graphic. */
   graphicDataUrl?: string;
-  /** Whether to render textual signer details (Name, Date, Reason, Location). */
+  /** Whether to render the signer's full name underneath the signature graphic. */
   showTextDetails?: boolean;
+  /** Whether graphicDataUrl already composites the signature graphic and optional full name into a single image. */
+  isCompositeAppearance?: boolean;
 }
 
 /**
@@ -124,12 +141,20 @@ export interface SignPdfOptions {
   visual?: VisualSignatureOptions;
   /** PDF signature subfilter. Defaults to 'ETSI.CAdES.detached'. */
   subFilter?: 'ETSI.CAdES.detached' | 'adbe.pkcs7.detached';
+  /** Whether to embed an RFC 3161 Time-Stamp Token (uses tsaUrl if reachable or built-in offline TSA token). */
+  enableTimestamp?: boolean;
   /** Optional RFC 3161 TSA server URL (e.g. 'https://freetsa.org/tsr') for PAdES B-T. */
   tsaUrl?: string;
   /** Optional pre-generated RFC 3161 TimeStampToken DER bytes (for offline or unit tests). */
   timestampTokenBytes?: Uint8Array;
   /** Whether to embed Document Security Store (/DSS) for PAdES B-LT long term validation. */
   embedDss?: boolean;
+  /** Optional ISO 32000-1 Clause 12.8.2.2 DocMDP certification permission level (1, 2, or 3). */
+  certificationLevel?: DocMdpPermissionLevel;
+  /** Optional zero-based target page index for the signature widget when visual rendering is omitted. */
+  pageIndex?: number;
+  /** Optional bounding rectangle in PDF points for the signature widget when visual rendering is omitted. */
+  rect?: { x: number; y: number; width: number; height: number };
 }
 
 /**
@@ -152,12 +177,14 @@ export interface SignatureValidationResult {
   isDocumentUntampered: boolean;
   /** Whether the RSA signature is mathematically valid. */
   isCryptographicallyValid: boolean;
-  /** Whether the certificate is expired at present time. */
+  /** Whether the certificate was expired at the time of signing. */
   isCertExpired: boolean;
   /** Whether the certificate is self-signed. */
   isSelfSigned: boolean;
   /** Overall validity status. */
   status: 'valid' | 'tampered' | 'invalid' | 'expired';
+  /** True if status is 'valid'. */
+  isValid: boolean;
   /** Signer certificate subject details. */
   certificateSubject: {
     commonName: string;
@@ -180,8 +207,18 @@ export interface SignatureValidationResult {
   filter: string;
   /** PDF signature subfilter (e.g. ETSI.CAdES.detached, adbe.pkcs7.detached). */
   subFilter: string;
+  /** Cryptographic digest algorithm used by the SignerInfo structure. */
+  digestAlgorithm: SignatureDigestAlgorithm;
   /** Byte range array [offset1, length1, offset2, length2]. */
   byteRange: number[];
+  /** Whether the signed byte range covers the entire file without post-signature incremental updates. */
+  coversEntireFile: boolean;
+  /** Whether this signature is a document certification or usage-rights signature (/DocMDP or /UR3). */
+  isCertificationSignature: boolean;
+  /** Transform method specified in /Reference /SigRef dictionary if present. */
+  transformMethod?: SignatureTransformMethod;
+  /** DocMDP modification permission level (1, 2, or 3) if specified in /TransformParams. */
+  docMdpPermissionLevel?: DocMdpPermissionLevel;
   /** PAdES profile level detected. */
   padesProfile: 'PAdES-B-LT' | 'PAdES-B-T' | 'PAdES-B-B' | 'Legacy-PKCS7';
   /** Whether CAdES signingCertificateV2 (RFC 5035) is present and cryptographically bound. */
@@ -393,6 +430,118 @@ export async function requestRfc3161Timestamp(
   }
 }
 
+let cachedEmbeddedTsaPair: {
+  privateKey: forge.pki.rsa.PrivateKey;
+  certificate: forge.pki.Certificate;
+} | null = null;
+
+function getOrCreateEmbeddedTsaPair(): {
+  privateKey: forge.pki.rsa.PrivateKey;
+  certificate: forge.pki.Certificate;
+} {
+  if (cachedEmbeddedTsaPair) {
+    return cachedEmbeddedTsaPair;
+  }
+
+  const keypair = forge.pki.rsa.generateKeyPair({ bits: 2048 });
+  const cert = forge.pki.createCertificate();
+  cert.publicKey = keypair.publicKey;
+  cert.serialNumber = '01007361';
+  const notBefore = new Date(Date.now() - 86400 * 1000);
+  const notAfter = new Date(Date.now() + 10 * 365 * 86400 * 1000);
+  cert.validity.notBefore = notBefore;
+  cert.validity.notAfter = notAfter;
+
+  const tsaAttrs = [
+    { name: 'commonName', value: 'Kea PDF Embedded Time-Stamp Authority' },
+    { name: 'organizationName', value: 'Kea Cryptographic Trust Services' },
+    { name: 'countryName', value: 'CH' },
+  ];
+  cert.setSubject(tsaAttrs);
+  cert.setIssuer(tsaAttrs);
+  cert.setExtensions([
+    { name: 'basicConstraints', cA: false, critical: true },
+    { name: 'keyUsage', digitalSignature: true, nonRepudiation: true, critical: true },
+    { name: 'extKeyUsage', timeStamping: true, critical: true },
+  ]);
+  cert.sign(keypair.privateKey, forge.md.sha256.create());
+
+  cachedEmbeddedTsaPair = {
+    privateKey: keypair.privateKey,
+    certificate: cert,
+  };
+  return cachedEmbeddedTsaPair;
+}
+
+/**
+ * Generates a self-contained RFC 3161 TimeStampToken CMS SignedData structure offline.
+ *
+ * Binds the SHA-256 imprint of the signature value into a signed TSTInfo payload using
+ * a dedicated Time-Stamping Authority certificate with timeStamping Extended Key Usage.
+ *
+ * @param signatureBytes Raw RSA signature value bytes from the SignerInfo structure.
+ * @param signingTime Timestamp to encode inside TSTInfo (defaults to current time).
+ * @return DER-encoded RFC 3161 TimeStampToken byte array.
+ */
+export function createEmbeddedRfc3161TimestampToken(
+  signatureBytes: Uint8Array,
+  signingTime: Date = new Date()
+): Uint8Array {
+  let sigBin = '';
+  for (let i = 0; i < signatureBytes.length; i++) {
+    sigBin += String.fromCharCode(signatureBytes[i]);
+  }
+  const md = forge.md.sha256.create();
+  md.update(sigBin);
+  const imprintBytes = md.digest().getBytes();
+
+  const sha256OidDer = forge.asn1.oidToDer(OID_SHA256).getBytes();
+  const algId = forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
+    forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OID, false, sha256OidDer),
+  ]);
+  const msgImprint = forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
+    algId,
+    forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OCTETSTRING, false, imprintBytes),
+  ]);
+
+  const tstInfoAsn1 = forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
+    forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.INTEGER, false, forge.util.hexToBytes('01')),
+    forge.asn1.create(
+      forge.asn1.Class.UNIVERSAL,
+      forge.asn1.Type.OID,
+      false,
+      forge.asn1.oidToDer(OID_ADOBE_DOC_SIGNING).getBytes()
+    ),
+    msgImprint,
+    forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.INTEGER, false, forge.util.hexToBytes('01')),
+    forge.asn1.create(
+      forge.asn1.Class.UNIVERSAL,
+      forge.asn1.Type.GENERALIZEDTIME,
+      false,
+      forge.asn1.dateToGeneralizedTime(signingTime)
+    ),
+  ]);
+  const tstInfoDer = forge.asn1.toDer(tstInfoAsn1).getBytes();
+
+  const tsa = getOrCreateEmbeddedTsaPair();
+  const tstP7 = forge.pkcs7.createSignedData();
+  tstP7.content = forge.util.createBuffer(tstInfoDer);
+  tstP7.addCertificate(tsa.certificate);
+  tstP7.addSigner({
+    key: tsa.privateKey,
+    certificate: tsa.certificate,
+    digestAlgorithm: forge.pki.oids.sha256,
+  });
+  tstP7.sign();
+
+  const tstDer = forge.asn1.toDer(tstP7.toAsn1()).getBytes();
+  const out = new Uint8Array(tstDer.length);
+  for (let i = 0; i < tstDer.length; i++) {
+    out[i] = tstDer.charCodeAt(i);
+  }
+  return out;
+}
+
 /**
  * Formats a Date object into PDF timestamp format: D:YYYYMMDDHHmmSS+HH'mm'.
  *
@@ -430,7 +579,7 @@ export async function createSelfSignedCertificate(options: CreateCertOptions): P
   const keySize = options.keySize || 2048;
   const validityYears = options.validityYears || 2;
 
-  // 1. Generate RSA Keypair
+  // Generate RSA keypair
   const keypair = await new Promise<forge.pki.rsa.KeyPair>((resolve, reject) => {
     forge.pki.rsa.generateKeyPair({ bits: keySize, workers: -1 }, (err, keys) => {
       if (err) return reject(err);
@@ -438,7 +587,7 @@ export async function createSelfSignedCertificate(options: CreateCertOptions): P
     });
   });
 
-  // 2. Create X.509 Certificate
+  // Create X.509 certificate
   const cert = forge.pki.createCertificate();
   cert.publicKey = keypair.publicKey;
   cert.serialNumber = `${Date.now()}${Math.floor(Math.random() * 1000000)}`;
@@ -498,7 +647,7 @@ export async function createSelfSignedCertificate(options: CreateCertOptions): P
   // Self-sign certificate with SHA-256
   cert.sign(keypair.privateKey, forge.md.sha256.create());
 
-  // 3. Package into PKCS#12 (.p12) container
+  // Package into PKCS#12 (.p12) container
   const p12Asn1 = forge.pkcs12.toPkcs12Asn1(
     keypair.privateKey,
     [cert],
@@ -599,7 +748,7 @@ export function parsePkcs12(p12Buffer: ArrayBuffer | Uint8Array, password = ''):
     }
   }
 
-  // Organize certificate chain with leaf certificate first, followed by intermediate/root CAs
+  // Organise certificate chain with leaf certificate first, followed by intermediate/root CAs
   const chain = [leafCert, ...allCerts.filter((c) => c !== leafCert)];
 
   const getAttr = (c: forge.pki.Certificate, name: string): string | undefined => {
@@ -636,241 +785,42 @@ export function parsePkcs12(p12Buffer: ArrayBuffer | Uint8Array, password = ''):
   };
 }
 
-/** Byte capacity allocated for detached signature placeholder (supports chains, CAdES, and timestamps). */
-const SIGNATURE_PLACEHOLDER_LENGTH = 16384; // 16384 bytes = 32768 hex characters
-
 /**
  * Digitally signs a PDF document conforming to PDF ISO 32000-1 / ISO 32000-2 and ETSI EN 319 142 (PAdES).
  *
+ * When the document already contains populated digital signatures, the new signature
+ * is appended as a PDF incremental update so that earlier signed byte ranges remain
+ * intact and their cryptographic digests continue to verify.
+ *
  * Supports /SubFilter /ETSI.CAdES.detached (PAdES Baseline) and /adbe.pkcs7.detached,
  * computing SHA-256 byte-range hashes and embedding ESS signingCertificateV2, complete
- * certificate chains, and optional RFC 3161 timestamps.
+ * certificate chains, optional DocMDP certification permissions, and optional RFC 3161 timestamps.
  *
  * @param pdfBytes Binary bytes of the active PDF document.
  * @param options Digital signing configuration including identity, metadata, visual, and PAdES options.
+ * @param encryption Security handler of an encrypted source. Unsigned documents must then be
+ *   supplied as decrypted bytes and signed documents as their original encrypted bytes.
  * @return A Promise resolving to the signed PDF Uint8Array.
  */
 export async function signPdfIso32000(
   pdfBytes: Uint8Array | ArrayBuffer,
-  options: SignPdfOptions
+  options: SignPdfOptions,
+  encryption?: PdfEncryptionContext
 ): Promise<Uint8Array> {
   const bytes = pdfBytes instanceof Uint8Array ? pdfBytes : new Uint8Array(pdfBytes);
-  const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: true });
 
   const signingTime = options.signingTime || new Date();
   const pdfDateStr = formatPdfDate(signingTime);
   const subFilter = options.subFilter || 'ETSI.CAdES.detached';
 
-  // 1. Ensure AcroForm exists with /SigFlags 3 (SignaturesExist | AppendOnly)
-  let acroForm = pdfDoc.catalog.lookup(PDFName.of('AcroForm'));
-  let acroFormDict: PDFDict;
-  if (!acroForm || !(acroForm instanceof PDFDict)) {
-    acroFormDict = pdfDoc.context.obj({
-      Fields: [],
-      SigFlags: 3,
-    });
-    pdfDoc.catalog.set(PDFName.of('AcroForm'), pdfDoc.context.register(acroFormDict));
-  } else {
-    acroFormDict = acroForm;
-    acroFormDict.set(PDFName.of('SigFlags'), PDFNumber.of(3));
-  }
+  // Re-serialising a document that already carries signatures would shift every byte offset
+  // and invalidate all earlier digests, so subsequent signatures are appended incrementally.
+  const revisionParams = { options, subFilter, pdfDateStr, encryption };
+  const rawSavedBytes = hasPopulatedSignatures(bytes)
+    ? await buildIncrementalSignatureRevision(bytes, revisionParams)
+    : await buildInitialSignatureRevision(bytes, revisionParams);
 
-  let fieldsArray = acroFormDict.lookup(PDFName.of('Fields'));
-  if (!fieldsArray || !(fieldsArray instanceof PDFArray)) {
-    fieldsArray = pdfDoc.context.obj([]);
-    acroFormDict.set(PDFName.of('Fields'), fieldsArray);
-  }
-
-  // 2. Prepare Signature Dictionary placeholder with ByteRange and Contents
-  const placeholderHex = '0'.repeat(SIGNATURE_PLACEHOLDER_LENGTH * 2);
-
-  const byteRangePlaceholder = PDFArray.withContext(pdfDoc.context);
-  byteRangePlaceholder.push(PDFNumber.of(0));
-  byteRangePlaceholder.push(PDFNumber.of(1000000000));
-  byteRangePlaceholder.push(PDFNumber.of(1000000000));
-  byteRangePlaceholder.push(PDFNumber.of(1000000000));
-
-  const sigDict = pdfDoc.context.obj({
-    Type: PDFName.of('Sig'),
-    Filter: PDFName.of('Adobe.PPKLite'),
-    SubFilter: PDFName.of(subFilter),
-    ByteRange: byteRangePlaceholder,
-    Contents: PDFHexString.of(placeholderHex),
-    Reason: PDFString.of(options.reason || 'Document Digitally Signed and Verified'),
-    M: PDFString.of(pdfDateStr),
-    Name: PDFString.of(options.signerName || options.identity.subject.commonName),
-    ...(options.location ? { Location: PDFString.of(options.location) } : {}),
-    ...(options.contactInfo ? { ContactInfo: PDFString.of(options.contactInfo) } : {}),
-  });
-
-  const sigDictRef = pdfDoc.context.register(sigDict);
-
-  // 3. Create Signature Field & Widget Annotation
-  const targetPageIdx = options.visual ? options.visual.pageIndex : 0;
-  const page = pdfDoc.getPage(targetPageIdx);
-  const pageRef = page.ref;
-
-  let annotRect: [number, number, number, number] = [0, 0, 0, 0];
-  if (options.visual) {
-    annotRect = [
-      options.visual.x,
-      options.visual.y,
-      options.visual.x + options.visual.width,
-      options.visual.y + options.visual.height,
-    ];
-  }
-
-  const widgetDict = pdfDoc.context.obj({
-    Type: PDFName.of('Annot'),
-    Subtype: PDFName.of('Widget'),
-    FT: PDFName.of('Sig'),
-    Rect: annotRect,
-    T: PDFString.of(`Signature_${Date.now()}`),
-    F: 132, // Print | Lock
-    P: pageRef,
-    V: sigDictRef,
-  });
-
-  // Render visual appearance on page if requested
-  if (options.visual && options.visual.width > 10 && options.visual.height > 10) {
-    const vx = options.visual.x;
-    const vy = options.visual.y;
-    const vw = options.visual.width;
-    const vh = options.visual.height;
-
-    page.drawRectangle({
-      x: vx,
-      y: vy,
-      width: vw,
-      height: vh,
-      color: rgb(0.98, 0.99, 1.0),
-      borderColor: rgb(0.2, 0.45, 0.85),
-      borderWidth: 1,
-    });
-
-    let graphicWidth = 0;
-
-    if (options.visual.graphicDataUrl && options.visual.graphicDataUrl.startsWith('data:image/png;base64,')) {
-      try {
-        const rawBase64 = options.visual.graphicDataUrl.replace('data:image/png;base64,', '');
-        const imgBytes = Uint8Array.from(atob(rawBase64), (c) => c.charCodeAt(0));
-        const embeddedImg = await pdfDoc.embedPng(imgBytes);
-
-        graphicWidth = options.visual.showTextDetails ? Math.min(vw * 0.45, 140) : vw - 16;
-        const graphicHeight = Math.min(vh - 12, graphicWidth / (embeddedImg.width / embeddedImg.height));
-
-        page.drawImage(embeddedImg, {
-          x: vx + 8,
-          y: vy + (vh - graphicHeight) / 2,
-          width: graphicWidth,
-          height: graphicHeight,
-        });
-      } catch (err) {
-        console.warn('Failed to embed visual signature graphic:', err);
-      }
-    }
-
-    if (options.visual.showTextDetails) {
-      const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
-      const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-
-      const textX = vx + (graphicWidth > 0 ? graphicWidth + 14 : 10);
-      const availableW = vw - (textX - vx) - 8;
-      const textStartY = vy + vh - 14;
-      const fontSize = Math.max(7, Math.min(9, vh / 6));
-      const lineSpacing = fontSize + 2.5;
-
-      page.drawText(`Digitally signed by:`, {
-        x: textX,
-        y: textStartY,
-        size: fontSize - 1,
-        font: helvetica,
-        color: rgb(0.4, 0.4, 0.4),
-      });
-
-      page.drawText(options.signerName || options.identity.subject.commonName, {
-        x: textX,
-        y: textStartY - lineSpacing,
-        size: fontSize + 1,
-        font: helveticaBold,
-        color: rgb(0.1, 0.15, 0.3),
-        maxWidth: availableW,
-      });
-
-      let currentY = textStartY - lineSpacing * 2;
-
-      page.drawText(`Date: ${signingTime.toLocaleString()}`, {
-        x: textX,
-        y: currentY,
-        size: fontSize - 1,
-        font: helvetica,
-        color: rgb(0.3, 0.3, 0.3),
-        maxWidth: availableW,
-      });
-      currentY -= lineSpacing;
-
-      if (options.reason) {
-        page.drawText(`Reason: ${options.reason}`, {
-          x: textX,
-          y: currentY,
-          size: fontSize - 1,
-          font: helvetica,
-          color: rgb(0.3, 0.3, 0.3),
-          maxWidth: availableW,
-        });
-        currentY -= lineSpacing;
-      }
-
-      if (options.location) {
-        page.drawText(`Location: ${options.location}`, {
-          x: textX,
-          y: currentY,
-          size: fontSize - 1,
-          font: helvetica,
-          color: rgb(0.3, 0.3, 0.3),
-          maxWidth: availableW,
-        });
-      }
-    }
-  }
-
-  const widgetRef = pdfDoc.context.register(widgetDict);
-  (fieldsArray as PDFArray).push(widgetRef);
-
-  let annots = page.node.lookup(PDFName.of('Annots'));
-  if (!annots || !(annots instanceof PDFArray)) {
-    const annotsArray = pdfDoc.context.obj([widgetRef]);
-    page.node.set(PDFName.of('Annots'), annotsArray);
-  } else {
-    annots.push(widgetRef);
-  }
-
-  // 4. Attach Document Security Store (/DSS) for PAdES B-LT if requested
-  if (options.embedDss) {
-    const certStreams: PDFRawStream[] = [];
-    const chain = options.identity.certificateChain || [options.identity.certificate];
-    for (const c of chain) {
-      const der = forge.asn1.toDer(forge.pki.certificateToAsn1(c)).getBytes();
-      const u8 = new Uint8Array(der.length);
-      for (let i = 0; i < der.length; i++) u8[i] = der.charCodeAt(i);
-      const stream = pdfDoc.context.stream(u8);
-      certStreams.push(stream);
-    }
-
-    const certRefs = certStreams.map((s) => pdfDoc.context.register(s));
-    const certsArray = pdfDoc.context.obj(certRefs);
-
-    const dssDict = pdfDoc.context.obj({
-      Type: PDFName.of('DSS'),
-      Certs: certsArray,
-    });
-    pdfDoc.catalog.set(PDFName.of('DSS'), pdfDoc.context.register(dssDict));
-  }
-
-  // 5. Save PDF to bytes with placeholders
-  const rawSavedBytes = await pdfDoc.save({ useObjectStreams: false });
-
-  // 6. Locate /ByteRange and /Contents in raw saved bytes
+  // Locate /ByteRange and /Contents in raw saved bytes
   let pdfString = '';
   for (let i = 0; i < rawSavedBytes.length; i++) {
     pdfString += String.fromCharCode(rawSavedBytes[i]);
