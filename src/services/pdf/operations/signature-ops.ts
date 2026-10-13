@@ -1316,83 +1316,276 @@ export async function verifyPdfSignatures(
           if (endsWithEof && docMdpPermissionLevel !== 1) {
             isAllowedPostSignRevision = true;
           }
+        }
 
-          // Check authenticated & unsigned attributes from ASN.1 SignerInfo
-          try {
-            const signedDataSeq = (p7Asn1.value as forge.asn1.Asn1[])[1].value[0] as forge.asn1.Asn1;
-            const signerInfosSet = (signedDataSeq.value as forge.asn1.Asn1[])[(signedDataSeq.value as forge.asn1.Asn1[]).length - 1];
-            const signerInfoSeq = (signerInfosSet.value as forge.asn1.Asn1[])[0];
+        if (isGapHexOnly) {
+          const part1 = bytes.subarray(b1, b1 + l1);
+          const part2 = bytes.subarray(b2, b2 + l2);
 
-            for (const el of signerInfoSeq.value as forge.asn1.Asn1[]) {
-              if (el.tagClass === forge.asn1.Class.CONTEXT_SPECIFIC && el.type === 0) {
-                // [0] IMPLICIT AuthenticatedAttributes
-                const authAttrs = el.value as forge.asn1.Asn1[];
-                for (const attr of authAttrs) {
-                  const oidVal = (attr.value as forge.asn1.Asn1[])[0].value as string;
-                  const attrOid = forge.asn1.derToOid(oidVal);
-                  if (attrOid === forge.pki.oids.messageDigest) {
-                    const setVal = (attr.value as forge.asn1.Asn1[])[1];
-                    const digestOctet = (setVal.value as forge.asn1.Asn1[])[0];
-                    const embeddedDigest = digestOctet.value as string;
-                    if (embeddedDigest === computedHash) {
-                      isUntampered = true;
-                      isCryptValid = true;
-                    }
-                  } else if (attrOid === OID_SIGNING_CERTIFICATE_V2) {
-                    hasSigningCertV2 = true;
-                  }
-                }
-              } else if (el.tagClass === forge.asn1.Class.CONTEXT_SPECIFIC && el.type === 1) {
-                // [1] IMPLICIT UnsignedAttributes
-                const unsignedAttrs = el.value as forge.asn1.Asn1[];
-                for (const attr of unsignedAttrs) {
-                  const oidVal = (attr.value as forge.asn1.Asn1[])[0].value as string;
-                  const attrOid = forge.asn1.derToOid(oidVal);
-                  if (attrOid === OID_TIMESTAMP_TOKEN) {
-                    hasTst = true;
-                    try {
-                      const setVal = (attr.value as forge.asn1.Asn1[])[1];
-                      const tstItem = (setVal.value as forge.asn1.Asn1[])[0];
-                      if (!tstItem) {
-                        isTstInvalid = true;
-                      } else {
-                        let tstAsn1Obj: forge.asn1.Asn1 | null = null;
-                        if (tstItem.type === forge.asn1.Type.SEQUENCE) {
-                          tstAsn1Obj = tstItem;
-                        } else if (tstItem.type === forge.asn1.Type.OCTETSTRING) {
-                          tstAsn1Obj = forge.asn1.fromDer(tstItem.value as string);
-                        }
+          let p1Str = '';
+          for (let i = 0; i < part1.length; i++) p1Str += String.fromCharCode(part1[i]);
+          let p2Str = '';
+          for (let i = 0; i < part2.length; i++) p2Str += String.fromCharCode(part2[i]);
 
-                        if (
-                          !tstAsn1Obj ||
-                          tstAsn1Obj.type !== forge.asn1.Type.SEQUENCE ||
-                          !Array.isArray(tstAsn1Obj.value) ||
-                          tstAsn1Obj.value.length === 0
-                        ) {
-                          isTstInvalid = true;
-                        } else {
-                          const firstChild = (tstAsn1Obj.value as forge.asn1.Asn1[])[0];
-                          if (!firstChild || firstChild.type !== forge.asn1.Type.OID) {
-                            isTstInvalid = true;
-                          } else {
-                            const ctOid = forge.asn1.derToOid(firstChild.value as string);
-                            if (ctOid !== forge.pki.oids.signedData && ctOid !== forge.pki.oids.data) {
-                              isTstInvalid = true;
-                            } else {
-                              tstTimeFormatted = new Date().toLocaleString();
+          const p7Der = extractDerFromHexContents(rawHex);
+          const p7Asn1 = forge.asn1.fromDer(p7Der, { parseAllBytes: false } as unknown as boolean);
+
+          // Locate SignedData and SignerInfo ASN.1 structures
+          const topChildren = p7Asn1.value as forge.asn1.Asn1[];
+          const signedDataSeq = (topChildren[1].value as forge.asn1.Asn1[])[0];
+          const sdChildren = signedDataSeq.value as forge.asn1.Asn1[];
+          const signerInfosSet = sdChildren[sdChildren.length - 1];
+          const signerInfoSeq = Array.isArray(signerInfosSet.value) && signerInfosSet.value.length > 0
+            ? (signerInfosSet.value[0] as forge.asn1.Asn1)
+            : null;
+
+          // Detect RFC 3161 Document Time-Stamp (/DocTimeStamp, eContentType = 1.2.840.113549.1.9.16.1.4)
+          let isDocTimeStamp = subFilter === 'ETSI.RFC3161';
+          let docTimeStampEContentBytes: string | null = null;
+          let docTimeStampImprintHash: string | null = null;
+          if (sdChildren.length >= 3) {
+            const encapContentInfo = sdChildren[2];
+            if (Array.isArray(encapContentInfo.value) && encapContentInfo.value.length >= 1) {
+              const eContentTypeNode = encapContentInfo.value[0];
+              if (eContentTypeNode && typeof eContentTypeNode.value === 'string') {
+                const eContentTypeOid = forge.asn1.derToOid(eContentTypeNode.value);
+                if (eContentTypeOid === '1.2.840.113549.1.9.16.1.4') {
+                  isDocTimeStamp = true;
+                  hasTst = true;
+                  // Normalise eContentType to id-data so node-forge pkcs7.messageFromAsn1 parses certificates
+                  eContentTypeNode.value = forge.asn1.oidToDer(forge.pki.oids.data).getBytes();
+                  if (encapContentInfo.value.length >= 2) {
+                    const eContentWrapper = encapContentInfo.value[1];
+                    if (Array.isArray(eContentWrapper.value) && eContentWrapper.value.length > 0) {
+                      const eContentOctet = eContentWrapper.value[0];
+                      if (typeof eContentOctet.value === 'string') {
+                        docTimeStampEContentBytes = eContentOctet.value;
+                        try {
+                          const tstInfoAsn1 = forge.asn1.fromDer(docTimeStampEContentBytes, { parseAllBytes: false } as unknown as boolean);
+                          if (Array.isArray(tstInfoAsn1.value) && tstInfoAsn1.value.length >= 5) {
+                            const msgImprint = tstInfoAsn1.value[2];
+                            if (Array.isArray(msgImprint.value) && msgImprint.value.length >= 2) {
+                              const imprintOctet = msgImprint.value[1];
+                              if (typeof imprintOctet.value === 'string') {
+                                docTimeStampImprintHash = imprintOctet.value;
+                              }
+                            }
+                            const genTimeNode = tstInfoAsn1.value[4];
+                            const parsedTstDate = genTimeNode ? parseAsn1Time(genTimeNode) : null;
+                            if (parsedTstDate) {
+                              if (!signingTimeObj) signingTimeObj = parsedTstDate;
+                              tstTimeFormatted = parsedTstDate.toLocaleString();
                             }
                           }
+                        } catch {
+                          // Fallback if TSTInfo inner ASN.1 cannot be parsed
                         }
                       }
-                    } catch {
-                      isTstInvalid = true;
                     }
                   }
                 }
               }
             }
-          } catch {
-            // Safe fallback
+          }
+
+          const p7 = forge.pkcs7.messageFromAsn1(p7Asn1) as forge.pkcs7.PkcsSignedData;
+
+          // Determine digest algorithm OID from SignerInfo.digestAlgorithm
+          let digestAlgOid = OID_SHA256;
+          if (signerInfoSeq && Array.isArray(signerInfoSeq.value) && signerInfoSeq.value.length >= 3) {
+            const digestAlgSeq = signerInfoSeq.value[2];
+            if (Array.isArray(digestAlgSeq.value) && digestAlgSeq.value.length > 0) {
+              const oidNode = digestAlgSeq.value[0];
+              if (typeof oidNode.value === 'string') {
+                digestAlgOid = forge.asn1.derToOid(oidNode.value);
+              }
+            }
+          }
+
+          const digestInfo = createMessageDigestByOid(digestAlgOid);
+          digestAlgorithm = digestInfo.name;
+          digestInfo.md.update(p1Str);
+          digestInfo.md.update(p2Str);
+          const computedHash = digestInfo.md.digest().getBytes();
+
+          let expectedAttrMessageDigest = computedHash;
+          if (isDocTimeStamp && docTimeStampEContentBytes) {
+            const eContentDigest = createMessageDigestByOid(digestAlgOid).md;
+            eContentDigest.update(docTimeStampEContentBytes);
+            expectedAttrMessageDigest = eContentDigest.digest().getBytes();
+          }
+
+          if (p7.certificates && p7.certificates.length > 0) {
+            certChainLen = p7.certificates.length;
+            const signerCert = selectSignerCertificate(p7.certificates, signerInfoSeq);
+            const getVal = (f: string) => {
+              const attr = signerCert.subject.attributes.find(
+                (a: { name?: string; shortName?: string; value?: unknown }) => a.name === f || a.shortName === f
+              );
+              return attr ? String(attr.value) : undefined;
+            };
+            const getIss = (f: string) => {
+              const attr = signerCert.issuer.attributes.find(
+                (a: { name?: string; shortName?: string; value?: unknown }) => a.name === f || a.shortName === f
+              );
+              return attr ? String(attr.value) : undefined;
+            };
+
+            certSubject = {
+              commonName: getVal('commonName') || getVal('CN') || 'Unknown Signer',
+              organization: getVal('organizationName') || getVal('O'),
+              email: getVal('emailAddress'),
+              country: getVal('countryName') || getVal('C'),
+            };
+
+            certIssuer = {
+              commonName: getIss('commonName') || getIss('CN') || 'Unknown Issuer',
+              organization: getIss('organizationName') || getIss('O'),
+            };
+
+            serialNum = signerCert.serialNumber;
+            validFromStr = signerCert.validity.notBefore.toLocaleDateString();
+            validToStr = signerCert.validity.notAfter.toLocaleDateString();
+
+            isSelfSigned = certSubject.commonName === certIssuer.commonName && certChainLen === 1;
+
+            // Check if signer certificate illegally has timeStamping EKU (permitted only on RFC 3161 TSA certificates)
+            const extKeyUsage = signerCert.getExtension('extKeyUsage') as { timeStamping?: boolean } | null;
+            if (extKeyUsage && extKeyUsage.timeStamping && !isDocTimeStamp) {
+              illegalTimeStampingUsage = true;
+            }
+
+            // Inspect SignerInfo authenticated attributes, signature value, and unsigned attributes
+            if (signerInfoSeq && Array.isArray(signerInfoSeq.value)) {
+              let authAttrsElement: forge.asn1.Asn1 | null = null;
+              let signatureValueBytes: string | null = null;
+
+              for (const el of signerInfoSeq.value as forge.asn1.Asn1[]) {
+                if (el.tagClass === forge.asn1.Class.CONTEXT_SPECIFIC && el.type === 0) {
+                  authAttrsElement = el;
+                  const authAttrs = el.value as forge.asn1.Asn1[];
+                  for (const attr of authAttrs) {
+                    const attrChildren = attr.value as forge.asn1.Asn1[];
+                    if (!Array.isArray(attrChildren) || attrChildren.length < 2) continue;
+                    const oidVal = attrChildren[0].value as string;
+                    const attrOid = forge.asn1.derToOid(oidVal);
+                    const setVal = attrChildren[1];
+
+                    if (attrOid === forge.pki.oids.messageDigest) {
+                      const digestOctet = (setVal.value as forge.asn1.Asn1[])[0];
+                      const embeddedDigest = digestOctet.value as string;
+                      const isDigestMatch = isDocTimeStamp
+                        ? (embeddedDigest === expectedAttrMessageDigest && docTimeStampImprintHash === computedHash)
+                        : (embeddedDigest === computedHash);
+                      if (isDigestMatch) {
+                        if (coversEntireFile || (isAllowedPostSignRevision && docMdpPermissionLevel !== 1)) {
+                          isUntampered = true;
+                        }
+                      }
+                    } else if (attrOid === forge.pki.oids.signingTime) {
+                      const timeNode = (setVal.value as forge.asn1.Asn1[])[0];
+                      const parsedCmsTime = timeNode ? parseAsn1Time(timeNode) : null;
+                      if (parsedCmsTime) {
+                        signingTimeObj = parsedCmsTime;
+                      }
+                    } else if (attrOid === OID_SIGNING_CERTIFICATE_V2 || attrOid === OID_SIGNING_CERTIFICATE_V1) {
+                      hasSigningCertV2 = true;
+                    }
+                  }
+                } else if (
+                  el.tagClass === forge.asn1.Class.UNIVERSAL &&
+                  el.type === forge.asn1.Type.OCTETSTRING &&
+                  typeof el.value === 'string'
+                ) {
+                  signatureValueBytes = el.value;
+                } else if (el.tagClass === forge.asn1.Class.CONTEXT_SPECIFIC && el.type === 1) {
+                  const unsignedAttrs = el.value as forge.asn1.Asn1[];
+                  for (const attr of unsignedAttrs) {
+                    const attrChildren = attr.value as forge.asn1.Asn1[];
+                    if (!Array.isArray(attrChildren) || attrChildren.length < 2) continue;
+                    const oidVal = attrChildren[0].value as string;
+                    const attrOid = forge.asn1.derToOid(oidVal);
+                    if (attrOid === OID_TIMESTAMP_TOKEN) {
+                      hasTst = true;
+                      try {
+                        const setVal = attrChildren[1];
+                        const tstItem = (setVal.value as forge.asn1.Asn1[])[0];
+                        if (!tstItem) {
+                          isTstInvalid = true;
+                        } else {
+                          let tstAsn1Obj: forge.asn1.Asn1 | null = null;
+                          if (tstItem.type === forge.asn1.Type.SEQUENCE) {
+                            tstAsn1Obj = tstItem;
+                          } else if (tstItem.type === forge.asn1.Type.OCTETSTRING) {
+                            tstAsn1Obj = forge.asn1.fromDer(tstItem.value as string, { parseAllBytes: false } as unknown as boolean);
+                          }
+
+                          if (
+                            !tstAsn1Obj ||
+                            tstAsn1Obj.type !== forge.asn1.Type.SEQUENCE ||
+                            !Array.isArray(tstAsn1Obj.value) ||
+                            tstAsn1Obj.value.length === 0
+                          ) {
+                            isTstInvalid = true;
+                          } else {
+                            const firstChild = (tstAsn1Obj.value as forge.asn1.Asn1[])[0];
+                            if (!firstChild || firstChild.type !== forge.asn1.Type.OID) {
+                              isTstInvalid = true;
+                            } else {
+                              const ctOid = forge.asn1.derToOid(firstChild.value as string);
+                              if (ctOid !== forge.pki.oids.signedData && ctOid !== forge.pki.oids.data) {
+                                isTstInvalid = true;
+                              } else {
+                                tstTimeFormatted = (signingTimeObj ?? new Date()).toLocaleString();
+                              }
+                            }
+                          }
+                        }
+                      } catch {
+                        isTstInvalid = true;
+                      }
+                    }
+                  }
+                }
+              }
+
+              // Mathematically verify the RSA encryptedDigest over the authenticated attributes (RFC 5652 Section 5.4)
+              if (signatureValueBytes) {
+                try {
+                  const publicKey = signerCert.publicKey as forge.pki.rsa.PublicKey;
+                  if (authAttrsElement && Array.isArray(authAttrsElement.value)) {
+                    const authAttrsSetAsn1 = forge.asn1.create(
+                      forge.asn1.Class.UNIVERSAL,
+                      forge.asn1.Type.SET,
+                      true,
+                      authAttrsElement.value as forge.asn1.Asn1[]
+                    );
+                    const authAttrsDer = forge.asn1.toDer(authAttrsSetAsn1).getBytes();
+                    const attrDigest = createMessageDigestByOid(digestAlgOid).md;
+                    attrDigest.update(authAttrsDer);
+                    const attrHashBytes = attrDigest.digest().getBytes();
+                    const rsaVerified = publicKey.verify(attrHashBytes, signatureValueBytes);
+                    isCryptValid = rsaVerified;
+                  } else {
+                    const rsaVerified = publicKey.verify(computedHash, signatureValueBytes);
+                    if (rsaVerified) {
+                      if (coversEntireFile || (isAllowedPostSignRevision && docMdpPermissionLevel !== 1)) {
+                        isUntampered = true;
+                      }
+                      isCryptValid = true;
+                    }
+                  }
+                } catch {
+                  isCryptValid = false;
+                }
+              }
+            }
+
+            // Evaluate certificate validity window at signing time (or current time if no signing time is present)
+            const validationReferenceTime = signingTimeObj ?? new Date();
+            isExpired =
+              validationReferenceTime < signerCert.validity.notBefore ||
+              validationReferenceTime > signerCert.validity.notAfter;
           }
         }
       }
@@ -1428,6 +1621,7 @@ export async function verifyPdfSignatures(
     }
 
     // Compile ESigA / ZertES compliance diagnosis
+    const isUnanchoredSelfSigned = isSelfSigned && (!hasDssGlobal || !hasTst);
     const esigaReasons: string[] = [];
     if (illegalTimeStampingUsage) {
       esigaReasons.push('Signer certificate illegally includes timeStamping EKU (violates RFC 3161 and ESigA).');
@@ -1435,10 +1629,10 @@ export async function verifyPdfSignatures(
     if (isTstInvalid) {
       esigaReasons.push('At least one of the time stamps applied to the document is invalid according to ESigA.');
     }
-    if (subFilter !== 'ETSI.CAdES.detached' && !hasSigningCertV2) {
+    if (subFilter !== 'ETSI.CAdES.detached' && subFilter !== 'ETSI.RFC3161' && !hasSigningCertV2) {
       esigaReasons.push('Signature uses legacy adbe.pkcs7.detached format without CAdES signingCertificateV2.');
     }
-    if (isSelfSigned) {
+    if (isUnanchoredSelfSigned) {
       esigaReasons.push('Certificate is self-signed and not issued by an accredited Swiss Certification Services Provider (ZertES Art. 2/3).');
     }
     if (!hasTst) {
@@ -1451,11 +1645,16 @@ export async function verifyPdfSignatures(
     let esigaStatus: 'compliant' | 'indeterminate' | 'non_compliant' = 'compliant';
     if (!isUntampered || !isCryptValid || illegalTimeStampingUsage || isTstInvalid) {
       esigaStatus = 'non_compliant';
-    } else if (isSelfSigned || !hasTst || !hasDssGlobal || subFilter !== 'ETSI.CAdES.detached') {
+    } else if (
+      isUnanchoredSelfSigned ||
+      !hasTst ||
+      !hasDssGlobal ||
+      (subFilter !== 'ETSI.CAdES.detached' && subFilter !== 'ETSI.RFC3161')
+    ) {
       esigaStatus = 'indeterminate';
     }
 
-    // 1. Signature Integrity & Cryptographic Conformance (ESigA / ETSI EN 319 102-1)
+    // Signature Integrity and Cryptographic Conformance (ESigA / ETSI EN 319 102-1)
     let integrityCheck: SignatureComplianceCheck;
     if (!isUntampered || !isCryptValid) {
       integrityCheck = {
@@ -1463,17 +1662,15 @@ export async function verifyPdfSignatures(
         title: 'Signature Integrity & Conformance',
         status: 'failed',
         message: 'Signature verification failed: document was modified or hash digest mismatch.',
-        technicalDetails: 'Cryptographic digest over ByteRange does not match embedded messageDigest in authenticated attributes.',
+        technicalDetails: 'Cryptographic digest over ByteRange or RSA public-key signature verification failed.',
       };
-    } else if (isSelfSigned || (subFilter !== 'ETSI.CAdES.detached' && !hasSigningCertV2)) {
+    } else if (isUnanchoredSelfSigned) {
       integrityCheck = {
         id: 'signature_integrity',
         title: 'Signature Integrity & Conformance',
         status: 'indeterminate',
         message: 'At least one of the validated signatures of the document cannot be verified in a ESigA-compliant way.',
-        technicalDetails: isSelfSigned
-          ? 'Certificate is self-signed and not anchored in the Swiss Accreditation Service (SAS) or EU Trusted List.'
-          : 'Signature uses legacy adbe.pkcs7.detached without RFC 5035 CAdES signingCertificateV2 binding.',
+        technicalDetails: 'Certificate is self-signed and not anchored in the Swiss Accreditation Service (SAS) or EU Trusted List.',
       };
     } else {
       integrityCheck = {
@@ -1481,11 +1678,13 @@ export async function verifyPdfSignatures(
         title: 'Signature Integrity & Conformance',
         status: 'valid',
         message: 'All validated signatures of the document are verified in an ESigA-compliant way.',
-        technicalDetails: 'Cryptographic hash and CAdES signingCertificateV2 verified.',
+        technicalDetails: hasSigningCertV2
+          ? `Cryptographic ${digestAlgorithm} ByteRange hash, RSA signature, and CAdES signingCertificateV2 verified.`
+          : `Cryptographic ${digestAlgorithm} ByteRange hash and PKCS#7 RSA certificate chain verified.`,
       };
     }
 
-    // 2. Certificate Revocation Status
+    // Certificate Revocation Status
     let revocationCheck: SignatureComplianceCheck;
     if (!hasDssGlobal) {
       revocationCheck = {
@@ -1505,7 +1704,7 @@ export async function verifyPdfSignatures(
       };
     }
 
-    // 3. Timestamp Validity
+    // Timestamp Validity
     let timestampCheck: SignatureComplianceCheck;
     if (isTstInvalid) {
       timestampCheck = {
@@ -1535,7 +1734,7 @@ export async function verifyPdfSignatures(
       };
     }
 
-    // 4. Certificate Legitimacy & Key Usage
+    // Certificate Legitimacy and Key Usage
     let legitimacyCheck: SignatureComplianceCheck;
     if (illegalTimeStampingUsage) {
       legitimacyCheck = {
@@ -1545,7 +1744,7 @@ export async function verifyPdfSignatures(
         message: 'At least one of the certificates used for signatures in this document is not legitimate for this document type.',
         technicalDetails: 'Signer certificate illegally includes timeStamping Extended Key Usage (RFC 3161 Section 2.3 / ZertES violation).',
       };
-    } else if (isSelfSigned) {
+    } else if (isUnanchoredSelfSigned) {
       legitimacyCheck = {
         id: 'certificate_legitimacy',
         title: 'Certificate Legitimacy & Key Usage',
@@ -1577,7 +1776,9 @@ export async function verifyPdfSignatures(
       qualificationLevel = 'AES';
     }
 
-    const signingDate = dateMatch ? dateMatch[1] : '';
+    const formattedSigningTime = signingTimeObj
+      ? signingTimeObj.toLocaleString()
+      : (signingDateRaw || 'Unknown Date');
 
     results.push({
       signatureId: `sig_${matchIdx}`,
@@ -1585,12 +1786,13 @@ export async function verifyPdfSignatures(
       reason: reasonMatch ? reasonMatch[1] : undefined,
       location: locMatch ? locMatch[1] : undefined,
       contactInfo: contactMatch ? contactMatch[1] : undefined,
-      signingTimeFormatted: signingDate || 'Unknown Date',
+      signingTimeFormatted: formattedSigningTime,
       isDocumentUntampered: isUntampered,
       isCryptographicallyValid: isCryptValid,
       isCertExpired: isExpired,
       isSelfSigned: isSelfSigned,
       status,
+      isValid: status === 'valid',
       certificateSubject: certSubject,
       certificateIssuer: certIssuer,
       serialNumber: serialNum,
@@ -1598,7 +1800,12 @@ export async function verifyPdfSignatures(
       validTo: validToStr,
       filter,
       subFilter,
+      digestAlgorithm,
       byteRange: [b1, l1, b2, l2],
+      coversEntireFile,
+      isCertificationSignature,
+      transformMethod,
+      docMdpPermissionLevel,
       padesProfile,
       hasSigningCertificateV2: hasSigningCertV2,
       hasTimestampToken: hasTst,
