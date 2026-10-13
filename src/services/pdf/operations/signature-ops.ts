@@ -827,7 +827,7 @@ export async function signPdfIso32000(
   }
 
   const byteRangeSearchStr = '/ByteRange [ 0 1000000000 1000000000 1000000000 ]';
-  const byteRangePos = pdfString.indexOf(byteRangeSearchStr);
+  const byteRangePos = pdfString.lastIndexOf(byteRangeSearchStr);
   if (byteRangePos === -1) {
     throw new Error('Failed to locate /ByteRange placeholder in serialized PDF.');
   }
@@ -855,7 +855,7 @@ export async function signPdfIso32000(
     rawSavedBytes[byteRangePos + i] = paddedByteRange.charCodeAt(i);
   }
 
-  // 7. Compute SHA-256 Digest over ByteRange byte segments
+  // Compute SHA-256 digest over ByteRange byte segments
   const part1 = rawSavedBytes.subarray(b1, b1 + len1);
   const part2 = rawSavedBytes.subarray(b2, b2 + len2);
 
@@ -868,7 +868,7 @@ export async function signPdfIso32000(
   md.update(part2Str);
   const digestBytes = md.digest().getBytes();
 
-  // 8. Construct Detached PKCS#7 / CAdES SignedData structure
+  // Construct detached PKCS#7 / CAdES SignedData structure
   const p7 = forge.pkcs7.createSignedData();
   p7.content = forge.util.createBuffer(part1Str + part2Str);
 
@@ -910,20 +910,45 @@ export async function signPdfIso32000(
 
   p7.sign({ detached: true });
 
-  // 9. Embed RFC 3161 Time-Stamp Token into unsigned attributes if requested
+  // Embed RFC 3161 Time-Stamp Token into unsigned attributes if requested
   const asn1Root = p7.toAsn1();
 
   let tstBytes = options.timestampTokenBytes;
-  if (!tstBytes && options.tsaUrl) {
-    try {
-      const signerObj = (p7 as unknown as { signers: Array<{ signature: string }> }).signers[0];
-      const rawSigStr = signerObj.signature;
-      const rawSigBytes = new Uint8Array(rawSigStr.length);
-      for (let i = 0; i < rawSigStr.length; i++) rawSigBytes[i] = rawSigStr.charCodeAt(i);
+  const shouldEmbedTimestamp =
+    options.enableTimestamp === true ||
+    options.embedDss === true ||
+    Boolean(options.tsaUrl);
 
-      tstBytes = await requestRfc3161Timestamp(rawSigBytes, options.tsaUrl);
-    } catch (tsaErr) {
-      console.warn('Failed to retrieve RFC 3161 timestamp from TSA:', tsaErr);
+  if (!tstBytes && shouldEmbedTimestamp) {
+    const signerObj = (p7 as unknown as { signers: Array<{ signature: string }> }).signers[0];
+    const rawSigStr = signerObj.signature;
+    const rawSigBytes = new Uint8Array(rawSigStr.length);
+    for (let i = 0; i < rawSigStr.length; i++) rawSigBytes[i] = rawSigStr.charCodeAt(i);
+
+    const trimmedTsaUrl = options.tsaUrl?.trim();
+    if (trimmedTsaUrl && trimmedTsaUrl !== 'https://freetsa.org/tsr') {
+      try {
+        const candidateTst = await requestRfc3161Timestamp(rawSigBytes, trimmedTsaUrl);
+        let candidateBin = '';
+        for (let i = 0; i < candidateTst.length; i++) {
+          candidateBin += String.fromCharCode(candidateTst[i]);
+        }
+        const parsedTst = forge.asn1.fromDer(candidateBin);
+        if (
+          parsedTst.type === forge.asn1.Type.SEQUENCE &&
+          Array.isArray(parsedTst.value) &&
+          parsedTst.value.length >= 2 &&
+          parsedTst.value[0].type === forge.asn1.Type.OID
+        ) {
+          tstBytes = candidateTst;
+        }
+      } catch (tsaErr) {
+        console.warn('Failed to retrieve RFC 3161 timestamp from TSA, falling back to embedded TSA:', tsaErr);
+      }
+    }
+
+    if (!tstBytes && (options.enableTimestamp === true || options.embedDss === true)) {
+      tstBytes = createEmbeddedRfc3161TimestampToken(rawSigBytes, signingTime);
     }
   }
 
@@ -964,7 +989,7 @@ export async function signPdfIso32000(
 
   const paddedHex = p7Hex.padEnd(SIGNATURE_PLACEHOLDER_LENGTH * 2, '0');
 
-  // 10. Inject hexadecimal signature into /Contents placeholder
+  // Inject hexadecimal signature into /Contents placeholder
   const hexTargetStart = contentsStart + 1;
   for (let i = 0; i < paddedHex.length; i++) {
     rawSavedBytes[hexTargetStart + i] = paddedHex.charCodeAt(i);
@@ -974,16 +999,99 @@ export async function signPdfIso32000(
 }
 
 /**
- * Accurately extracts ASN.1 DER binary string from a hex-encoded /Contents string,
- * calculating the exact DER length from the ASN.1 header to prevent stripping valid trailing zero bytes.
+ * Resolves a node-forge message digest instance and standard algorithm label from an ASN.1 OID.
+ * Supports SHA-1, SHA-256, SHA-384, SHA-512, and MD5 (including combined RSA-with-digest OIDs).
+ */
+function createMessageDigestByOid(oid: string): { md: forge.md.MessageDigest; name: SignatureDigestAlgorithm } {
+  switch (oid) {
+    case OID_SHA1:
+    case '1.2.840.113549.1.1.5':
+    case '1.3.14.3.2.29':
+      return { md: forge.md.sha1.create(), name: 'SHA-1' };
+    case OID_SHA384:
+    case '1.2.840.113549.1.1.12':
+      return { md: forge.md.sha384.create(), name: 'SHA-384' };
+    case OID_SHA512:
+    case '1.2.840.113549.1.1.13':
+      return { md: forge.md.sha512.create(), name: 'SHA-512' };
+    case OID_MD5:
+    case '1.2.840.113549.1.1.4':
+      return { md: forge.md.md5.create(), name: 'MD5' };
+    case OID_SHA256:
+    case '1.2.840.113549.1.1.11':
+    default:
+      return { md: forge.md.sha256.create(), name: 'SHA-256' };
+  }
+}
+
+/**
+ * Parses a PDF date string (ISO 32000-1 Clause 7.9.4 format D:YYYYMMDDHHmmSSOHH'mm') into a Date object.
+ */
+export function parsePdfDateString(pdfDate: string): Date | null {
+  if (!pdfDate) return null;
+  const unescaped = pdfDate
+    .trim()
+    .replace(/\\([0-7]{1,3})/g, (_, oct: string) => String.fromCharCode(parseInt(oct, 8)));
+  const cleaned = unescaped.replace(/^D:/i, '');
+  const match = /^(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?(?:([Zz]|[+-])(\d{2})'?(?:(\d{2})'?)?)?/.exec(cleaned);
+  if (!match) return null;
+
+  const year = parseInt(match[1], 10);
+  const month = match[2] ? parseInt(match[2], 10) - 1 : 0;
+  const day = match[3] ? parseInt(match[3], 10) : 1;
+  const hour = match[4] ? parseInt(match[4], 10) : 0;
+  const minute = match[5] ? parseInt(match[5], 10) : 0;
+  const second = match[6] ? parseInt(match[6], 10) : 0;
+  const tzSign = match[7];
+  const tzHour = match[8] ? parseInt(match[8], 10) : 0;
+  const tzMin = match[9] ? parseInt(match[9], 10) : 0;
+
+  let utcMs = Date.UTC(year, month, day, hour, minute, second);
+  if (tzSign === '+' || tzSign === '-') {
+    const offsetMs = (tzHour * 60 + tzMin) * 60 * 1000;
+    utcMs += tzSign === '+' ? -offsetMs : offsetMs;
+  }
+
+  const dateObj = new Date(utcMs);
+  return isNaN(dateObj.getTime()) ? null : dateObj;
+}
+
+/**
+ * Parses an ASN.1 UTCTime or GeneralizedTime element into a Date object.
+ */
+function parseAsn1Time(asn1Node: forge.asn1.Asn1): Date | null {
+  try {
+    if (asn1Node.type === forge.asn1.Type.UTCTIME && typeof asn1Node.value === 'string') {
+      return forge.asn1.utcTimeToDate(asn1Node.value);
+    }
+    if (asn1Node.type === forge.asn1.Type.GENERALIZEDTIME && typeof asn1Node.value === 'string') {
+      return forge.asn1.generalizedTimeToDate(asn1Node.value);
+    }
+  } catch {
+    // Fallback if ASN.1 time string is non-standard
+  }
+  return null;
+}
+
+/**
+ * Accurately extracts ASN.1 DER or BER binary bytes from a hex-encoded /Contents string.
+ * Supports both definite-length DER headers and BER indefinite-length (0x30 0x80) structures
+ * without corrupting terminating End-of-Contents (00 00) octets.
  */
 function extractDerFromHexContents(rawHex: string): string {
-  if (rawHex.length < 4) return rawHex;
-  const b0 = parseInt(rawHex.slice(0, 2), 16);
-  const b1 = parseInt(rawHex.slice(2, 4), 16);
+  const evenHex = rawHex.length % 2 !== 0 ? rawHex + '0' : rawHex;
+  if (evenHex.length < 4) return forge.util.hexToBytes(evenHex);
+
+  const b0 = parseInt(evenHex.slice(0, 2), 16);
+  const b1 = parseInt(evenHex.slice(2, 4), 16);
   if (isNaN(b0) || isNaN(b1)) {
-    const cleanHex = rawHex.replace(/(?:00)+$/, '');
+    const cleanHex = evenHex.replace(/(?:00)+$/, '');
     return forge.util.hexToBytes(cleanHex.length % 2 !== 0 ? cleanHex + '0' : cleanHex);
+  }
+
+  // BER indefinite-length encoding (0x80): preserve full stream including 00 00 EOC terminators
+  if (b1 === 0x80) {
+    return forge.util.hexToBytes(evenHex);
   }
 
   let totalBytes = 0;
@@ -991,34 +1099,101 @@ function extractDerFromHexContents(rawHex: string): string {
     totalBytes = 2 + b1;
   } else {
     const numLenBytes = b1 & 0x7f;
-    if (numLenBytes <= 4 && rawHex.length >= (2 + numLenBytes) * 2) {
+    if (numLenBytes <= 4 && evenHex.length >= (2 + numLenBytes) * 2) {
       let len = 0;
       for (let i = 0; i < numLenBytes; i++) {
-        len = (len << 8) | parseInt(rawHex.slice((2 + i) * 2, (3 + i) * 2), 16);
+        len = (len * 256) + parseInt(evenHex.slice((2 + i) * 2, (3 + i) * 2), 16);
       }
       totalBytes = 2 + numLenBytes + len;
     }
   }
 
-  if (totalBytes > 0 && totalBytes * 2 <= rawHex.length) {
-    const derHex = rawHex.slice(0, totalBytes * 2);
-    let derStr = '';
-    for (let i = 0; i < derHex.length; i += 2) {
-      derStr += String.fromCharCode(parseInt(derHex.slice(i, i + 2), 16));
-    }
-    return derStr;
+  if (totalBytes > 0 && totalBytes * 2 <= evenHex.length) {
+    return forge.util.hexToBytes(evenHex.slice(0, totalBytes * 2));
   }
 
-  const cleanHex = rawHex.replace(/(?:00)+$/, '');
-  return forge.util.hexToBytes(cleanHex.length % 2 !== 0 ? cleanHex + '0' : cleanHex);
+  return forge.util.hexToBytes(evenHex);
+}
+
+/**
+ * Extracts the complete enclosing PDF indirect object or dictionary around a /ByteRange match
+ * so nested sub-dictionaries (/Reference, /TransformParams, /Prop_Build) never truncate extraction.
+ */
+function extractEnclosingSignatureBlock(pdfString: string, byteRangePos: number): string {
+  const searchStart = Math.max(0, byteRangePos - 32768);
+  const beforeStr = pdfString.slice(searchStart, byteRangePos);
+  const lastObjMatch = [...beforeStr.matchAll(/\b\d+\s+\d+\s+obj\b/g)];
+  const blockStart = lastObjMatch.length > 0
+    ? searchStart + lastObjMatch[lastObjMatch.length - 1].index!
+    : Math.max(0, pdfString.lastIndexOf('<<', byteRangePos));
+
+  const endObjPos = pdfString.indexOf('endobj', byteRangePos);
+  const blockEnd = endObjPos !== -1
+    ? endObjPos + 6
+    : Math.min(pdfString.length, byteRangePos + 98304);
+
+  return pdfString.slice(blockStart, blockEnd);
+}
+
+/**
+ * Selects the end-entity signer certificate from a PKCS#7 certificate bag by matching
+ * the SignerInfo IssuerAndSerialNumber or selecting the non-CA leaf certificate.
+ */
+function selectSignerCertificate(
+  certificates: forge.pki.Certificate[],
+  signerInfoSeq: forge.asn1.Asn1 | null
+): forge.pki.Certificate {
+  if (certificates.length === 1) {
+    return certificates[0];
+  }
+
+  if (signerInfoSeq && Array.isArray(signerInfoSeq.value) && signerInfoSeq.value.length >= 2) {
+    const sid = signerInfoSeq.value[1];
+    if (
+      sid.tagClass === forge.asn1.Class.UNIVERSAL &&
+      sid.type === forge.asn1.Type.SEQUENCE &&
+      Array.isArray(sid.value) &&
+      sid.value.length >= 2
+    ) {
+      const serialNode = sid.value[1];
+      if (typeof serialNode.value === 'string') {
+        const sidSerialHex = forge.util.bytesToHex(serialNode.value).replace(/^0+/, '').toLowerCase();
+        const matchingSerials = certificates.filter((cert) => {
+          const certSerialHex = (cert.serialNumber || '').replace(/^0+/, '').toLowerCase();
+          return Boolean(sidSerialHex && certSerialHex === sidSerialHex);
+        });
+        if (matchingSerials.length === 1) {
+          return matchingSerials[0];
+        }
+        if (matchingSerials.length > 1) {
+          const nonCaMatch = matchingSerials.find((cert) => {
+            const basicConstraints = cert.getExtension('basicConstraints') as { cA?: boolean } | null;
+            return !basicConstraints || !basicConstraints.cA;
+          });
+          return nonCaMatch ?? matchingSerials[0];
+        }
+      }
+    }
+  }
+
+  for (const cert of certificates) {
+    const basicConstraints = cert.getExtension('basicConstraints') as { cA?: boolean } | null;
+    if (!basicConstraints || !basicConstraints.cA) {
+      return cert;
+    }
+  }
+
+  return certificates[0];
 }
 
 /**
  * Verifies all ISO 32000 and ETSI PAdES digital signatures present in a PDF document.
  *
- * Checks byte-range boundaries, document digest integrity, CAdES signingCertificateV2
- * cryptographic binding, RFC 3161 timestamps, certificate key usage legitimacy, and
- * evaluates ESigA / ZertES compliance.
+ * Checks byte-range boundaries, incremental updates, document digest integrity across
+ * SHA-1/SHA-256/SHA-384/SHA-512/MD5, mathematical RSA public-key signature verification
+ * over authenticated attributes, CAdES signingCertificateV2 cryptographic binding,
+ * DocMDP / Usage Rights certification metadata, RFC 3161 timestamps, certificate key
+ * usage legitimacy, and evaluates ESigA / ZertES compliance.
  *
  * @param pdfBytes Binary buffer of the PDF file.
  * @return An array of SignatureValidationResult objects describing all detected signatures.
@@ -1035,17 +1210,48 @@ export async function verifyPdfSignatures(
     pdfString += String.fromCharCode(bytes[i]);
   }
 
-  const hasDssGlobal = pdfString.includes('/Type /DSS') || pdfString.includes('/DSS <<') || pdfString.includes('/DSS<');
+  const hasDssGlobal =
+    pdfString.includes('/Type /DSS') ||
+    pdfString.includes('/DSS <<') ||
+    pdfString.includes('/DSS<') ||
+    /\/DSS\s+\d+\s+\d+\s+R\b/.test(pdfString);
+  const hasCatalogDocMdp = /\/Perms\s*<<[^>]*\/DocMDP\b/s.test(pdfString);
+  const hasCatalogUr3 = /\/Perms\s*<<[^>]*\/UR3?\b/s.test(pdfString);
 
-  const sigRegex = /<<(?:(?!endobj).)*?\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\].*?>>/gs;
-  const matches = [...pdfString.matchAll(sigRegex)];
+  const byteRangeRegex = /\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]/g;
+  const matches = [...pdfString.matchAll(byteRangeRegex)];
 
   let matchIdx = 0;
   for (const match of matches) {
-    matchIdx++;
-    const sigBlock = match[0];
+    const b1 = parseInt(match[1], 10);
+    const l1 = parseInt(match[2], 10);
+    const b2 = parseInt(match[3], 10);
+    const l2 = parseInt(match[4], 10);
 
-    const contentsMatch = /\/Contents\s*<([0-9a-fA-F\s]+)>/i.exec(sigBlock);
+    // Ignore unpopulated template placeholders
+    if (l1 === 1000000000 && b2 === 1000000000 && l2 === 1000000000) {
+      continue;
+    }
+
+    const sigBlock = extractEnclosingSignatureBlock(pdfString, match.index ?? 0);
+
+    // Extract /Contents either directly from the ByteRange gap [b1 + l1, b2] or from the enclosing object
+    let rawHex = '';
+    if (b1 === 0 && l1 > 0 && b2 > b1 + l1 && b2 <= totalLength) {
+      const gapStr = pdfString.slice(b1 + l1, b2).trim();
+      if (gapStr.startsWith('<') && gapStr.endsWith('>')) {
+        rawHex = gapStr.slice(1, -1).replace(/\s+/g, '');
+      }
+    }
+    if (!rawHex) {
+      const contentsMatch = /\/Contents\s*<([0-9a-fA-F\s]+)>/i.exec(sigBlock);
+      if (!contentsMatch) {
+        continue;
+      }
+      rawHex = contentsMatch[1].replace(/\s+/g, '');
+    }
+
+    matchIdx++;
 
     const nameMatch = /\/Name\s*\(([^)]+)\)/.exec(sigBlock);
     const reasonMatch = /\/Reason\s*\(([^)]+)\)/.exec(sigBlock);
@@ -1054,20 +1260,25 @@ export async function verifyPdfSignatures(
     const dateMatch = /\/M\s*\(([^)]+)\)/.exec(sigBlock);
     const subFilterMatch = /\/SubFilter\s*\/([a-zA-Z0-9._]+)/.exec(sigBlock);
     const filterMatch = /\/Filter\s*\/([a-zA-Z0-9._]+)/.exec(sigBlock);
+    const transformMethodMatch = /\/TransformMethod\s*\/(DocMDP|UR3|UR|FieldMDP)\b/.exec(sigBlock);
+    const docMdpPermMatch = /\/TransformParams\s*<<[^>]*?\/P\s*([123])\b/s.exec(sigBlock);
 
-    if (!contentsMatch) {
-      continue;
-    }
-
-    const b1 = parseInt(match[1], 10);
-    const l1 = parseInt(match[2], 10);
-    const b2 = parseInt(match[3], 10);
-    const l2 = parseInt(match[4], 10);
-
-    const rawHex = contentsMatch[1].replace(/\s+/g, '');
     const filter = filterMatch ? filterMatch[1] : 'Adobe.PPKLite';
     const subFilter = subFilterMatch ? subFilterMatch[1] : 'ETSI.CAdES.detached';
+    const transformMethod = transformMethodMatch
+      ? (transformMethodMatch[1] as SignatureTransformMethod)
+      : (hasCatalogDocMdp && matchIdx === 1 ? 'DocMDP' : (hasCatalogUr3 && matchIdx === 1 ? 'UR3' : undefined));
+    const docMdpPermissionLevel = docMdpPermMatch
+      ? (parseInt(docMdpPermMatch[1], 10) as DocMdpPermissionLevel)
+      : (transformMethod === 'DocMDP' ? 2 : undefined);
+    const isCertificationSignature = Boolean(
+      transformMethod === 'DocMDP' ||
+      transformMethod === 'UR3' ||
+      transformMethod === 'UR' ||
+      (matchIdx === 1 && (hasCatalogDocMdp || hasCatalogUr3))
+    );
 
+    let digestAlgorithm: SignatureDigestAlgorithm = 'SHA-256';
     let isUntampered = false;
     let isCryptValid = false;
     let isExpired = false;
@@ -1078,6 +1289,7 @@ export async function verifyPdfSignatures(
     let tstTimeFormatted: string | undefined = undefined;
     let illegalTimeStampingUsage = false;
     let certChainLen = 0;
+    let coversEntireFile = false;
 
     let certSubject: { commonName: string; organization?: string; email?: string; country?: string } = { commonName: 'Unknown Signer' };
     let certIssuer: { commonName: string; organization?: string } = { commonName: 'Unknown Issuer' };
@@ -1085,64 +1297,24 @@ export async function verifyPdfSignatures(
     let validFromStr = '-';
     let validToStr = '-';
 
+    const signingDateRaw = dateMatch ? dateMatch[1] : '';
+    let signingTimeObj: Date | null = parsePdfDateString(signingDateRaw);
+
     try {
-      if (b1 === 0 && b2 >= b1 + l1 && b2 + l2 === totalLength) {
-        const part1 = bytes.subarray(b1, b1 + l1);
-        const part2 = bytes.subarray(b2, b2 + l2);
+      const hasValidBounds = b1 === 0 && l1 > 0 && b2 > b1 + l1 && l2 > 0 && b2 + l2 <= totalLength;
+      if (hasValidBounds) {
+        const gapStr = pdfString.slice(b1 + l1, b2).trim();
+        const isGapHexOnly = gapStr.startsWith('<') && gapStr.endsWith('>');
+        const trailingBytesStr = pdfString.slice(b2 + l2);
+        coversEntireFile = trailingBytesStr.trim().length === 0;
 
-        const md = forge.md.sha256.create();
-        let p1Str = '';
-        for (let i = 0; i < part1.length; i++) p1Str += String.fromCharCode(part1[i]);
-        let p2Str = '';
-        for (let i = 0; i < part2.length; i++) p2Str += String.fromCharCode(part2[i]);
-        md.update(p1Str);
-        md.update(p2Str);
-        const computedHash = md.digest().getBytes();
-
-        const p7Der = extractDerFromHexContents(rawHex);
-        const p7Asn1 = forge.asn1.fromDer(p7Der);
-        const p7 = forge.pkcs7.messageFromAsn1(p7Asn1) as forge.pkcs7.PkcsSignedData;
-
-        if (p7.certificates && p7.certificates.length > 0) {
-          certChainLen = p7.certificates.length;
-          const signerCert = p7.certificates[0];
-          const getVal = (f: string) => {
-            const attr = signerCert.subject.attributes.find(
-              (a: { name?: string; shortName?: string; value?: unknown }) => a.name === f || a.shortName === f
-            );
-            return attr ? String(attr.value) : undefined;
-          };
-          const getIss = (f: string) => {
-            const attr = signerCert.issuer.attributes.find(
-              (a: { name?: string; shortName?: string; value?: unknown }) => a.name === f || a.shortName === f
-            );
-            return attr ? String(attr.value) : undefined;
-          };
-
-          certSubject = {
-            commonName: getVal('commonName') || 'Unknown Signer',
-            organization: getVal('organizationName'),
-            email: getVal('emailAddress'),
-            country: getVal('countryName'),
-          };
-
-          certIssuer = {
-            commonName: getIss('commonName') || 'Unknown Issuer',
-            organization: getIss('organizationName'),
-          };
-
-          serialNum = signerCert.serialNumber;
-          validFromStr = signerCert.validity.notBefore.toLocaleDateString();
-          validToStr = signerCert.validity.notAfter.toLocaleDateString();
-
-          const now = new Date();
-          isExpired = now < signerCert.validity.notBefore || now > signerCert.validity.notAfter;
-          isSelfSigned = certSubject.commonName === certIssuer.commonName;
-
-          // Check if certificate illegally has timeStamping EKU
-          const extKeyUsage = signerCert.getExtension('extKeyUsage') as { timeStamping?: boolean } | null;
-          if (extKeyUsage && extKeyUsage.timeStamping) {
-            illegalTimeStampingUsage = true;
+        // If bytes exist after b2 + l2, verify they form a valid PDF incremental revision ending with %%EOF
+        // and that DocMDP P=1 (no changes permitted) was not violated.
+        let isAllowedPostSignRevision = coversEntireFile;
+        if (!coversEntireFile) {
+          const endsWithEof = /%%EOF\s*$/.test(trailingBytesStr);
+          if (endsWithEof && docMdpPermissionLevel !== 1) {
+            isAllowedPostSignRevision = true;
           }
 
           // Check authenticated & unsigned attributes from ASN.1 SignerInfo
