@@ -489,3 +489,498 @@ function mergeDssCertificates(pdfDoc: PDFDocument, certChain: forge.pki.Certific
   catalog.set(PDFName.of('DSS'), context.register(dssDict));
 }
 
+/**
+ * Computes the visual signature layout shared by the page stamp and widget appearance.
+ *
+ * @param visual Visual signature placement options.
+ * @param signerName Trimmed signer display name.
+ * @param graphicSize Intrinsic size of the embedded graphic, or null when absent.
+ * @return Graphic box and name placement relative to the box origin.
+ */
+function layoutVisualSignature(
+  visual: VisualSignatureOptions,
+  signerName: string,
+  graphicSize: { width: number; height: number } | null
+): VisualSignatureLayout {
+  const { width: boxWidth, height: boxHeight } = visual;
+  const showFullName = Boolean(visual.showTextDetails && signerName.length > 0);
+  const isComposite = Boolean(visual.isCompositeAppearance);
+  const fontSize = Math.max(8, Math.min(11, Math.round(boxHeight * 0.18 * 10) / 10));
+  const nameAreaHeight = showFullName && !isComposite ? fontSize + 6 : 0;
+
+  let graphic: VisualSignatureLayout['graphic'] = null;
+  if (graphicSize) {
+    const availW = Math.max(10, boxWidth - 8);
+    const availH = Math.max(10, boxHeight - nameAreaHeight - 4);
+    const aspect = graphicSize.height > 0 ? graphicSize.width / graphicSize.height : 3;
+    let width = availW;
+    let height = width / aspect;
+    if (height > availH) {
+      height = availH;
+      width = height * aspect;
+    }
+    graphic = {
+      x: (boxWidth - width) / 2,
+      y: nameAreaHeight + (availH - height) / 2,
+      width,
+      height,
+    };
+  }
+
+  const renderName = (showFullName && !isComposite) || (!graphic && signerName.length > 0);
+  const name = renderName
+    ? { y: graphic ? 3 : (boxHeight - fontSize) / 2, fontSize, maxWidth: Math.max(10, boxWidth - 6) }
+    : null;
+
+  return { graphic, name };
+}
+
+/**
+ * Stamps the visual signature directly onto the page content (first revision only).
+ *
+ * @param pdfDoc The pdf-lib document.
+ * @param page Target page.
+ * @param visual Visual signature placement options.
+ * @param signerName Trimmed signer display name.
+ */
+async function drawVisualSignatureOnPage(
+  pdfDoc: PDFDocument,
+  page: PDFPage,
+  visual: VisualSignatureOptions,
+  signerName: string
+): Promise<void> {
+  const graphic = await embedSignatureGraphic(pdfDoc, visual.graphicDataUrl);
+  const layout = layoutVisualSignature(visual, signerName, graphic);
+
+  if (graphic && layout.graphic) {
+    page.drawImage(graphic, {
+      x: visual.x + layout.graphic.x,
+      y: visual.y + layout.graphic.y,
+      width: layout.graphic.width,
+      height: layout.graphic.height,
+    });
+  }
+
+  if (layout.name) {
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const textWidth = font.widthOfTextAtSize(signerName, layout.name.fontSize);
+    page.drawText(signerName, {
+      x: visual.x + centreTextOffset(visual.width, textWidth, layout.name.maxWidth),
+      y: visual.y + layout.name.y,
+      size: layout.name.fontSize,
+      font,
+      color: rgb(...SIGNATURE_TEXT_RGB),
+      maxWidth: layout.name.maxWidth,
+    });
+  }
+}
+
+/**
+ * Builds a Form XObject carrying the visual signature for the widget /AP /N entry, so
+ * that incremental revisions render a visible signature without touching page content.
+ *
+ * @param pdfDoc The pdf-lib document.
+ * @param visual Visual signature placement options.
+ * @param signerName Trimmed signer display name.
+ * @return Reference to the registered appearance stream, or null when nothing is drawn.
+ */
+async function buildSignatureAppearanceStream(
+  pdfDoc: PDFDocument,
+  visual: VisualSignatureOptions,
+  signerName: string
+): Promise<PDFRef | null> {
+  const { context } = pdfDoc;
+  const graphic = await embedSignatureGraphic(pdfDoc, visual.graphicDataUrl);
+  const layout = layoutVisualSignature(visual, signerName, graphic);
+
+  const operators: string[] = [];
+  const resources = context.obj({});
+
+  if (graphic && layout.graphic) {
+    const box = layout.graphic;
+    operators.push(
+      'q',
+      `${formatPdfNumber(box.width)} 0 0 ${formatPdfNumber(box.height)} ${formatPdfNumber(box.x)} ${formatPdfNumber(box.y)} cm`,
+      '/SigGraphic Do',
+      'Q'
+    );
+    resources.set(PDFName.of('XObject'), context.obj({ SigGraphic: graphic.ref }));
+  }
+
+  if (layout.name) {
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const naturalWidth = font.widthOfTextAtSize(signerName, layout.name.fontSize);
+    // Shrink to fit instead of wrapping, since the appearance box is a fixed BBox.
+    const fontSize = naturalWidth > layout.name.maxWidth
+      ? (layout.name.fontSize * layout.name.maxWidth) / naturalWidth
+      : layout.name.fontSize;
+    const fittedWidth = font.widthOfTextAtSize(signerName, fontSize);
+    const [r, g, b] = SIGNATURE_TEXT_RGB;
+    operators.push(
+      'BT',
+      `${r} ${g} ${b} rg`,
+      `/SigFont ${formatPdfNumber(fontSize)} Tf`,
+      `${formatPdfNumber(centreTextOffset(visual.width, fittedWidth, layout.name.maxWidth))} ${formatPdfNumber(layout.name.y)} Td`,
+      `${font.encodeText(signerName).toString()} Tj`,
+      'ET'
+    );
+    resources.set(PDFName.of('Font'), context.obj({ SigFont: font.ref }));
+  }
+
+  if (operators.length === 0) {
+    return null;
+  }
+
+  const appearance = context.stream(operators.join('\n'), {
+    Type: 'XObject',
+    Subtype: 'Form',
+    BBox: [0, 0, visual.width, visual.height],
+    Resources: resources,
+  });
+  return context.register(appearance);
+}
+
+/**
+ * Embeds a PNG data URL signature graphic, logging and returning null on failure.
+ *
+ * @param pdfDoc The pdf-lib document.
+ * @param graphicDataUrl Optional PNG data URL.
+ * @return The embedded image, or null when absent or invalid.
+ */
+async function embedSignatureGraphic(
+  pdfDoc: PDFDocument,
+  graphicDataUrl: string | undefined
+): Promise<PDFImage | null> {
+  const prefix = 'data:image/png;base64,';
+  if (!graphicDataUrl || !graphicDataUrl.startsWith(prefix)) {
+    return null;
+  }
+  try {
+    const imgBytes = Uint8Array.from(atob(graphicDataUrl.slice(prefix.length)), (c) => c.charCodeAt(0));
+    return await pdfDoc.embedPng(imgBytes);
+  } catch (err) {
+    console.warn('Failed to embed visual signature graphic:', err);
+    return null;
+  }
+}
+
+/**
+ * Serialises new and modified objects after the original bytes, followed by a cross-reference
+ * section chained through /Prev. A cross-reference stream is emitted when the previous section
+ * is itself a stream, otherwise a classic xref table is written (ISO 32000-1 Clause 7.5.8.4).
+ *
+ * @param originalBytes Original PDF bytes, copied verbatim.
+ * @param context The pdf-lib object context containing all objects.
+ * @param rootRef Catalog reference for the new trailer.
+ * @param firstNewObjectNumber Objects at or above this number were created in this revision.
+ * @param modifiedObjectNumbers Existing objects mutated in this revision.
+ * @param encryption Security handler applied to appended objects of encrypted documents.
+ * @return The complete PDF bytes including the incremental update.
+ */
+function serialiseIncrementalUpdate(
+  originalBytes: Uint8Array,
+  context: PDFContext,
+  rootRef: PDFRef,
+  firstNewObjectNumber: number,
+  modifiedObjectNumbers: Set<number>,
+  encryption?: PdfEncryptionContext
+): Uint8Array {
+  const prevXrefOffset = readLastStartxrefOffset(originalBytes);
+  const previousIsXrefStream = !bytesStartWithToken(originalBytes, prevXrefOffset, 'xref');
+
+  const objects = context
+    .enumerateIndirectObjects()
+    .filter(([ref]) => ref.objectNumber >= firstNewObjectNumber || modifiedObjectNumbers.has(ref.objectNumber))
+    .sort(([a], [b]) => a.objectNumber - b.objectNumber);
+
+  const chunks: Uint8Array[] = [];
+  let offset = originalBytes.length;
+  const write = (chunk: Uint8Array): void => {
+    chunks.push(chunk);
+    offset += chunk.length;
+  };
+  const writeIndirectObject = (ref: PDFRef, object: PDFObject): void => {
+    write(fromBinaryString(`${ref.objectNumber} ${ref.generationNumber} obj\n`));
+    write(serialisePdfObject(object));
+    write(fromBinaryString('\nendobj\n'));
+  };
+
+  // Guarantee the revision starts on a fresh line even if the original lacks a trailing EOL.
+  write(fromBinaryString('\n'));
+
+  const xrefEntries: Array<{ ref: PDFRef; offset: number }> = [];
+  for (const [ref, object] of objects) {
+    xrefEntries.push({ ref, offset });
+    writeIndirectObject(ref, encryption ? encryptPdfObject(object, ref, encryption, context) : object);
+  }
+
+  const trailerEntries: Record<string, PDFObject> = {
+    Root: rootRef,
+    Prev: PDFNumber.of(prevXrefOffset),
+  };
+  const { Info, ID, Encrypt } = context.trailerInfo;
+  if (Info) trailerEntries.Info = Info;
+  if (ID) trailerEntries.ID = ID;
+  if (Encrypt) trailerEntries.Encrypt = Encrypt;
+
+  const xrefOffset = offset;
+  if (previousIsXrefStream) {
+    const xrefRef = context.nextRef();
+    const xrefStream = PDFCrossRefStream.create(
+      context.obj({ ...trailerEntries, Type: PDFName.of('XRef'), Size: PDFNumber.of(xrefRef.objectNumber + 1) })
+    );
+    xrefEntries.push({ ref: xrefRef, offset: xrefOffset });
+    for (const entry of xrefEntries) {
+      xrefStream.addUncompressedEntry(entry.ref, entry.offset);
+    }
+    writeIndirectObject(xrefRef, xrefStream);
+  } else {
+    const trailerDict = context.obj({ ...trailerEntries, Size: PDFNumber.of(context.largestObjectNumber + 1) });
+    write(fromBinaryString(`${buildXrefTable(xrefEntries)}trailer\n${trailerDict.toString()}\n`));
+  }
+
+  write(fromBinaryString(`startxref\n${xrefOffset}\n%%EOF\n`));
+
+  const result = new Uint8Array(offset);
+  result.set(originalBytes, 0);
+  let cursor = originalBytes.length;
+  for (const chunk of chunks) {
+    result.set(chunk, cursor);
+    cursor += chunk.length;
+  }
+  return result;
+}
+
+/**
+ * Builds a classic cross-reference table grouped into contiguous subsections.
+ *
+ * @param entries Object references and byte offsets, in ascending object number order.
+ * @return The xref table text including the leading keyword.
+ */
+function buildXrefTable(entries: Array<{ ref: PDFRef; offset: number }>): string {
+  let table = 'xref\n';
+  let start = 0;
+  while (start < entries.length) {
+    let end = start;
+    while (
+      end + 1 < entries.length &&
+      entries[end + 1].ref.objectNumber === entries[end].ref.objectNumber + 1
+    ) {
+      end++;
+    }
+    table += `${entries[start].ref.objectNumber} ${end - start + 1}\n`;
+    for (let i = start; i <= end; i++) {
+      const { ref, offset } = entries[i];
+      // Each entry is exactly 20 bytes including the two-character end-of-line marker.
+      table += `${String(offset).padStart(10, '0')} ${String(ref.generationNumber).padStart(5, '0')} n \n`;
+    }
+    start = end + 1;
+  }
+  return table;
+}
+
+/**
+ * Reads the byte offset recorded by the final startxref keyword.
+ *
+ * @param pdfBytes Raw PDF bytes.
+ * @return The previous cross-reference section offset.
+ */
+function readLastStartxrefOffset(pdfBytes: Uint8Array): number {
+  const tail = toBinaryString(pdfBytes.subarray(Math.max(0, pdfBytes.length - STARTXREF_TAIL_SCAN_BYTES)));
+  const matches = [...tail.matchAll(/startxref\s+(\d+)/g)];
+  if (matches.length === 0) {
+    throw new Error('Cannot append an incremental signature revision because the document has no startxref entry.');
+  }
+  return parseInt(matches[matches.length - 1][1], 10);
+}
+
+/**
+ * Finds the highest object number declared anywhere in the file, combining indirect object
+ * headers with every trailer or cross-reference stream /Size entry (which covers objects
+ * stored inside object streams).
+ *
+ * @param pdfBytes Raw PDF bytes.
+ * @return The highest declared object number, or 0 when none is found.
+ */
+function readHighestDeclaredObjectNumber(pdfBytes: Uint8Array): number {
+  const pdfStr = toBinaryString(pdfBytes);
+  let highest = 0;
+  for (const match of pdfStr.matchAll(/(?:^|[^\d])(\d+)\s+\d+\s+obj\b/g)) {
+    highest = Math.max(highest, parseInt(match[1], 10));
+  }
+  for (const match of pdfStr.matchAll(/\/Size\s+(\d+)/g)) {
+    highest = Math.max(highest, parseInt(match[1], 10) - 1);
+  }
+  return highest;
+}
+
+/**
+ * Checks whether the bytes at an offset begin with an ASCII token, skipping PDF whitespace.
+ *
+ * @param bytes Raw bytes.
+ * @param offset Start offset.
+ * @param token ASCII token to match.
+ * @return True when the token is present.
+ */
+function bytesStartWithToken(bytes: Uint8Array, offset: number, token: string): boolean {
+  let cursor = offset;
+  while (cursor < bytes.length && isPdfWhitespace(bytes[cursor])) {
+    cursor++;
+  }
+  if (cursor + token.length > bytes.length) return false;
+  for (let i = 0; i < token.length; i++) {
+    if (bytes[cursor + i] !== token.charCodeAt(i)) return false;
+  }
+  return true;
+}
+
+/**
+ * Tests whether a byte is a PDF whitespace character (ISO 32000-1 Table 1).
+ *
+ * @param byte Byte value.
+ * @return True for NUL, TAB, LF, FF, CR, and SPACE.
+ */
+function isPdfWhitespace(byte: number): boolean {
+  return byte === 0x00 || byte === 0x09 || byte === 0x0a || byte === 0x0c || byte === 0x0d || byte === 0x20;
+}
+
+/**
+ * Serialises a pdf-lib object to its exact byte representation.
+ *
+ * @param object The object to serialise.
+ * @return The serialised bytes.
+ */
+function serialisePdfObject(object: PDFObject): Uint8Array {
+  const bytes = new Uint8Array(object.sizeInBytes());
+  object.copyBytesInto(bytes, 0);
+  return bytes;
+}
+
+/**
+ * Resolves the signer certificate chain, falling back to the leaf certificate.
+ *
+ * @param options Signing options.
+ * @return The certificate chain.
+ */
+function resolveCertificateChain(options: SignPdfOptions): forge.pki.Certificate[] {
+  return options.identity.certificateChain || [options.identity.certificate];
+}
+
+/**
+ * Resolves the trimmed signer name rendered in visual appearances.
+ *
+ * @param options Signing options.
+ * @return The display name, possibly empty.
+ */
+function resolveSignerDisplayName(options: SignPdfOptions): string {
+  return (options.signerName || options.identity.subject.commonName || '').trim();
+}
+
+/**
+ * Narrows a visual configuration to one large enough to render.
+ *
+ * @param visual Optional visual options.
+ * @return True when the box exceeds the minimum renderable size.
+ */
+function isRenderableVisual(visual: VisualSignatureOptions | undefined): visual is VisualSignatureOptions {
+  return Boolean(visual && visual.width > 10 && visual.height > 10);
+}
+
+/**
+ * Narrows an arbitrary value to a DocMDP permission level.
+ *
+ * @param value Candidate value.
+ * @return True for 1, 2, or 3.
+ */
+function isDocMdpPermissionLevel(value: unknown): value is DocMdpPermissionLevel {
+  return value === 1 || value === 2 || value === 3;
+}
+
+/**
+ * Normalises a possibly negative-sized rectangle into PDF [llx, lly, urx, ury] form.
+ *
+ * @param rect Rectangle in PDF points.
+ * @return The normalised rectangle.
+ */
+function normaliseRect(rect: { x: number; y: number; width: number; height: number }): PdfRect {
+  return [
+    Math.min(rect.x, rect.x + rect.width),
+    Math.min(rect.y, rect.y + rect.height),
+    Math.max(rect.x, rect.x + rect.width),
+    Math.max(rect.y, rect.y + rect.height),
+  ];
+}
+
+/**
+ * Clamps a page index into the valid range for a document.
+ *
+ * @param pageIndex Requested zero-based index.
+ * @param pageCount Total page count.
+ * @return The clamped index.
+ */
+function clampPageIndex(pageIndex: number, pageCount: number): number {
+  return Math.max(0, Math.min(pageIndex, pageCount - 1));
+}
+
+/**
+ * Computes the horizontal offset that centres text within a box, with a 3pt minimum inset.
+ *
+ * @param boxWidth Box width in points.
+ * @param textWidth Measured text width in points.
+ * @param maxWidth Maximum permitted text width in points.
+ * @return Left offset relative to the box origin.
+ */
+function centreTextOffset(boxWidth: number, textWidth: number, maxWidth: number): number {
+  return Math.max(3, (boxWidth - Math.min(maxWidth, textWidth)) / 2);
+}
+
+/**
+ * Formats a number for PDF content streams without exponent notation.
+ *
+ * @param value Numeric value.
+ * @return The formatted number.
+ */
+function formatPdfNumber(value: number): string {
+  return String(Number(value.toFixed(4)));
+}
+
+/**
+ * Computes a lowercase hex SHA-256 fingerprint of a binary string.
+ *
+ * @param binary Binary string (one byte per character).
+ * @return The hex digest.
+ */
+function sha256Hex(binary: string): string {
+  const md = forge.md.sha256.create();
+  md.update(binary);
+  return md.digest().toHex();
+}
+
+/**
+ * Converts bytes to a binary string (one byte per character).
+ *
+ * @param bytes Raw bytes.
+ * @return The binary string.
+ */
+function toBinaryString(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let result = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    result += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return result;
+}
+
+/**
+ * Converts a binary string (one byte per character) to bytes.
+ *
+ * @param binary Binary string.
+ * @return The raw bytes.
+ */
+function fromBinaryString(binary: string): Uint8Array {
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i) & 0xff;
+  }
+  return bytes;
+}
