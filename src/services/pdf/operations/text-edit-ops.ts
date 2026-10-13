@@ -1869,115 +1869,462 @@ function findLineTextObjects(
   const targetTop = line.baselineY + line.fontSize * 1.2;
   const { leftPtr, bottomPtr, rightPtr, topPtr } = engine.getBoundsScratchBuffer();
 
-  const countToUpdate = Math.min(survivingSegments.length, objectIndices.length);
-  for (let i = 0; i < countToUpdate; i++) {
-    const seg = survivingSegments[i];
-    const targetObjHandle = mod.FPDFPage_GetObject(pageHandle, objectIndices[i]);
-    const targetMatrix = targetObjHandle
-      ? getPageObjectMatrix(engine, mod, targetObjHandle)
-      : origMatrix;
-    const matrix: PdfMatrix = targetMatrix
-      ? { a: targetMatrix.a, b: targetMatrix.b, c: targetMatrix.c, d: targetMatrix.d, e: seg.originX, f: seg.originY }
-      : translationMatrix(seg.originX, seg.originY);
+  if (cropInfo.rotation === 0) {
+    for (let i = 0; i < objectCount; i++) {
+      if (matchedIndexSet.has(i)) continue;
+      const objHandle = mod.FPDFPage_GetObject(pageHandle, i);
+      if (!objHandle) continue;
+      if (mod.FPDFPageObj_GetType(objHandle) !== FPDF_PAGEOBJ_TEXT) continue;
 
-    setTextObjectByIndex(engine, mod, pageHandle, objectIndices[i], seg.text, matrix);
-  }
+      const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
+      if (!ok) continue;
 
-  if (objectIndices.length > survivingSegments.length) {
-    const surplusIndices = objectIndices.slice(survivingSegments.length);
-    removeTextObjectsByIndex(mod, pageHandle, surplusIndices);
-  }
+      const heapF32 = mod.pdfium.HEAPF32;
+      const objLeft = heapF32[leftPtr >> 2];
+      const objBottom = heapF32[bottomPtr >> 2];
+      const objRight = heapF32[rightPtr >> 2];
+      const objTop = heapF32[topPtr >> 2];
+      const objCenterY = (objBottom + objTop) / 2;
 
-  if (survivingSegments.length > objectIndices.length) {
-    let fontHandle = 0;
-    if (baseObjHandle && typeof mod.FPDFTextObj_GetFont === 'function') {
-      fontHandle = mod.FPDFTextObj_GetFont(baseObjHandle);
-    }
-    if (!fontHandle) {
-      fontHandle = findPageFontHandle(engine, mod, pageHandle, line.fontFamily, line.rawFontFamily);
-    }
-    if (!fontHandle && docHandle) {
-      const stdName = mapStandardFontName(line.fontFamily || 'Helvetica', line.fontWeight, line.fontStyle);
-      fontHandle = mod.FPDFText_LoadStandardFont(docHandle, stdName);
-    }
-    if (!fontHandle && docHandle) {
-      fontHandle = mod.FPDFText_LoadStandardFont(docHandle, 'Helvetica');
-    }
+      if (objCenterY < targetBottom || objCenterY > targetTop) continue;
 
-    const col = line.color || { r: 0, g: 0, b: 0, a: 255 };
-
-    if (typeof mod.FPDFPageObj_CreateTextObj === 'function' && docHandle && fontHandle) {
-      for (let i = objectIndices.length; i < survivingSegments.length; i++) {
-        const seg = survivingSegments[i];
-        const segFontSize = seg.fontSize || line.fontSize || 12;
-        const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, fontHandle, segFontSize);
-        if (textObjHandle) {
-          const textBuf = encodeUtf16Le(engine, seg.text);
-          try {
-            mod.FPDFText_SetText(textObjHandle, textBuf.ptr);
-            if (typeof mod.FPDFPageObj_SetFillColor === 'function') {
-              mod.FPDFPageObj_SetFillColor(textObjHandle, col.r, col.g, col.b, col.a);
-            }
-            const matrix: PdfMatrix = origMatrix
-              ? { a: origMatrix.a, b: origMatrix.b, c: origMatrix.c, d: origMatrix.d, e: seg.originX, f: seg.originY }
-              : translationMatrix(seg.originX, seg.originY);
-            setPageObjectMatrix(engine, mod, textObjHandle, matrix);
-            mod.FPDFPage_InsertObject(pageHandle, textObjHandle);
-          } finally {
-            textBuf.dispose();
-          }
-        }
+      const overlapWidth = Math.min(objRight, targetRight) - Math.max(objLeft, targetLeft);
+      if (overlapWidth >= Math.min(2, effectiveWidth * 0.25)) {
+        matchedIndexSet.add(i);
       }
     }
+  }
+
+  const results: LineTextObjectInfo[] = [];
+  for (const idx of matchedIndexSet) {
+    const objHandle = mod.FPDFPage_GetObject(pageHandle, idx);
+    if (!objHandle) continue;
+    const ok = mod.FPDFPageObj_GetBounds(objHandle, leftPtr, bottomPtr, rightPtr, topPtr);
+    const heapF32 = mod.pdfium.HEAPF32;
+    const objLeft = ok ? heapF32[leftPtr >> 2] : 0;
+    const objBottom = ok ? heapF32[bottomPtr >> 2] : 0;
+    const objRight = ok ? heapF32[rightPtr >> 2] : 0;
+    const objTop = ok ? heapF32[topPtr >> 2] : 0;
+    const matrix = getPageObjectMatrix(engine, mod, objHandle);
+
+    results.push({
+      index: idx,
+      handle: objHandle,
+      left: objLeft,
+      bottom: objBottom,
+      right: objRight,
+      top: objTop,
+      matrix,
+    });
+  }
+
+  results.sort((a, b) => a.left - b.left);
+  return results;
+}
+
+function assignTokenToLineObject(
+  token: LineCharToken,
+  lineObjects: LineTextObjectInfo[]
+): LineTextObjectInfo {
+  if (lineObjects.length === 1) return lineObjects[0];
+
+  const tLeft = token.charData.left;
+  const tRight = token.charData.right;
+  const tMidX = (tLeft + tRight) / 2;
+
+  let bestObj = lineObjects[0];
+  let bestOverlap = -1;
+  let bestDist = Infinity;
+
+  for (const obj of lineObjects) {
+    const overlap = Math.max(0, Math.min(tRight, obj.right) - Math.max(tLeft, obj.left));
+    const dist =
+      tMidX < obj.left
+        ? obj.left - tMidX
+        : tMidX > obj.right
+          ? tMidX - obj.right
+          : 0;
+
+    if (overlap > bestOverlap + 0.1 || (Math.abs(overlap - bestOverlap) <= 0.1 && dist < bestDist)) {
+      bestOverlap = overlap;
+      bestDist = dist;
+      bestObj = obj;
+    }
+  }
+
+  return bestObj;
+}
+
+function insertSurvivingSegmentObject(
+  engine: PdfiumEngine,
+  mod: ReturnType<PdfiumEngine['getModule']>,
+  docHandle: number,
+  pageHandle: number,
+  line: RedactTargetLine,
+  seg: SurvivingSegment,
+  origMatrix: PdfMatrix | null
+): boolean {
+  if (!docHandle || typeof mod.FPDFPageObj_CreateTextObj !== 'function') {
+    return false;
+  }
+
+  const segFontFamily = seg.fontFamily || line.fontFamily || 'Helvetica';
+  const segRawFontFamily = seg.rawFontFamily || line.rawFontFamily;
+  const segFontWeight = (seg.fontWeight || line.fontWeight) as 'bold' | 'normal' | undefined;
+  const segFontStyle = (seg.fontStyle || line.fontStyle) as 'italic' | 'normal' | undefined;
+  const segColor = seg.color || line.color || { r: 0, g: 0, b: 0, a: 255 };
+
+  const standardFontName = resolveStandardFont(
+    segFontFamily,
+    segRawFontFamily,
+    segFontWeight,
+    segFontStyle
+  );
+
+  let stdFontHandle = mod.FPDFText_LoadStandardFont(docHandle, standardFontName);
+  if (!stdFontHandle) {
+    stdFontHandle = mod.FPDFText_LoadStandardFont(docHandle, 'Helvetica');
+  }
+  if (!stdFontHandle) return false;
+
+  const segFontSize = seg.fontSize || line.fontSize || 12;
+  const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, stdFontHandle, segFontSize);
+  if (!textObjHandle) return false;
+
+  const textToWrite = safeEncodeForStandardFont(seg.text);
+  const textBuf = encodeUtf16Le(engine, textToWrite);
+  try {
+    mod.FPDFText_SetText(textObjHandle, textBuf.ptr);
+    if (typeof mod.FPDFPageObj_SetFillColor === 'function') {
+      mod.FPDFPageObj_SetFillColor(textObjHandle, segColor.r, segColor.g, segColor.b, segColor.a);
+    }
+    const normOrigMat = normalizeCreatedTextMatrix(origMatrix, segFontSize);
+    const matrix: PdfMatrix = normOrigMat
+      ? { a: normOrigMat.a, b: normOrigMat.b, c: normOrigMat.c, d: normOrigMat.d, e: seg.originX, f: seg.originY }
+      : translationMatrix(seg.originX, seg.originY);
+    setPageObjectMatrix(engine, mod, textObjHandle, matrix);
+    mod.FPDFPage_InsertObject(pageHandle, textObjHandle);
+    return true;
+  } finally {
+    textBuf.dispose();
+  }
+}
+
+/**
+ * Splits any shared wide PDF text object that spans across the target line and
+ * neighbouring table cells on the same row into discrete prefix, target, and
+ * suffix text objects at their stationary origin coordinates.
+ *
+ * @param engine The PDFium engine instance.
+ * @param mod Active WASM module.
+ * @param docHandle Active document handle.
+ * @param pageIndex Zero-based page index.
+ * @param pageHandle Active page handle.
+ * @param line Target line or cell bounds to isolate.
+ * @return True if a shared wide text object was split.
+ */
+export function isolateSharedLineTextObjects(
+  engine: PdfiumEngine,
+  mod: ReturnType<PdfiumEngine['getModule']>,
+  docHandle: number,
+  pageIndex: number,
+  pageHandle: number,
+  line: RedactTargetLine
+): boolean {
+  const effectiveDocHandle = docHandle || engine.getDocumentHandle() || 0;
+  if (!effectiveDocHandle || typeof mod.FPDFPageObj_CreateTextObj !== 'function') {
+    return false;
+  }
+
+  const lineObjects = findLineTextObjects(engine, mod, pageHandle, line);
+  if (lineObjects.length === 0) return false;
+
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const effectiveLeft = line.hasBulletPrefix && line.bulletWord
+    ? Math.min(line.left, line.bulletWord.left)
+    : line.left;
+  const effectiveRight = line.left + line.width;
+  const effectiveWidth = Math.max(1, effectiveRight - effectiveLeft);
+  const pdfLineLeft = effectiveLeft + cropInfo.cropLeft;
+  const pdfLineRight = pdfLineLeft + effectiveWidth;
+
+  const wideObjects = lineObjects.filter(
+    (o) => o.right > o.left && (o.left < pdfLineLeft - 4.0 || o.right > pdfLineRight + 4.0)
+  );
+  if (wideObjects.length === 0) {
+    return false;
+  }
+
+  const allCharacters = extractPageCharacters(engine, pageIndex, pageHandle);
+  if (allCharacters.length === 0) return false;
+
+  const baselineTol = Math.max(2.5, line.fontSize * 0.35);
+  const indicesToRemove: number[] = [];
+  const segmentsToInsert: Array<{ seg: SurvivingSegment; matrix: PdfMatrix | null }> = [];
+
+  const buildTokens = (chars: PageCharacter[]): LineCharToken[] =>
+    chars.map((c, idx) => {
+      const prev = idx > 0 ? chars[idx - 1] : null;
+      return {
+        charData: c,
+        hasPrecedingSpace: prev
+          ? (c.left - prev.right) >= Math.min(prev.fontSize, c.fontSize) * 0.18
+          : false,
+        fontFamily: line.fontFamily,
+        rawFontFamily: line.rawFontFamily,
+        fontWeight: line.fontWeight,
+        fontStyle: line.fontStyle,
+        color: line.color,
+      };
+    });
+
+  for (const obj of wideObjects) {
+    const objChars = allCharacters
+      .filter(
+        (c) =>
+          c.unicode.trim().length > 0 &&
+          Math.abs(c.originY - line.baselineY) <= baselineTol &&
+          c.left >= obj.left - 2.0 &&
+          c.right <= obj.right + 2.0
+      )
+      .sort((a, b) => a.originX - b.originX);
+
+    if (objChars.length === 0) continue;
+
+    const prefixChars: PageCharacter[] = [];
+    const targetChars: PageCharacter[] = [];
+    const suffixChars: PageCharacter[] = [];
+
+    for (const c of objChars) {
+      const cDomLeft = c.domLeft !== undefined ? c.domLeft : c.left - cropInfo.cropLeft;
+      const cDomRight = c.domRight !== undefined ? c.domRight : c.right - cropInfo.cropLeft;
+      const cMidX = (cDomLeft + cDomRight) / 2;
+
+      if (cMidX < effectiveLeft - 1.5) {
+        prefixChars.push(c);
+      } else if (cMidX > effectiveRight + 1.5) {
+        suffixChars.push(c);
+      } else {
+        targetChars.push(c);
+      }
+    }
+
+    if (targetChars.length === 0 || (prefixChars.length === 0 && suffixChars.length === 0)) {
+      continue;
+    }
+
+    indicesToRemove.push(obj.index);
+    const dummyHandled = new Set<number>();
+    const neverRedacted = (): boolean => false;
+
+    for (const group of [prefixChars, targetChars, suffixChars]) {
+      if (group.length === 0) continue;
+      const tokens = buildTokens(group);
+      const { survivingSegments } = partitionSurvivingSegments(tokens, neverRedacted, dummyHandled);
+      for (const seg of survivingSegments) {
+        segmentsToInsert.push({ seg, matrix: obj.matrix });
+      }
+    }
+  }
+
+  if (indicesToRemove.length === 0) {
+    return false;
+  }
+
+  removeTextObjectsByIndex(mod, pageHandle, indicesToRemove);
+  for (const item of segmentsToInsert) {
+    insertSurvivingSegmentObject(
+      engine,
+      mod,
+      effectiveDocHandle,
+      pageHandle,
+      line,
+      item.seg,
+      item.matrix
+    );
   }
 
   return true;
 }
 
-/**
- * Permanently redacts only the characters within the specified DOM bounding rectangles,
- * preserving surviving prefix and suffix text at stationary origin coordinates.
- *
- * @param engine The PDFium engine instance.
- * @param _docHandle The active document handle.
- * @param pageIndex Zero-based page index.
- * @param pageHandle The active page handle.
- * @param rects Array of bounding rectangles in DOM coordinates.
- * @returns True if page content was modified.
- */
-export function redactInRects(
+function applySegmentPartitionToLine(
   engine: PdfiumEngine,
-  _docHandle: number,
-  pageIndex: number,
+  mod: ReturnType<PdfiumEngine['getModule']>,
+  docHandle: number,
   pageHandle: number,
-  rects: HighlightRect[]
+  line: RedactTargetLine,
+  survivingSegments: SurvivingSegment[],
+  lineTokens?: LineCharToken[],
+  allCharacters?: PageCharacter[],
+  charToTokenMap?: Map<number, LineCharToken>,
+  isRedacted?: (charIndex: number) => boolean,
+  handledCharIndices?: Set<number>
 ): boolean {
-  if (rects.length === 0 || !pageHandle) return false;
-  const mod = engine.getModule();
-  const docHandle = _docHandle || engine.getDocumentHandle() || 0;
+  const lineObjects = findLineTextObjects(engine, mod, pageHandle, line);
 
-  const normalizedRects = rects.map((r) => ({
-    x: Math.min(r.x, r.x + r.width),
-    y: Math.min(r.y, r.y + r.height),
-    width: Math.abs(r.width),
-    height: Math.abs(r.height),
-  }));
+  if (
+    lineObjects.length > 0 &&
+    lineObjects.some((o) => o.right > o.left) &&
+    lineTokens &&
+    allCharacters &&
+    isRedacted &&
+    handledCharIndices
+  ) {
+    const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+    const effectiveLeft = line.hasBulletPrefix && line.bulletWord
+      ? Math.min(line.left, line.bulletWord.left)
+      : line.left;
+    const effectiveWidth = Math.max(1, line.left + line.width - effectiveLeft);
+    const pdfLineLeft = effectiveLeft + cropInfo.cropLeft;
+    const pdfLineRight = pdfLineLeft + effectiveWidth;
 
-  const allCharacters = extractPageCharacters(engine, pageIndex, pageHandle);
-  const redactedCharIndices = new Set<number>();
-  const charMap = new Map<number, PageCharacter>();
+    const minObjLeft = Math.min(pdfLineLeft, ...lineObjects.map((o) => o.left));
+    const maxObjRight = Math.max(pdfLineRight, ...lineObjects.map((o) => o.right));
 
-  for (const c of allCharacters) {
-    charMap.set(c.charIndex, c);
-    const midX = (c.domLeft + c.domRight) / 2;
-    const midY = (c.domTop + c.domBottom) / 2;
+    let effectiveTokens = lineTokens;
+    if (minObjLeft < pdfLineLeft - 4 || maxObjRight > pdfLineRight + 4) {
+      const tokenIndexSet = new Set<number>(lineTokens.map((t) => t.charData.charIndex));
+      const merged = [...lineTokens];
+      const baselineTol = Math.max(2.5, line.fontSize * 0.3);
 
-    for (const r of normalizedRects) {
-      if (midX >= r.x && midX <= r.x + r.width && midY >= r.y && midY <= r.y + r.height) {
-        redactedCharIndices.add(c.charIndex);
-        break;
+      for (const c of allCharacters) {
+        if (c.unicode.trim().length === 0 || tokenIndexSet.has(c.charIndex)) continue;
+        if (
+          Math.abs(c.originY - line.baselineY) <= baselineTol &&
+          c.left >= minObjLeft - 2 &&
+          c.right <= maxObjRight + 2
+        ) {
+          const existingToken = charToTokenMap?.get(c.charIndex);
+          merged.push(
+            existingToken || {
+              charData: c,
+              hasPrecedingSpace: false,
+              fontFamily: line.fontFamily,
+              rawFontFamily: line.rawFontFamily,
+              fontWeight: line.fontWeight,
+              fontStyle: line.fontStyle,
+              color: line.color,
+            }
+          );
+          tokenIndexSet.add(c.charIndex);
+        }
+      }
+
+      merged.sort((a, b) => a.charData.originX - b.charData.originX);
+      effectiveTokens = merged;
+    }
+
+    const tokensByObject = new Map<number, LineCharToken[]>();
+    for (const obj of lineObjects) {
+      tokensByObject.set(obj.index, []);
+    }
+    for (const token of effectiveTokens) {
+      const targetObj = assignTokenToLineObject(token, lineObjects);
+      tokensByObject.get(targetObj.index)?.push(token);
+    }
+
+    const indicesToRemove: number[] = [];
+    const segmentsToInsert: Array<{ seg: SurvivingSegment; matrix: PdfMatrix | null }> = [];
+
+    for (const obj of lineObjects) {
+      const objTokens = tokensByObject.get(obj.index) || [];
+      if (objTokens.length === 0) continue;
+
+      const objHasRedacted = objTokens.some((t) => isRedacted(t.charData.charIndex));
+      if (!objHasRedacted) {
+        continue;
+      }
+
+      indicesToRemove.push(obj.index);
+      const { survivingSegments: objSurvivingSegments } = partitionSurvivingSegments(
+        objTokens,
+        isRedacted,
+        handledCharIndices
+      );
+      for (const seg of objSurvivingSegments) {
+        segmentsToInsert.push({ seg, matrix: obj.matrix });
       }
     }
+
+    if (indicesToRemove.length > 0) {
+      if (docHandle && typeof mod.FPDFPageObj_CreateTextObj === 'function') {
+        removeTextObjectsByIndex(mod, pageHandle, indicesToRemove);
+        for (const item of segmentsToInsert) {
+          insertSurvivingSegmentObject(
+            engine,
+            mod,
+            docHandle,
+            pageHandle,
+            line,
+            item.seg,
+            item.matrix
+          );
+        }
+        return true;
+      }
+
+      if (segmentsToInsert.length === 0) {
+        removeTextObjectsByIndex(mod, pageHandle, indicesToRemove);
+        return true;
+      }
+    }
+  }
+
+  const objectIndices = lineObjects.map((o) => o.index);
+
+  if (survivingSegments.length === 0) {
+    if (objectIndices.length > 0) {
+      removeTextObjectsByIndex(mod, pageHandle, objectIndices);
+    } else {
+      removeTextObjectsInBounds(
+        engine,
+        mod,
+        pageHandle,
+        line.left,
+        line.baselineY,
+        line.width,
+        line.fontSize
+      );
+    }
+    return true;
+  }
+
+  const origMatrix = lineObjects.length > 0 ? lineObjects[0].matrix : null;
+
+  if (docHandle && typeof mod.FPDFPageObj_CreateTextObj === 'function') {
+    if (objectIndices.length > 0) {
+      removeTextObjectsByIndex(mod, pageHandle, objectIndices);
+    } else {
+      removeTextObjectsInBounds(
+        engine,
+        mod,
+        pageHandle,
+        line.left,
+        line.baselineY,
+        line.width,
+        line.fontSize
+      );
+    }
+
+    for (const seg of survivingSegments) {
+      insertSurvivingSegmentObject(engine, mod, docHandle, pageHandle, line, seg, origMatrix);
+    }
+    return true;
+  }
+
+  if (objectIndices.length === 0) {
+    removeTextObjectsInBounds(engine, mod, pageHandle, line.left, line.baselineY, line.width, line.fontSize);
+  }
+
+  const countToUpdate = Math.min(survivingSegments.length, objectIndices.length);
+  for (let i = 0; i < countToUpdate; i++) {
+    const seg = survivingSegments[i];
+    const targetMatrix = lineObjects[i]?.matrix || origMatrix;
+    const matrix: PdfMatrix = targetMatrix
+      ? { a: targetMatrix.a, b: targetMatrix.b, c: targetMatrix.c, d: targetMatrix.d, e: seg.originX, f: seg.originY }
+      : translationMatrix(seg.originX, seg.originY);
+
+    setTextObjectByIndex(engine, mod, pageHandle, objectIndices[i], seg.text, matrix);
   }
 
   if (redactedCharIndices.size === 0) {
