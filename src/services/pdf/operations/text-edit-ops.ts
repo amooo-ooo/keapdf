@@ -6,13 +6,11 @@ import {
   encodeUtf16Le,
   setPageObjectMatrix,
   translationMatrix,
-  mapStandardFontName,
   calculateTextWidth,
   removeTextObjectsInBounds,
   removeTextObjectsInRects,
   setTextObjectInBounds,
   findTextObjectIndicesForSpan,
-  findPageFontHandle,
   removeTextObjectsByIndex,
   setTextObjectByIndex,
   getPageObjectMatrix,
@@ -20,11 +18,28 @@ import {
   pdfBoxToDomBounds,
   pdfToDomCoords,
   domToPdfCoords,
+  registerSpanDecorationObject,
+  removeSpanDecorationObjectsInBounds,
+  cleanSubsetPrefix,
+  readCharMatrixScaleY,
+  extractImageObjectBitmap,
 } from '../../../core/pdfium-helpers';
+import {
+  calculateTrackedTextWidth,
+  resolveMatrixScaledFontSize,
+  UNIT_FONT_SIZE_THRESHOLD,
+} from '../../../core/typography-metrics';
 
 import { detectParagraphs, normalizeAngleDeg, getCardinalRotation, isVerticalRotation } from './paragraph-detector';
-import { reflowAndReplaceParagraph, wrapTextToWidth } from './paragraph-reflow';
+import {
+  reflowAndReplaceParagraph,
+  wrapTextToWidth,
+  isWordPrecededBySpace,
+  reconstructLineTextFromWords,
+  mapLineTextToStyledWords,
+} from './paragraph-reflow';
 import { resolveStandardFont } from './draw-text';
+import { resolveUnifiedCharacterRange } from '../unified-text-provider';
 
 /**
  * Analyses the text stream of a page to group characters into semantic multi-line paragraphs and blocks.
@@ -53,11 +68,20 @@ export function hideTextSpan(
   targetSpan: EditableTextSpan
 ): void {
   const mod = engine.getModule();
+  const docHandle = engine.getDocumentHandle() || 0;
   const targetLines: Array<{
     left: number;
     baselineY: number;
     width: number;
     fontSize: number;
+    text?: string;
+    charStartIndex?: number;
+    color?: ColorRgba;
+    fontFamily?: string;
+    rawFontFamily?: string;
+    fontWeight?: string;
+    fontStyle?: string;
+    words?: TextWord[];
     hasBulletPrefix?: boolean;
     bulletWord?: TextWord;
   }> = targetSpan.lines && targetSpan.lines.length > 0
@@ -67,12 +91,23 @@ export function hideTextSpan(
         baselineY: targetSpan.baselineY,
         width: targetSpan.width,
         fontSize: targetSpan.fontSize,
+        text: targetSpan.text,
+        charStartIndex: targetSpan.charStartIndex,
+        color: targetSpan.color,
+        fontFamily: targetSpan.fontFamily,
+        rawFontFamily: targetSpan.rawFontFamily,
+        fontWeight: targetSpan.fontWeight,
+        fontStyle: targetSpan.fontStyle,
         hasBulletPrefix: targetSpan.hasBulletPrefix,
         bulletWord: targetSpan.bulletWord,
       }];
 
   let modified = false;
   for (const line of targetLines) {
+    if (isolateSharedLineTextObjects(engine, mod, docHandle, targetSpan.pageIndex, pageHandle, line)) {
+      modified = true;
+    }
+
     const objectIndices = findTextObjectIndicesForSpan(
       engine, mod, pageHandle,
       line.left, line.baselineY, line.width, line.fontSize
@@ -127,12 +162,17 @@ export function replaceTextSpan(
   options: TextMutationOptions,
   charsetIndex?: FontCharsetIndex
 ): void {
-  const rawFontName = options.fontFamily || targetSpan.fontFamily || 'Helvetica';
+  const effectiveSpanFont =
+    targetSpan.fontFamily && targetSpan.fontFamily !== 'Helvetica'
+      ? targetSpan.fontFamily
+      : targetSpan.rawFontFamily || targetSpan.fontFamily;
+  const rawFontName = options.fontFamily || effectiveSpanFont || 'Helvetica';
   const updatedFontSize = options.fontSize !== undefined ? options.fontSize : targetSpan.fontSize;
-  const standardFontName: StandardFontName = mapStandardFontName(
+  const standardFontName: StandardFontName = resolveStandardFont(
     rawFontName,
-    options.fontWeight || targetSpan.fontWeight,
-    options.fontStyle || targetSpan.fontStyle
+    targetSpan.rawFontFamily,
+    (options.fontWeight || targetSpan.fontWeight) as 'bold' | 'normal' | undefined,
+    (options.fontStyle || targetSpan.fontStyle) as 'italic' | 'normal' | undefined
   );
   const updatedText = options.text !== undefined ? options.text : targetSpan.text;
   const isDeletion = updatedText.trim().length === 0;
@@ -146,8 +186,11 @@ export function replaceTextSpan(
   let isWrappedMultiLine = false;
   if (!isExplicitMultiLine && !isDeletion) {
     const mod = engine.getModule();
-    const pageWidth = mod.FPDF_GetPageWidthF(pageHandle);
-    const maxAvailableWidth = Math.max(targetSpan.width, Math.min(pageWidth - targetSpan.left - 36, 500));
+    const pageWidth = typeof mod.FPDF_GetPageWidthF === 'function' ? mod.FPDF_GetPageWidthF(pageHandle) : typeof mod.FPDF_GetPageWidth === 'function' ? mod.FPDF_GetPageWidth(pageHandle) : 612;
+    const maxAvailableWidth = Math.max(
+      targetSpan.width + updatedFontSize * 0.6,
+      Math.min(pageWidth - targetSpan.left - 36, 500)
+    );
     const testLines = wrapTextToWidth(updatedText, targetSpan.width, updatedFontSize, standardFontName);
     if (testLines.length > 1 && calculateTextWidth(updatedText, updatedFontSize, standardFontName) > maxAvailableWidth) {
       isWrappedMultiLine = true;
@@ -169,14 +212,41 @@ export function replaceTextSpan(
 
   const mod = engine.getModule();
   const updatedColor: ColorRgba = options.color || targetSpan.color;
+  const baseLeft = targetSpan.originalLeft ?? targetSpan.left;
   const targetLeft = options.left !== undefined ? options.left : targetSpan.left;
+  const effectiveLetterSpacing = options.letterSpacing ?? targetSpan.letterSpacing;
+  const effectiveWordSpacing = options.wordSpacing ?? targetSpan.wordSpacing;
 
   const calculatedNewWidth = isDeletion
     ? 0
-    : calculateTextWidth(updatedText, updatedFontSize, standardFontName);
+    : calculateTrackedTextWidth(
+        updatedText,
+        updatedFontSize,
+        standardFontName,
+        effectiveLetterSpacing,
+        effectiveWordSpacing
+      );
+
+  // Isolate the target cell if it shares a wide multi-column PDF text object on the row
+  isolateSharedLineTextObjects(engine, mod, docHandle, pageIndex, pageHandle, {
+    left: targetSpan.left,
+    baselineY: targetSpan.baselineY,
+    width: targetSpan.width,
+    fontSize: targetSpan.fontSize,
+    text: targetSpan.text,
+    charStartIndex: targetSpan.charStartIndex,
+    color: targetSpan.color,
+    fontFamily: targetSpan.fontFamily,
+    rawFontFamily: targetSpan.rawFontFamily,
+    fontWeight: targetSpan.fontWeight,
+    fontStyle: targetSpan.fontStyle,
+    words: targetSpan.lines?.[0]?.words,
+    hasBulletPrefix: targetSpan.hasBulletPrefix,
+    bulletWord: targetSpan.bulletWord,
+  });
 
   // Identify the exact page objects that back this span
-  const targetObjectIndices = findTextObjectIndicesForSpan(
+  let targetObjectIndices = findTextObjectIndicesForSpan(
     engine, mod, pageHandle,
     targetSpan.left, targetSpan.baselineY, targetSpan.width, targetSpan.fontSize
   );
@@ -184,32 +254,228 @@ export function replaceTextSpan(
   let fontHandle = 0;
 
   try {
-    // Find subsequent spans for potential reflow before any mutation
+    // Find subsequent inline spans on the same baseline (excluding separate table columns)
     const pageSpans = extractEditableSpans(engine, pageIndex, pageHandle);
-    const lineSubsequentSpans = pageSpans
-      .filter(
-        (s) =>
-          s.id !== targetSpan.id &&
-          Math.abs(s.baselineY - targetSpan.baselineY) < 6.0 &&
-          s.left > targetSpan.left + 5.0
-      )
+    const sameLineOtherSpans = pageSpans.filter(
+      (s) => s.id !== targetSpan.id && Math.abs(s.baselineY - targetSpan.baselineY) < 6.0
+    );
+    const sortedRightSpans = sameLineOtherSpans
+      .filter((s) => s.left > targetSpan.left + 5.0)
       .sort((a, b) => a.left - b.left);
+    const lineSubsequentSpans: EditableTextSpan[] = [];
+    let prevInlineRight = targetSpan.left + targetSpan.width;
+    const maxInlineContinuationGap = Math.max(8.0, targetSpan.fontSize * 0.85);
+    for (const candidateSpan of sortedRightSpans) {
+      if (candidateSpan.left - prevInlineRight <= maxInlineContinuationGap) {
+        lineSubsequentSpans.push(candidateSpan);
+        prevInlineRight = candidateSpan.left + candidateSpan.width;
+      } else {
+        break;
+      }
+    }
+
+    const pageWidth = typeof mod.FPDF_GetPageWidthF === 'function'
+      ? mod.FPDF_GetPageWidthF(pageHandle)
+      : (typeof mod.FPDF_GetPageWidth === 'function' ? mod.FPDF_GetPageWidth(pageHandle) : 612);
+
+    if (targetObjectIndices.length === 0 && sameLineOtherSpans.length === 0) {
+      targetObjectIndices = findTextObjectIndicesForSpan(
+        engine, mod, pageHandle,
+        0, targetSpan.baselineY, pageWidth, targetSpan.fontSize
+      );
+    }
+
+    const effectiveAlign = options.textAlign || targetSpan.textAlign;
+    const isUnchangedTextMetrics =
+      updatedText === targetSpan.text &&
+      Math.abs(updatedFontSize - targetSpan.fontSize) < 0.1 &&
+      (options.letterSpacing === undefined || options.letterSpacing === targetSpan.letterSpacing);
+    const actualTextWidth = isDeletion
+      ? 0
+      : (isUnchangedTextMetrics && targetSpan.width > 0 ? targetSpan.width : calculatedNewWidth);
+
+    let alignedDomLeft = targetLeft;
+    if (options.left !== undefined) {
+      alignedDomLeft = options.left;
+    } else if (!isDeletion && effectiveAlign && (effectiveAlign === 'left' || effectiveAlign === 'center' || effectiveAlign === 'right')) {
+      if (sameLineOtherSpans.length > 0 || (targetSpan.width > actualTextWidth + 4 && updatedText !== targetSpan.text)) {
+        const preceding = sameLineOtherSpans.filter((s) => s.left < baseLeft).sort((a, b) => (b.left + b.width) - (a.left + a.width))[0];
+        const succeeding = sameLineOtherSpans.filter((s) => s.left > baseLeft + actualTextWidth).sort((a, b) => a.left - b.left)[0];
+        const colLeft = preceding ? preceding.left + preceding.width + 12 : baseLeft;
+        const colRight = succeeding ? succeeding.left - 12 : Math.max(baseLeft + actualTextWidth, pageWidth - baseLeft);
+        const colWidth = Math.max(targetSpan.width, actualTextWidth, colRight - colLeft);
+        const boxLeft = Math.min(baseLeft, colLeft);
+        if (effectiveAlign === 'center') {
+          alignedDomLeft = boxLeft + Math.max(0, (colWidth - actualTextWidth) / 2);
+        } else if (effectiveAlign === 'right') {
+          alignedDomLeft = boxLeft + Math.max(0, colWidth - actualTextWidth);
+        } else {
+          alignedDomLeft = boxLeft;
+        }
+      } else {
+        let leftMargin = baseLeft;
+        if (leftMargin >= pageWidth * 0.25) {
+          const marginCandidates = pageSpans
+            .filter((s) => s.id !== targetSpan.id && (s.originalLeft ?? s.left) >= 18 && (s.originalLeft ?? s.left) < pageWidth * 0.25)
+            .map((s) => s.originalLeft ?? s.left);
+          leftMargin = marginCandidates.length > 0 ? Math.min(...marginCandidates) : Math.min(baseLeft, 72);
+        }
+        const rightMargin = Math.max(leftMargin + actualTextWidth, pageWidth - leftMargin);
+        const availWidth = Math.max(actualTextWidth, rightMargin - leftMargin);
+        if (effectiveAlign === 'center') {
+          alignedDomLeft = leftMargin + Math.max(0, (availWidth - actualTextWidth) / 2);
+        } else if (effectiveAlign === 'right') {
+          alignedDomLeft = Math.max(leftMargin, rightMargin - actualTextWidth);
+        } else {
+          alignedDomLeft = leftMargin;
+        }
+      }
+    }
 
     const deltaX = calculatedNewWidth - targetSpan.width;
     const needsReflow = Math.abs(deltaX) > 0.5 && lineSubsequentSpans.length > 0;
 
+    const firstLineCandidate =
+      options.lines && options.lines.length > 0
+        ? options.lines[0]
+        : targetSpan.lines && targetSpan.lines.length > 0
+          ? targetSpan.lines[0]
+          : undefined;
+    const isLineMatchingText =
+      firstLineCandidate &&
+      (options.text === undefined ||
+        firstLineCandidate.text === updatedText ||
+        (firstLineCandidate.words &&
+          reconstructLineTextFromWords(firstLineCandidate.words) ===
+            sanitizePdfText(updatedText).trim().replace(/\s+/g, ' ')) ||
+        (firstLineCandidate.words &&
+          firstLineCandidate.words.map((w) => w.text).join('') ===
+            updatedText.replace(/\s+/g, '')));
+    const firstLine = firstLineCandidate;
+    const firstLineWords = firstLineCandidate?.words
+      ? isLineMatchingText
+        ? firstLineCandidate.words
+        : mapLineTextToStyledWords(
+            updatedText,
+            firstLineCandidate,
+            alignedDomLeft,
+            targetSpan.baselineY,
+            updatedFontSize
+          ).words
+      : undefined;
+    const hasMultiStyleWords = Boolean(
+      firstLineWords &&
+      firstLineWords.length > 1 &&
+      firstLineWords.some(
+        (w) =>
+          Math.abs(w.fontSize - firstLineWords[0].fontSize) > 0.2 ||
+          (w.fontFamily && w.fontFamily !== firstLineWords[0].fontFamily) ||
+          (w.rawFontFamily && cleanSubsetPrefix(w.rawFontFamily) !== cleanSubsetPrefix(firstLineWords[0].rawFontFamily || '')) ||
+          (w.fontWeight && w.fontWeight !== firstLineWords[0].fontWeight) ||
+          (w.fontStyle && w.fontStyle !== firstLineWords[0].fontStyle) ||
+          (w.color && firstLineWords[0].color && !isColorEqual(w.color, firstLineWords[0].color)) ||
+          Boolean(w.underline) !== Boolean(firstLineWords[0].underline) ||
+          Boolean(w.strikethrough) !== Boolean(firstLineWords[0].strikethrough) ||
+          (w.backgroundColor !== firstLineWords[0].backgroundColor) ||
+          Math.abs((w.letterSpacingPts || 0) - (firstLineWords[0].letterSpacingPts || 0)) > 1.0
+      )
+    );
+
+    const singleWord =
+      !hasMultiStyleWords && firstLineWords && firstLineWords.length > 0
+        ? firstLineWords[0]
+        : undefined;
+    const effectiveBgColor = options.backgroundColor === 'transparent' || ('backgroundColor' in options && options.backgroundColor === undefined && !firstLine?.backgroundColor && !singleWord?.backgroundColor)
+      ? undefined
+      : (options.backgroundColor || firstLine?.backgroundColor || singleWord?.backgroundColor || targetSpan.backgroundColor);
+    const effectiveUnderline = Boolean(
+      firstLine?.underline ?? singleWord?.underline ?? options.underline ?? targetSpan.underline
+    );
+    const effectiveStrike = Boolean(
+      firstLine?.strikethrough ?? singleWord?.strikethrough ?? options.strikethrough ?? targetSpan.strikethrough
+    );
+    const hasWordStyleOverride = Boolean(
+      singleWord && (
+        Math.abs((singleWord.fontSize || updatedFontSize) - targetSpan.fontSize) > 0.1 ||
+        (singleWord.fontFamily && singleWord.fontFamily !== targetSpan.fontFamily) ||
+        (singleWord.fontWeight && singleWord.fontWeight !== (targetSpan.fontWeight || 'normal')) ||
+        (singleWord.fontStyle && singleWord.fontStyle !== (targetSpan.fontStyle || 'normal')) ||
+        (singleWord.color && !isColorEqual(singleWord.color, targetSpan.color)) ||
+        Boolean(singleWord.underline) !== Boolean(targetSpan.underline) ||
+        Boolean(singleWord.strikethrough) !== Boolean(targetSpan.strikethrough) ||
+        singleWord.backgroundColor !== targetSpan.backgroundColor ||
+        (singleWord.letterSpacing !== undefined && singleWord.letterSpacing !== targetSpan.letterSpacing)
+      )
+    );
+    const hasDecorationChange =
+      effectiveUnderline !== Boolean(targetSpan.underline) ||
+      effectiveStrike !== Boolean(targetSpan.strikethrough) ||
+      effectiveBgColor !== targetSpan.backgroundColor;
+
+    // Purge any existing background highlight, underline, or strikethrough rectangles in the span bounds
+    removeSpanDecorationObjectsInBounds(
+      engine,
+      mod,
+      pageHandle,
+      targetSpan.left,
+      targetSpan.baselineY,
+      Math.max(targetSpan.width, calculatedNewWidth),
+      Math.max(targetSpan.fontSize, updatedFontSize)
+    );
+
     // In-place edit path (preserves original embedded font subset)
     // Only safe if font is unchanged and no trailing spans on the line need shifting
     const isOnlyTextChanged = 
+      !hasMultiStyleWords &&
+      !hasWordStyleOverride &&
+      !hasDecorationChange &&
+      !effectiveBgColor &&
+      !effectiveUnderline &&
+      !effectiveStrike &&
       (options.fontSize === undefined || Math.abs(options.fontSize - targetSpan.fontSize) < 0.1) &&
+      (options.letterSpacing === undefined || options.letterSpacing === targetSpan.letterSpacing) &&
       (options.fontFamily === undefined ||
         options.fontFamily === targetSpan.fontFamily ||
-        extractBaseFontFamily(options.fontFamily) === extractBaseFontFamily(targetSpan.rawFontFamily)) &&
+        extractBaseFontFamily(options.fontFamily) === extractBaseFontFamily(targetSpan.rawFontFamily || targetSpan.fontFamily) ||
+        resolveStandardFont(options.fontFamily, targetSpan.rawFontFamily) ===
+          resolveStandardFont(targetSpan.fontFamily, targetSpan.rawFontFamily)) &&
       (options.color === undefined || isColorEqual(options.color, targetSpan.color)) &&
       (!options.fontWeight || options.fontWeight === (targetSpan.fontWeight || 'normal')) &&
       (!options.fontStyle || options.fontStyle === (targetSpan.fontStyle || 'normal'));
 
+    const initialFirstObj = targetObjectIndices.length > 0 ? mod.FPDFPage_GetObject(pageHandle, targetObjectIndices[0]) : 0;
+    const preservedFirstMat = initialFirstObj ? getPageObjectMatrix(engine, mod, initialFirstObj) : null;
+
     if (!isDeletion && isOnlyTextChanged && !needsReflow && targetObjectIndices.length > 0) {
+      const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+      const pdfTargetLeft = alignedDomLeft + cropInfo.cropLeft;
+      const firstMat = preservedFirstMat;
+      const hasHorizontalShift = options.left !== undefined || Boolean(effectiveAlign);
+      const currentBasePdfX = firstMat
+        ? (Math.abs(firstMat.e - (targetSpan.left + cropInfo.cropLeft)) <= 3.0
+            ? targetSpan.left + cropInfo.cropLeft
+            : firstMat.e)
+        : targetSpan.left + cropInfo.cropLeft;
+      const deltaAlignX = hasHorizontalShift ? pdfTargetLeft - currentBasePdfX : 0;
+
+      if (updatedText === targetSpan.text && !options.forceTextRestore) {
+        if (Math.abs(deltaAlignX) > 0.01) {
+          for (const idx of targetObjectIndices) {
+            const objHandle = mod.FPDFPage_GetObject(pageHandle, idx);
+            if (!objHandle) continue;
+            const mat = getPageObjectMatrix(engine, mod, objHandle);
+            if (mat) {
+              setPageObjectMatrix(engine, mod, objHandle, {
+                ...mat,
+                e: mat.e + deltaAlignX,
+              });
+            }
+          }
+          mod.FPDFPage_GenerateContent(pageHandle);
+        }
+        return;
+      }
+
       let charsAvailable = false;
       const font = targetSpan.rawFontFamily || targetSpan.fontFamily;
       const hasWhitespace = updatedText.includes(' ') || updatedText.includes('\t') || updatedText.includes('\n') || updatedText.includes('\r');
@@ -223,10 +489,13 @@ export function replaceTextSpan(
         charsAvailable = nonWs.every((char) => targetSpan.text.includes(char));
       }
 
-      if (charsAvailable && !options.backgroundColor) {
+      if (charsAvailable) {
+        const updatedMatrix = firstMat && Math.abs(deltaAlignX) > 0.01
+          ? { ...firstMat, e: firstMat.e + deltaAlignX }
+          : undefined;
         // targetObjectIndices are already sorted geometrically (left-to-right)
         const canEditInPlace = setTextObjectByIndex(
-          engine, mod, pageHandle, targetObjectIndices[0], updatedText
+          engine, mod, pageHandle, targetObjectIndices[0], updatedText, updatedMatrix
         );
 
         if (canEditInPlace) {
@@ -263,12 +532,12 @@ export function replaceTextSpan(
     }
 
     const cropInfo = getPageCropInfo(engine, mod, pageHandle);
-    let pdfTargetLeft = targetLeft + cropInfo.cropLeft;
+    let pdfTargetLeft = alignedDomLeft + cropInfo.cropLeft;
 
     // Compute adjusted baseline for the replacement object
     let targetBaselineY = targetSpan.baselineY;
     if (options.top !== undefined) {
-      const pdfPt = domToPdfCoords(targetLeft, options.top, cropInfo);
+      const pdfPt = domToPdfCoords(alignedDomLeft, options.top, cropInfo);
       pdfTargetLeft = pdfPt.x;
       targetBaselineY = pdfPt.y - updatedFontSize * 0.15;
     } else if (updatedFontSize !== targetSpan.fontSize) {
@@ -280,8 +549,8 @@ export function replaceTextSpan(
     // Insert the replacement text object
     let insertedObjHandle: number | null = null;
     if (!isDeletion) {
-      if (options.backgroundColor) {
-        const bgCol = parseColor(options.backgroundColor);
+      if (!hasMultiStyleWords && effectiveBgColor) {
+        const bgCol = parseColor(effectiveBgColor);
         if (bgCol.a > 0) {
           const rectW = calculatedNewWidth || targetSpan.width;
           const rectH = updatedFontSize * 1.25;
@@ -291,25 +560,13 @@ export function replaceTextSpan(
             mod.FPDFPageObj_SetFillColor(bgRect, bgCol.r, bgCol.g, bgCol.b, bgCol.a);
             mod.FPDFPath_SetDrawMode(bgRect, 1, false);
             mod.FPDFPage_InsertObject(pageHandle, bgRect);
+            registerSpanDecorationObject(bgRect, pdfTargetLeft, rectBottom, rectW, rectH);
           }
         }
       }
 
       fontHandle = mod.FPDFText_LoadStandardFont(docHandle, standardFontName);
       if (!fontHandle) fontHandle = mod.FPDFText_LoadStandardFont(docHandle, 'Helvetica');
-
-      const firstLineWords = options.lines && options.lines.length > 0 ? options.lines[0].words : undefined;
-      const hasMultiStyleWords = Boolean(
-        firstLineWords &&
-        firstLineWords.length > 1 &&
-        firstLineWords.some(
-          (w) =>
-            Math.abs(w.fontSize - firstLineWords[0].fontSize) > 0.2 ||
-            (w.fontWeight && w.fontWeight !== firstLineWords[0].fontWeight) ||
-            (w.fontStyle && w.fontStyle !== firstLineWords[0].fontStyle) ||
-            (w.color && firstLineWords[0].color && !isColorEqual(w.color, firstLineWords[0].color))
-        )
-      );
 
       if (hasMultiStyleWords && firstLineWords) {
         let currentWordX = pdfTargetLeft;
@@ -327,21 +584,102 @@ export function replaceTextSpan(
           let wordFontHandle = mod.FPDFText_LoadStandardFont(docHandle, wordFontName);
           if (!wordFontHandle) wordFontHandle = fontHandle;
 
-          if (wIdx > 0 && word.hasPrecedingSpace) {
-            const spaceWidth = calculateTextWidth(' ', word.fontSize || updatedFontSize, wordFontName);
+          let spaceWidth = 0;
+          if (wIdx > 0 && isWordPrecededBySpace(firstLineWords[wIdx - 1], word)) {
+            spaceWidth = calculateTextWidth(' ', word.fontSize || updatedFontSize, wordFontName) + (firstLine?.wordSpacing ?? effectiveWordSpacing ?? 0);
             currentWordX += spaceWidth;
+          }
+
+          const wordLetterSpacing = word.letterSpacing ?? firstLine?.letterSpacing ?? effectiveLetterSpacing;
+          const wordWidth = calculateTrackedTextWidth(cleanWord, word.fontSize || updatedFontSize, wordFontName, wordLetterSpacing);
+          const wFs = word.fontSize || updatedFontSize;
+
+          const wordBgColorStr = word.backgroundColor !== undefined
+            ? (word.backgroundColor === 'transparent' ? undefined : word.backgroundColor)
+            : effectiveBgColor;
+          if (wordBgColorStr) {
+            const bgCol = parseColor(wordBgColorStr);
+            if (bgCol.a > 0) {
+              const prevWord = wIdx > 0 ? firstLineWords[wIdx - 1] : null;
+              const prevBg = prevWord
+                ? (prevWord.backgroundColor !== undefined ? prevWord.backgroundColor : effectiveBgColor)
+                : undefined;
+              const bgStartX = spaceWidth > 0 && prevBg === wordBgColorStr ? currentWordX - spaceWidth : currentWordX;
+              const bgWidth = spaceWidth > 0 && prevBg === wordBgColorStr ? wordWidth + spaceWidth : wordWidth;
+              const rectBottom = Math.max(0, targetBaselineY - wFs * 0.25);
+              const rectH = wFs * 1.25;
+              const bgRect = mod.FPDFPageObj_CreateNewRect(bgStartX, rectBottom, bgWidth, rectH);
+              if (bgRect) {
+                mod.FPDFPageObj_SetFillColor(bgRect, bgCol.r, bgCol.g, bgCol.b, bgCol.a);
+                mod.FPDFPath_SetDrawMode(bgRect, 1, false);
+                mod.FPDFPage_InsertObject(pageHandle, bgRect);
+                registerSpanDecorationObject(bgRect, bgStartX, rectBottom, bgWidth, rectH);
+              }
+            }
+          }
+
+          const isWordUnderline = word.underline !== undefined
+            ? Boolean(word.underline)
+            : effectiveUnderline;
+          const isWordStrike = word.strikethrough !== undefined
+            ? Boolean(word.strikethrough)
+            : effectiveStrike;
+
+          if (isWordUnderline || isWordStrike) {
+            const lineThick = Math.max(0.75, wFs * 0.065);
+            const wCol = word.color || updatedColor;
+            const prevWord = wIdx > 0 ? firstLineWords[wIdx - 1] : null;
+            const prevUnderline = prevWord
+              ? (prevWord.underline !== undefined
+                  ? Boolean(prevWord.underline)
+                  : effectiveUnderline)
+              : false;
+            const prevStrike = prevWord
+              ? (prevWord.strikethrough !== undefined
+                  ? Boolean(prevWord.strikethrough)
+                  : effectiveStrike)
+              : false;
+
+            if (isWordUnderline) {
+              const uStartX = spaceWidth > 0 && prevUnderline ? currentWordX - spaceWidth : currentWordX;
+              const uWidth = spaceWidth > 0 && prevUnderline ? wordWidth + spaceWidth : wordWidth;
+              const uBottom = Math.max(0, targetBaselineY - lineThick * 1.5);
+              const uRect = mod.FPDFPageObj_CreateNewRect(uStartX, uBottom, uWidth, lineThick);
+              if (uRect) {
+                mod.FPDFPageObj_SetFillColor(uRect, wCol.r, wCol.g, wCol.b, wCol.a);
+                mod.FPDFPath_SetDrawMode(uRect, 1, false);
+                mod.FPDFPage_InsertObject(pageHandle, uRect);
+                registerSpanDecorationObject(uRect, uStartX, uBottom, uWidth, lineThick);
+              }
+            }
+
+            if (isWordStrike) {
+              const sStartX = spaceWidth > 0 && prevStrike ? currentWordX - spaceWidth : currentWordX;
+              const sWidth = spaceWidth > 0 && prevStrike ? wordWidth + spaceWidth : wordWidth;
+              const sBottom = targetBaselineY + wFs * 0.28;
+              const sRect = mod.FPDFPageObj_CreateNewRect(sStartX, sBottom, sWidth, lineThick);
+              if (sRect) {
+                mod.FPDFPageObj_SetFillColor(sRect, wCol.r, wCol.g, wCol.b, wCol.a);
+                mod.FPDFPath_SetDrawMode(sRect, 1, false);
+                mod.FPDFPage_InsertObject(pageHandle, sRect);
+                registerSpanDecorationObject(sRect, sStartX, sBottom, sWidth, lineThick);
+              }
+            }
           }
 
           const textToWrite = safeEncodeForStandardFont(cleanWord);
           const textBuf = encodeUtf16Le(engine, textToWrite);
           try {
-            const wFs = word.fontSize || updatedFontSize;
             const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, wordFontHandle, wFs);
             if (textObjHandle) {
               mod.FPDFText_SetText(textObjHandle, textBuf.ptr);
               const wCol = word.color || updatedColor;
               mod.FPDFPageObj_SetFillColor(textObjHandle, wCol.r, wCol.g, wCol.b, wCol.a);
-              setPageObjectMatrix(engine, mod, textObjHandle, translationMatrix(currentWordX, targetBaselineY));
+              const normMat = normalizeCreatedTextMatrix(preservedFirstMat, wFs);
+              const wordMat: PdfMatrix = normMat
+                ? { ...normMat, e: currentWordX, f: targetBaselineY }
+                : translationMatrix(currentWordX, targetBaselineY);
+              setPageObjectMatrix(engine, mod, textObjHandle, wordMat);
               mod.FPDFPage_InsertObject(pageHandle, textObjHandle);
               if (wIdx === 0) insertedObjHandle = textObjHandle;
             }
@@ -349,10 +687,53 @@ export function replaceTextSpan(
             textBuf.dispose();
           }
 
-          const wordWidth = calculateTextWidth(cleanWord, word.fontSize || updatedFontSize, wordFontName);
-          currentWordX += wordWidth;
+          const naturalWordWidth = calculateTextWidth(cleanWord, wFs, wordFontName);
+          currentWordX += Math.max(wordWidth, naturalWordWidth);
         }
       } else {
+        const isUnderline = effectiveUnderline;
+        const isStrikethrough = effectiveStrike;
+        const singleCol = singleWord?.color || updatedColor;
+        const singleFs = singleWord?.fontSize || updatedFontSize;
+        const singleFontName = singleWord
+          ? resolveStandardFont(
+              singleWord.fontFamily || rawFontName,
+              singleWord.rawFontFamily || targetSpan.rawFontFamily,
+              (singleWord.fontWeight as 'bold' | 'normal') || options.fontWeight || (targetSpan.fontWeight as 'bold' | 'normal'),
+              (singleWord.fontStyle as 'italic' | 'normal') || options.fontStyle || (targetSpan.fontStyle as 'italic' | 'normal')
+            )
+          : standardFontName;
+        const singleFontHandle = singleFontName !== standardFontName
+          ? (mod.FPDFText_LoadStandardFont(docHandle, singleFontName) || fontHandle)
+          : fontHandle;
+
+        if (isUnderline || isStrikethrough) {
+          const lineThick = Math.max(0.75, singleFs * 0.065);
+          const rectW = calculatedNewWidth || targetSpan.width;
+
+          if (isUnderline) {
+            const uBottom = Math.max(0, targetBaselineY - lineThick * 1.5);
+            const uRect = mod.FPDFPageObj_CreateNewRect(pdfTargetLeft, uBottom, rectW, lineThick);
+            if (uRect) {
+              mod.FPDFPageObj_SetFillColor(uRect, singleCol.r, singleCol.g, singleCol.b, singleCol.a);
+              mod.FPDFPath_SetDrawMode(uRect, 1, false);
+              mod.FPDFPage_InsertObject(pageHandle, uRect);
+              registerSpanDecorationObject(uRect, pdfTargetLeft, uBottom, rectW, lineThick);
+            }
+          }
+
+          if (isStrikethrough) {
+            const sBottom = targetBaselineY + singleFs * 0.28;
+            const sRect = mod.FPDFPageObj_CreateNewRect(pdfTargetLeft, sBottom, rectW, lineThick);
+            if (sRect) {
+              mod.FPDFPageObj_SetFillColor(sRect, singleCol.r, singleCol.g, singleCol.b, singleCol.a);
+              mod.FPDFPath_SetDrawMode(sRect, 1, false);
+              mod.FPDFPage_InsertObject(pageHandle, sRect);
+              registerSpanDecorationObject(sRect, pdfTargetLeft, sBottom, rectW, lineThick);
+            }
+          }
+        }
+
         const textToWrite = safeEncodeForStandardFont(updatedText);
         const textBuf = encodeUtf16Le(engine, textToWrite);
 
