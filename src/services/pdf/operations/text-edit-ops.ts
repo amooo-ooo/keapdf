@@ -738,12 +738,15 @@ export function replaceTextSpan(
         const textBuf = encodeUtf16Le(engine, textToWrite);
 
         try {
-          const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, fontHandle, updatedFontSize);
+          const textObjHandle = mod.FPDFPageObj_CreateTextObj(docHandle, singleFontHandle, singleFs);
           if (textObjHandle) {
             mod.FPDFText_SetText(textObjHandle, textBuf.ptr);
-            mod.FPDFPageObj_SetFillColor(textObjHandle, updatedColor.r, updatedColor.g, updatedColor.b, updatedColor.a);
-            
-            setPageObjectMatrix(engine, mod, textObjHandle, translationMatrix(pdfTargetLeft, targetBaselineY));
+            mod.FPDFPageObj_SetFillColor(textObjHandle, singleCol.r, singleCol.g, singleCol.b, singleCol.a);
+            const normMat = normalizeCreatedTextMatrix(preservedFirstMat, singleFs);
+            const targetMat: PdfMatrix = normMat
+              ? { ...normMat, e: pdfTargetLeft, f: targetBaselineY }
+              : translationMatrix(pdfTargetLeft, targetBaselineY);
+            setPageObjectMatrix(engine, mod, textObjHandle, targetMat);
             mod.FPDFPage_InsertObject(pageHandle, textObjHandle);
             insertedObjHandle = textObjHandle;
           }
@@ -813,28 +816,60 @@ export function deleteTextSpan(
   }
 
   const mod = engine.getModule();
-  const objectIndices = findTextObjectIndicesForSpan(
-    engine,
-    mod,
-    pageHandle,
-    targetSpan.left,
-    targetSpan.baselineY,
-    targetSpan.width,
-    targetSpan.fontSize
-  );
+  const targetLines = targetSpan.lines && targetSpan.lines.length > 0
+    ? targetSpan.lines
+    : [{
+        left: targetSpan.left,
+        baselineY: targetSpan.baselineY,
+        width: targetSpan.width,
+        fontSize: targetSpan.fontSize,
+        text: targetSpan.text,
+        charStartIndex: targetSpan.charStartIndex,
+        color: targetSpan.color,
+        fontFamily: targetSpan.fontFamily,
+        rawFontFamily: targetSpan.rawFontFamily,
+        fontWeight: targetSpan.fontWeight,
+        fontStyle: targetSpan.fontStyle,
+        hasBulletPrefix: targetSpan.hasBulletPrefix,
+        bulletWord: targetSpan.bulletWord,
+      }];
 
-  if (objectIndices.length > 0) {
-    removeTextObjectsByIndex(mod, pageHandle, objectIndices);
-  } else {
-    removeTextObjectsInBounds(
+  for (const line of targetLines) {
+    isolateSharedLineTextObjects(engine, mod, docHandle, pageIndex, pageHandle, line);
+
+    removeSpanDecorationObjectsInBounds(
       engine,
       mod,
       pageHandle,
-      targetSpan.left,
-      targetSpan.baselineY,
-      targetSpan.width,
-      targetSpan.fontSize
+      line.left,
+      line.baselineY,
+      line.width,
+      line.fontSize
     );
+
+    const objectIndices = findTextObjectIndicesForSpan(
+      engine,
+      mod,
+      pageHandle,
+      line.left,
+      line.baselineY,
+      line.width,
+      line.fontSize
+    );
+
+    if (objectIndices.length > 0) {
+      removeTextObjectsByIndex(mod, pageHandle, objectIndices);
+    } else {
+      removeTextObjectsInBounds(
+        engine,
+        mod,
+        pageHandle,
+        line.left,
+        line.baselineY,
+        line.width,
+        line.fontSize
+      );
+    }
   }
   mod.FPDFPage_GenerateContent(pageHandle);
 }
@@ -938,6 +973,7 @@ export function extractPageCharacters(
     const bottomPtr = engine.allocateMemory(8);
     const xPtr = engine.allocateMemory(8);
     const yPtr = engine.allocateMemory(8);
+    const matrixPtr = engine.allocateMemory(24);
 
     try {
       for (let i = 0; i < totalChars; i++) {
@@ -955,7 +991,14 @@ export function extractPageCharacters(
           continue;
         }
         if (!charStr) continue;
-        const fontSize = mod.FPDFText_GetFontSize(textPageHandle, i) || 12;
+        const reportedFontSize = mod.FPDFText_GetFontSize(textPageHandle, i) || 12;
+        const fontSize =
+          resolveMatrixScaledFontSize(
+            reportedFontSize,
+            reportedFontSize <= UNIT_FONT_SIZE_THRESHOLD
+              ? readCharMatrixScaleY(mod, textPageHandle, i, matrixPtr)
+              : null
+          ) ?? reportedFontSize;
 
         mod.FPDFText_GetCharBox(textPageHandle, i, leftPtr, rightPtr, bottomPtr, topPtr);
         mod.FPDFText_GetCharOrigin(textPageHandle, i, xPtr, yPtr);
@@ -1048,6 +1091,7 @@ export function extractPageCharacters(
       engine.freeMemory(bottomPtr);
       engine.freeMemory(xPtr);
       engine.freeMemory(yPtr);
+      engine.freeMemory(matrixPtr);
     }
   } finally {
     if (textPageHandle) {
@@ -1055,7 +1099,90 @@ export function extractPageCharacters(
     }
   }
 
+  calibrateMatrixScaledPageCharacters(characters);
+
   return characters;
+}
+
+/**
+ * Calibrates extracted page character font sizes when PDFium reports a unit or near-zero Tf size (<= 1.5)
+ * because the visual point size is encoded in the text transformation matrix Tm.
+ *
+ * @param chars Extracted page characters.
+ */
+function calibrateMatrixScaledPageCharacters(chars: PageCharacter[]): void {
+  let i = 0;
+  while (i < chars.length) {
+    if (chars[i].fontSize > 1.5) {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (
+      j < chars.length &&
+      chars[j].fontSize <= 1.5 &&
+      Math.abs(chars[j].domBaseline - chars[i].domBaseline) <= 4.0
+    ) {
+      j++;
+    }
+
+    let maxAscent = 0;
+    for (let k = i; k < j; k++) {
+      const ch = chars[k];
+      const boxSpan = ch.isVertical
+        ? Math.abs(ch.right - ch.left)
+        : Math.max(Math.abs(ch.top - ch.originY), Math.abs(ch.top - ch.bottom) * 0.85);
+      if (boxSpan > maxAscent) {
+        maxAscent = boxSpan;
+      }
+    }
+
+    if (maxAscent > 1.5) {
+      const calibratedFs = Math.max(4, Math.round((maxAscent / 0.72) * 2) / 2);
+      for (let k = i; k < j; k++) {
+        const ch = chars[k];
+        ch.fontSize = calibratedFs;
+        const cp = ch.unicode.codePointAt(0) || 0;
+        if (!ch.isVertical) {
+          if (ch.domBottom - ch.domTop < calibratedFs * 0.2) {
+            ch.domTop = Math.max(0, ch.domBaseline - calibratedFs * 0.85);
+            ch.domBottom = ch.domBaseline + calibratedFs * 0.25;
+          }
+          if (ch.domRight - ch.domLeft < calibratedFs * 0.1 && !isZeroWidthOrInvisible(cp)) {
+            ch.domRight = ch.domLeft + calibratedFs * 0.28;
+            ch.right = ch.left + calibratedFs * 0.28;
+          }
+        }
+      }
+    }
+
+    i = j;
+  }
+}
+
+/**
+ * Normalises a preserved text object transformation matrix when creating a new standard-font
+ * text object whose point size is already passed to FPDFPageObj_CreateTextObj.
+ *
+ * @param mat Original text object matrix.
+ * @param fontSize Target font size in points passed to FPDFPageObj_CreateTextObj.
+ * @return Normalised matrix preserving rotation/shear without duplicating font size scale.
+ */
+function normalizeCreatedTextMatrix(mat: PdfMatrix | null, fontSize: number): PdfMatrix | null {
+  if (!mat) return null;
+  const scaleX = Math.hypot(mat.a, mat.b);
+  const scaleY = Math.hypot(mat.c, mat.d);
+  if (fontSize > 2.0 && scaleX > 1.8 && scaleY > 1.8) {
+    return {
+      a: mat.a / scaleX,
+      b: mat.b / scaleX,
+      c: mat.c / scaleY,
+      d: mat.d / scaleY,
+      e: mat.e,
+      f: mat.f,
+    };
+  }
+  return mat;
 }
 
 /**
@@ -1334,7 +1461,17 @@ export function wipeImagesInRects(
       });
 
       if (intersectingRects.length > 0 && typeof mod.FPDFImageObj_GetBitmap === 'function' && typeof mod.FPDFImageObj_SetBitmap === 'function') {
-        const bitmap = mod.FPDFImageObj_GetBitmap(objHandle);
+        const docHandle =
+          typeof engine.getDocumentHandle === 'function'
+            ? engine.getDocumentHandle()
+            : 0;
+        const bitmap = extractImageObjectBitmap(
+          engine,
+          mod,
+          docHandle,
+          pageHandle,
+          objHandle,
+        );
         if (bitmap) {
           try {
             const bmpWidth = typeof mod.FPDFBitmap_GetWidth === 'function' ? mod.FPDFBitmap_GetWidth(bitmap) : 0;
@@ -1444,62 +1581,142 @@ export function wipeImagesInRects(
   return modified;
 }
 
+const FPDF_PAGEOBJ_TEXT = 1;
+
 interface SurvivingSegment {
   text: string;
   originX: number;
   originY: number;
   fontSize: number;
   startCharIndex: number;
+  fontFamily?: string;
+  rawFontFamily?: string;
+  fontWeight?: string;
+  fontStyle?: string;
+  color?: ColorRgba;
 }
 
 interface LineCharToken {
   charData: PageCharacter;
   hasPrecedingSpace: boolean;
+  fontFamily?: string;
+  rawFontFamily?: string;
+  fontWeight?: string;
+  fontStyle?: string;
+  color?: ColorRgba;
 }
 
+interface LineTextObjectInfo {
+  index: number;
+  handle: number;
+  left: number;
+  bottom: number;
+  right: number;
+  top: number;
+  matrix: PdfMatrix | null;
+}
+
+type RedactTargetLine = Partial<TextLine> & {
+  left: number;
+  baselineY: number;
+  width: number;
+  fontSize: number;
+  text?: string;
+  charStartIndex?: number;
+  words?: TextWord[];
+  fontFamily?: string;
+  rawFontFamily?: string;
+  fontWeight?: string;
+  fontStyle?: string;
+  color?: ColorRgba;
+  hasBulletPrefix?: boolean;
+  bulletWord?: TextWord;
+};
+
 function extractLineCharTokens(
-  line: Partial<TextLine> & {
-    left: number;
-    baselineY: number;
-    width: number;
-    fontSize: number;
-    text?: string;
-    charStartIndex?: number;
-    words?: TextWord[];
-  },
+  line: RedactTargetLine,
   charMap: Map<number, PageCharacter>,
   allCharacters: PageCharacter[]
 ): LineCharToken[] {
   const tokens: LineCharToken[] = [];
 
+  const lineWords: TextWord[] = [];
+  if (line.hasBulletPrefix && line.bulletWord) {
+    lineWords.push(line.bulletWord);
+  }
   if (line.words && line.words.length > 0) {
-    for (let wIdx = 0; wIdx < line.words.length; wIdx++) {
-      const word = line.words[wIdx];
-      const prevWord = wIdx > 0 ? line.words[wIdx - 1] : null;
+    for (const w of line.words) {
+      if (w !== line.bulletWord) {
+        lineWords.push(w);
+      }
+    }
+  }
+
+  if (lineWords.length > 0) {
+    for (let wIdx = 0; wIdx < lineWords.length; wIdx++) {
+      const word = lineWords[wIdx];
+      const prevWord = wIdx > 0 ? lineWords[wIdx - 1] : null;
       const hasSpace = prevWord
         ? Boolean(word.hasPrecedingSpace) || (word.left - prevWord.right) >= Math.min(prevWord.fontSize, word.fontSize) * 0.18
         : false;
 
-      for (let k = 0; k < word.charCount; k++) {
-        const cIdx = word.charStartIndex + k;
-        const charData = charMap.get(cIdx);
-        if (charData) {
-          tokens.push({
-            charData,
-            hasPrecedingSpace: k === 0 ? hasSpace : false,
-          });
+      if (word.charIndices && word.charIndices.length > 0) {
+        let addedInWord = 0;
+        for (let k = 0; k < word.charIndices.length; k++) {
+          const cIdx = word.charIndices[k];
+          const charData = charMap.get(cIdx);
+          if (charData && charData.unicode.trim().length > 0) {
+            tokens.push({
+              charData,
+              hasPrecedingSpace: addedInWord === 0 ? hasSpace : false,
+              fontFamily: word.fontFamily || line.fontFamily,
+              rawFontFamily: word.rawFontFamily || line.rawFontFamily,
+              fontWeight: word.fontWeight || line.fontWeight,
+              fontStyle: word.fontStyle || line.fontStyle,
+              color: word.color || line.color,
+            });
+            addedInWord++;
+          }
+        }
+      } else {
+        let addedInWord = 0;
+        for (let k = 0; k < word.charCount; k++) {
+          const cIdx = word.charStartIndex + k;
+          const charData = charMap.get(cIdx);
+          if (charData && charData.unicode.trim().length > 0) {
+            tokens.push({
+              charData,
+              hasPrecedingSpace: addedInWord === 0 ? hasSpace : false,
+              fontFamily: word.fontFamily || line.fontFamily,
+              rawFontFamily: word.rawFontFamily || line.rawFontFamily,
+              fontWeight: word.fontWeight || line.fontWeight,
+              fontStyle: word.fontStyle || line.fontStyle,
+              color: word.color || line.color,
+            });
+            addedInWord++;
+          }
         }
       }
     }
   }
 
   if (tokens.length === 0) {
-    const matched = allCharacters.filter(
-      (c) =>
-        Math.abs(c.originY - line.baselineY) < 1.5 &&
-        c.left >= line.left - 2.5 &&
-        c.right <= line.left + line.width + 2.5
-    );
+    const baselineTol = Math.max(2.5, line.fontSize * 0.25);
+    const effectiveLeft = line.hasBulletPrefix && line.bulletWord
+      ? Math.min(line.left, line.bulletWord.left)
+      : line.left;
+    const effectiveRight = line.left + line.width;
+
+    const matched = allCharacters.filter((c) => {
+      if (c.unicode.trim().length === 0) return false;
+      const cLeft = c.domLeft !== undefined ? c.domLeft : c.left;
+      const cRight = c.domRight !== undefined ? c.domRight : c.right;
+      return (
+        Math.abs(c.originY - line.baselineY) <= baselineTol &&
+        cLeft >= effectiveLeft - 2.5 &&
+        cRight <= effectiveRight + 2.5
+      );
+    });
     matched.sort((a, b) => a.originX - b.originX);
 
     for (let i = 0; i < matched.length; i++) {
@@ -1509,6 +1726,11 @@ function extractLineCharTokens(
       tokens.push({
         charData: c,
         hasPrecedingSpace: hasSpace,
+        fontFamily: line.fontFamily,
+        rawFontFamily: line.rawFontFamily,
+        fontWeight: line.fontWeight,
+        fontStyle: line.fontStyle,
+        color: line.color,
       });
     }
   }
@@ -1523,102 +1745,129 @@ function partitionSurvivingSegments(
 ): { survivingSegments: SurvivingSegment[]; lineHasRedacted: boolean } {
   const survivingSegments: SurvivingSegment[] = [];
   let currentSeg: SurvivingSegment | null = null;
+  let lastUnredactedChar: PageCharacter | null = null;
   let lineHasRedacted = false;
+
+  const flushCurrentSegment = (): void => {
+    if (currentSeg) {
+      currentSeg.text = currentSeg.text.trimEnd();
+      if (currentSeg.text.length > 0) {
+        survivingSegments.push(currentSeg);
+      }
+      currentSeg = null;
+    }
+  };
 
   for (const token of tokens) {
     const isCharRedacted = isRedacted(token.charData.charIndex);
     if (isCharRedacted) {
       lineHasRedacted = true;
       handledCharIndices.add(token.charData.charIndex);
-      if (currentSeg) {
-        currentSeg.text = currentSeg.text.trimEnd();
-        if (currentSeg.text.length > 0) {
-          survivingSegments.push(currentSeg);
-        }
-        currentSeg = null;
-      }
+      flushCurrentSegment();
+      lastUnredactedChar = null;
     } else {
-      if (!currentSeg) {
-        if (token.charData.unicode.trim().length === 0) {
-          continue;
+      if (token.charData.unicode.trim().length === 0) {
+        continue;
+      }
+
+      if (currentSeg && lastUnredactedChar) {
+        const horizontalGap = token.charData.left - lastUnredactedChar.right;
+        const maxIntraSegmentGap = Math.min(
+          32,
+          Math.max(16, Math.max(lastUnredactedChar.fontSize, token.charData.fontSize) * 1.8)
+        );
+        if (horizontalGap > maxIntraSegmentGap) {
+          flushCurrentSegment();
         }
+      }
+
+      if (!currentSeg) {
         currentSeg = {
           text: token.charData.unicode,
           originX: token.charData.originX,
           originY: token.charData.originY,
           fontSize: token.charData.fontSize,
           startCharIndex: token.charData.charIndex,
+          fontFamily: token.fontFamily,
+          rawFontFamily: token.rawFontFamily,
+          fontWeight: token.fontWeight,
+          fontStyle: token.fontStyle,
+          color: token.color,
         };
       } else {
-        if (token.hasPrecedingSpace) {
+        const needsSpace =
+          token.hasPrecedingSpace ||
+          (lastUnredactedChar !== null &&
+            (token.charData.left - lastUnredactedChar.right) >=
+              Math.min(lastUnredactedChar.fontSize, token.charData.fontSize) * 0.18);
+        if (needsSpace && !currentSeg.text.endsWith(' ')) {
           currentSeg.text += ' ';
         }
         currentSeg.text += token.charData.unicode;
       }
+
+      lastUnredactedChar = token.charData;
     }
   }
 
-  if (currentSeg) {
-    currentSeg.text = currentSeg.text.trimEnd();
-    if (currentSeg.text.length > 0) {
-      survivingSegments.push(currentSeg);
-    }
-  }
+  flushCurrentSegment();
 
   return { survivingSegments, lineHasRedacted };
 }
 
-function applySegmentPartitionToLine(
+function findLineTextObjects(
   engine: PdfiumEngine,
   mod: ReturnType<PdfiumEngine['getModule']>,
-  docHandle: number,
   pageHandle: number,
-  line: Partial<TextLine> & {
-    left: number;
-    baselineY: number;
-    width: number;
-    fontSize: number;
-    fontFamily?: string;
-    rawFontFamily?: string;
-    fontWeight?: string;
-    fontStyle?: string;
-    color?: ColorRgba;
-  },
-  survivingSegments: SurvivingSegment[]
-): boolean {
-  const objectIndices = findTextObjectIndicesForSpan(
+  line: RedactTargetLine
+): LineTextObjectInfo[] {
+  const effectiveLeft = line.hasBulletPrefix && line.bulletWord
+    ? Math.min(line.left, line.bulletWord.left)
+    : line.left;
+  const effectiveRight = line.left + line.width;
+  const effectiveWidth = Math.max(1, effectiveRight - effectiveLeft);
+
+  const centerMatched = findTextObjectIndicesForSpan(
     engine,
     mod,
     pageHandle,
-    line.left,
+    effectiveLeft,
     line.baselineY,
-    line.width,
+    effectiveWidth,
     line.fontSize
   );
 
-  if (survivingSegments.length === 0) {
-    if (objectIndices.length > 0) {
-      removeTextObjectsByIndex(mod, pageHandle, objectIndices);
-    } else {
-      removeTextObjectsInBounds(
-        engine,
-        mod,
-        pageHandle,
-        line.left,
-        line.baselineY,
-        line.width,
-        line.fontSize
-      );
-    }
-    return true;
+  const hasBoundsApi =
+    typeof mod.FPDFPageObj_GetBounds === 'function' &&
+    typeof mod.FPDFPage_CountObjects === 'function' &&
+    typeof mod.FPDFPage_GetObject === 'function';
+
+  if (!hasBoundsApi) {
+    return centerMatched.map((idx) => {
+      const handle = typeof mod.FPDFPage_GetObject === 'function'
+        ? mod.FPDFPage_GetObject(pageHandle, idx)
+        : 0;
+      return {
+        index: idx,
+        handle,
+        left: 0,
+        bottom: 0,
+        right: 0,
+        top: 0,
+        matrix: handle ? getPageObjectMatrix(engine, mod, handle) : null,
+      };
+    });
   }
 
-  const baseObjHandle = objectIndices.length > 0
-    ? mod.FPDFPage_GetObject(pageHandle, objectIndices[0])
-    : 0;
-  const origMatrix = baseObjHandle
-    ? getPageObjectMatrix(engine, mod, baseObjHandle)
-    : null;
+  const matchedIndexSet = new Set<number>(centerMatched);
+  const objectCount = mod.FPDFPage_CountObjects(pageHandle);
+  const cropInfo = getPageCropInfo(engine, mod, pageHandle);
+  const pdfLeft = effectiveLeft + cropInfo.cropLeft;
+  const targetLeft = pdfLeft - 1;
+  const targetRight = pdfLeft + effectiveWidth + 1;
+  const targetBottom = line.baselineY - line.fontSize * 0.5;
+  const targetTop = line.baselineY + line.fontSize * 1.2;
+  const { leftPtr, bottomPtr, rightPtr, topPtr } = engine.getBoundsScratchBuffer();
 
   const countToUpdate = Math.min(survivingSegments.length, objectIndices.length);
   for (let i = 0; i < countToUpdate; i++) {
