@@ -532,8 +532,8 @@ export async function processUploadedSignatureImage(
     img.onload = () => {
       // Constrain oversized image dimensions to prevent freezing main thread
       const MAX_UPLOAD_DIM = 600;
-      let targetW = img.naturalWidth || img.width;
-      let targetH = img.naturalHeight || img.height;
+      let targetW = img.naturalWidth || img.width || 400;
+      let targetH = img.naturalHeight || img.height || 160;
 
       if (targetW > MAX_UPLOAD_DIM || targetH > MAX_UPLOAD_DIM) {
         if (targetW >= targetH) {
@@ -569,6 +569,35 @@ export async function processUploadedSignatureImage(
         hasTargetColor = true;
       }
 
+      // Detect whether the uploaded signature already has a transparent background
+      // (such as a transparent PNG/WebP/SVG with dark, coloured, or white ink).
+      const totalPixels = targetW * targetH;
+      let transparentCount = 0;
+      let borderOpaqueLightCount = 0;
+      let darkForegroundCount = 0;
+
+      for (let y = 0; y < targetH; y++) {
+        for (let x = 0; x < targetW; x++) {
+          const idx = (y * targetW + x) * 4;
+          const a = data[idx + 3];
+          if (a <= 16) {
+            transparentCount++;
+            continue;
+          }
+          const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+          if (lum < threshold) {
+            darkForegroundCount++;
+          } else if (x === 0 || x === targetW - 1 || y === 0 || y === targetH - 1) {
+            borderOpaqueLightCount++;
+          }
+        }
+      }
+
+      const hasExistingTransparentBackground =
+        totalPixels > 0 &&
+        transparentCount >= totalPixels * 0.1 &&
+        borderOpaqueLightCount === 0;
+
       for (let i = 0; i < data.length; i += 4) {
         const r = data[i];
         const g = data[i + 1];
@@ -576,6 +605,25 @@ export async function processUploadedSignatureImage(
         const a = data[i + 3];
 
         if (a === 0) continue;
+
+        if (hasExistingTransparentBackground) {
+          if (
+            darkForegroundCount > 0 &&
+            a === 255 &&
+            r >= 252 &&
+            g >= 252 &&
+            b >= 252
+          ) {
+            data[i + 3] = 0;
+            continue;
+          }
+          if (hasTargetColor) {
+            data[i] = rTarget;
+            data[i + 1] = gTarget;
+            data[i + 2] = bTarget;
+          }
+          continue;
+        }
 
         // Calculate perceived brightness via standard luminance formula
         const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
@@ -614,3 +662,125 @@ export async function processUploadedSignatureImage(
     img.src = imageSource;
   });
 }
+
+export interface ComposeSignatureAppearanceOptions {
+  graphicDataUrl?: string;
+  signerName: string;
+  showTextDetails: boolean;
+  color?: string;
+  fontFamily?: string;
+}
+
+/**
+ * Composites a signature graphic (or cursive typed fallback) and an optional
+ * centered full name underneath into a single unified transparent PNG Data URL.
+ * This ensures the visual signature behaves as a single unified moveable image
+ * on both the interactive canvas and the stamped PDF page.
+ *
+ * @param options Visual signature composition parameters.
+ * @return Unified Data URL, aspect ratio, and whether canvas composition succeeded.
+ */
+export async function composeSignatureAppearanceDataUrl(
+  options: ComposeSignatureAppearanceOptions
+): Promise<{ dataUrl: string; aspectRatio: number; isComposite: boolean }> {
+  const cleanName = options.signerName.trim() || 'Authorized Signer';
+
+  if (!options.showTextDetails && options.graphicDataUrl) {
+    return {
+      dataUrl: options.graphicDataUrl,
+      aspectRatio: 3,
+      isComposite: true,
+    };
+  }
+
+  if (typeof document === 'undefined') {
+    return {
+      dataUrl: options.graphicDataUrl ?? '',
+      aspectRatio: 3,
+      isComposite: false,
+    };
+  }
+
+  const width = 440;
+  const height = 160;
+  const dpr = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return {
+      dataUrl: options.graphicDataUrl ?? '',
+      aspectRatio: 3,
+      isComposite: false,
+    };
+  }
+
+  ctx.scale(dpr, dpr);
+
+  if (options.graphicDataUrl) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          const areaH = options.showTextDetails ? height * 0.72 : height * 0.9;
+          const maxW = width * 0.88;
+          const maxH = areaH * 0.86;
+          const naturalW = Math.max(1, img.naturalWidth || img.width || 240);
+          const naturalH = Math.max(1, img.naturalHeight || img.height || 80);
+          const scale = Math.min(maxW / naturalW, maxH / naturalH);
+          const drawW = naturalW * scale;
+          const drawH = naturalH * scale;
+          const drawX = (width - drawW) / 2;
+          const drawY = (areaH - drawH) / 2;
+          ctx.drawImage(img, drawX, drawY, drawW, drawH);
+          resolve();
+        };
+        img.onerror = () => reject(new Error('Failed to load signature graphic for composition.'));
+        img.src = options.graphicDataUrl!;
+      });
+    } catch {
+      return {
+        dataUrl: options.graphicDataUrl,
+        aspectRatio: 3,
+        isComposite: false,
+      };
+    }
+  } else {
+    const scriptFont = options.fontFamily || 'Dancing Script';
+    ctx.font = `italic 42px "${scriptFont}", cursive, serif`;
+    ctx.fillStyle = options.color || '#0f172a';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const scriptY = options.showTextDetails ? height * 0.42 : height * 0.52;
+    ctx.fillText(cleanName, width / 2, scriptY, width * 0.9);
+  }
+
+  if (options.showTextDetails) {
+    ctx.font = '500 20px Inter, Helvetica, Arial, sans-serif';
+    ctx.fillStyle = '#1e293b';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(cleanName, width / 2, height * 0.86, width * 0.92);
+  }
+
+  const dataUrl = canvas.toDataURL('image/png');
+  if (!dataUrl || dataUrl === 'data:,') {
+    return {
+      dataUrl: options.graphicDataUrl ?? '',
+      aspectRatio: 3,
+      isComposite: false,
+    };
+  }
+
+  return {
+    dataUrl,
+    aspectRatio: width / height,
+    isComposite: true,
+  };
+}
+
+export * from './digital-signature-storage';
+
+
