@@ -863,7 +863,9 @@ export class PdfDocument {
   public duplicatePage(pageIndex: number): void {
     this._isPdfiumDirty = true;
     this.closeAllPages();
+    this._pageRotationDeltas.clear();
     this._cachedAcroFormFieldSpans = null;
+    this._cachedTypographyProfile = null;
     this._fontCharsetIndex.invalidate();
     this._pageDimensionsCache.clear();
     this._pageSpansCache.clear();
@@ -877,8 +879,11 @@ export class PdfDocument {
    * @param toIndex The zero-based destination index.
    */
   public reorderPages(fromIndices: number[], toIndex: number): void {
+    this._isPdfiumDirty = true;
     this.closeAllPages();
+    this._pageRotationDeltas.clear();
     this._cachedAcroFormFieldSpans = null;
+    this._cachedTypographyProfile = null;
     this._fontCharsetIndex.invalidate();
     this._pageDimensionsCache.clear();
     this._pageSpansCache.clear();
@@ -891,8 +896,11 @@ export class PdfDocument {
    * @param pageIndex The zero-based index of the page to delete.
    */
   public deletePage(pageIndex: number): void {
+    this._isPdfiumDirty = true;
     this.closeAllPages();
+    this._pageRotationDeltas.clear();
     this._cachedAcroFormFieldSpans = null;
+    this._cachedTypographyProfile = null;
     this._fontCharsetIndex.invalidate();
     this._pageDimensionsCache.clear();
     this._pageSpansCache.clear();
@@ -907,8 +915,11 @@ export class PdfDocument {
    * @param atIndex The zero-based index at which to insert the new image page.
    */
   public async importImageAsPage(imageBuffer: ArrayBuffer, mimeType: string, atIndex: number): Promise<void> {
+    this._isPdfiumDirty = true;
     this.closeAllPages();
+    this._pageRotationDeltas.clear();
     this._cachedAcroFormFieldSpans = null;
+    this._cachedTypographyProfile = null;
     this._fontCharsetIndex.invalidate();
     this._pageDimensionsCache.clear();
     this._pageSpansCache.clear();
@@ -931,8 +942,8 @@ export class PdfDocument {
    */
   public async addOutlineItem(options: AddOrUpdateOutlineOptions): Promise<Uint8Array> {
     const outlineOps = await import('./operations/outline-ops');
-    const rawBytes = await this.saveAsync();
-    const updatedBytes = await outlineOps.addOrUpdateOutlineItem(rawBytes, options);
+    const session = await this.saveForRewrite();
+    const updatedBytes = await session.seal(await outlineOps.addOrUpdateOutlineItem(session.bytes, options));
     this.setRawBuffer(updatedBytes);
     return updatedBytes;
   }
@@ -945,8 +956,8 @@ export class PdfDocument {
    */
   public async setOutline(items: OutlineItemFlat[]): Promise<Uint8Array> {
     const outlineOps = await import('./operations/outline-ops');
-    const rawBytes = await this.saveAsync();
-    const updatedBytes = await outlineOps.setOutlineItems(rawBytes, items);
+    const session = await this.saveForRewrite();
+    const updatedBytes = await session.seal(await outlineOps.setOutlineItems(session.bytes, items));
     this.setRawBuffer(updatedBytes);
     return updatedBytes;
   }
@@ -960,11 +971,11 @@ export class PdfDocument {
    */
   public async reorderOutline(fromIndices: number[], toIndex: number): Promise<Uint8Array> {
     const outlineOps = await import('./operations/outline-ops');
-    const rawBytes = await this.saveAsync();
+    const session = await this.saveForRewrite();
     const currentNodes = this.getOutline();
     const flatItems = outlineOps.flattenOutlineTree(currentNodes);
     const reordered = outlineOps.reorderOutlineItems(flatItems, fromIndices, toIndex);
-    const updatedBytes = await outlineOps.setOutlineItems(rawBytes, reordered);
+    const updatedBytes = await session.seal(await outlineOps.setOutlineItems(session.bytes, reordered));
     this.setRawBuffer(updatedBytes);
     return updatedBytes;
   }
@@ -976,11 +987,11 @@ export class PdfDocument {
    */
   public async sortOutlineTopToBottom(): Promise<Uint8Array> {
     const outlineOps = await import('./operations/outline-ops');
-    const rawBytes = await this.saveAsync();
+    const session = await this.saveForRewrite();
     const currentNodes = this.getOutline();
     const flatItems = outlineOps.flattenOutlineTree(currentNodes);
     const sorted = outlineOps.sortOutlineTopToBottom(flatItems);
-    const updatedBytes = await outlineOps.setOutlineItems(rawBytes, sorted);
+    const updatedBytes = await session.seal(await outlineOps.setOutlineItems(session.bytes, sorted));
     this.setRawBuffer(updatedBytes);
     return updatedBytes;
   }
@@ -994,8 +1005,8 @@ export class PdfDocument {
    */
   public async updateOutlineItemLevel(index: number, newLevel: number): Promise<Uint8Array> {
     const outlineOps = await import('./operations/outline-ops');
-    const rawBytes = await this.saveAsync();
-    const updatedBytes = await outlineOps.updateOutlineItemLevel(rawBytes, index, newLevel);
+    const session = await this.saveForRewrite();
+    const updatedBytes = await session.seal(await outlineOps.updateOutlineItemLevel(session.bytes, index, newLevel));
     this.setRawBuffer(updatedBytes);
     return updatedBytes;
   }
@@ -1009,8 +1020,8 @@ export class PdfDocument {
    */
   public async removeOutlineItem(title: string, pageIndex?: number): Promise<Uint8Array> {
     const outlineOps = await import('./operations/outline-ops');
-    const rawBytes = await this.saveAsync();
-    const updatedBytes = await outlineOps.removeOutlineItemFromPdf(rawBytes, title, pageIndex);
+    const session = await this.saveForRewrite();
+    const updatedBytes = await session.seal(await outlineOps.removeOutlineItemFromPdf(session.bytes, title, pageIndex));
     this.setRawBuffer(updatedBytes);
     return updatedBytes;
   }
@@ -1050,14 +1061,25 @@ export class PdfDocument {
    * Applies ISO 32000 standard encryption and access permissions to the active document.
    */
   public applySecurity(options: SecurityOptions): { success: boolean; isEncrypted: boolean; permissions: number } {
-    return securityOps.applyPdfSecurity(this.engine, this.getDocHandle(), options);
+    this._isPdfiumDirty = true;
+    const result = securityOps.applyPdfSecurity(this.engine, this.getDocHandle(), options);
+    // note: the handle now carries a new security handler that the raw buffer predates
+    this._securityCredential = options.ownerPassword || options.userPassword || '';
+    this._isSecurityHandlerStale = true;
+    this._encryptionContextPromise = null;
+    return result;
   }
 
   /**
    * Removes encryption and security restrictions from the active document.
    */
   public removeSecurity(ownerPassword?: string): { success: boolean } {
-    return securityOps.removePdfSecurity(this.engine, this.getDocHandle(), ownerPassword);
+    this._isPdfiumDirty = true;
+    const result = securityOps.removePdfSecurity(this.engine, this.getDocHandle(), ownerPassword);
+    this._securityCredential = '';
+    this._isSecurityHandlerStale = true;
+    this._encryptionContextPromise = null;
+    return result;
   }
 
   /**
@@ -1115,8 +1137,8 @@ export class PdfDocument {
   public async updateMetadata(
     updates: DocumentMetadataUpdate
   ): Promise<{ bytes: Uint8Array; metadata: DocumentMetadata }> {
-    const rawBytes = await this.saveAsync();
-    const updatedBytes = await metadataOps.updateDocumentMetadata(rawBytes, updates);
+    const session = await this.saveForRewrite();
+    const updatedBytes = await session.seal(await metadataOps.updateDocumentMetadata(session.bytes, updates));
     this.setRawBuffer(updatedBytes);
     const updatedMeta = await metadataOps.extractAllMetadata(
       this.engine,
@@ -1192,6 +1214,18 @@ export class PdfDocument {
    * @throws If the file writer fails to initialize or save.
    */
   public save(): Uint8Array {
+    return this.serialise(0);
+  }
+
+  /**
+   * Serialises the PDFium document through the native file writer.
+   * Ensures all opened pages are flushed and closed before saving to prevent memory leaks.
+   *
+   * @param flags FPDF_SaveAsCopy flags; 0 keeps the active security handler.
+   * @return A Uint8Array containing the serialised PDF file.
+   * @throws If the file writer fails to initialise or save.
+   */
+  private serialise(flags: number): Uint8Array {
     const mod = this.engine.getModule();
     const docHandle = this.getDocHandle();
 
@@ -1201,7 +1235,10 @@ export class PdfDocument {
     if (!writerPtr) throw new Error('Failed to open PDF file writer.');
 
     try {
-      const ok = mod.PDFiumExt_SaveAsCopy(docHandle, writerPtr);
+      const ok =
+        flags === 0
+          ? mod.PDFiumExt_SaveAsCopy(docHandle, writerPtr)
+          : mod.FPDF_SaveAsCopy(docHandle, writerPtr, flags);
       if (!ok) throw new Error('Failed to save document copy.');
 
       const size = mod.PDFiumExt_GetFileWriterSize(writerPtr);
@@ -1223,40 +1260,30 @@ export class PdfDocument {
   /**
    * Saves the current document state to a byte array and asynchronously applies pending AcroForm fields.
    * Ensures all opened pages are properly flushed and closed before saving to prevent memory leaks.
+   * Encrypted documents remain encrypted with their original security handler.
    * @param pageTransforms Optional map or record of page rotation and scaling transforms to bake into the saved document.
    * @returns A Promise resolving to a Uint8Array containing the serialized PDF file.
    */
   public async saveAsync(pageTransforms?: Record<number, PageTransform> | Map<number, PageTransform>): Promise<Uint8Array> {
-    const mod = this.engine.getModule();
-    const docHandle = this.getDocHandle();
-    for (const page of this.pages.values()) {
-      page.generateContent();
-    }
+    const { bytes } = await this.serialiseWithPendingChanges(pageTransforms, 'preserve');
+    return bytes;
+  }
+
+  /**
+   * Serialises the document and applies pending AcroForm fields, links, attachments and
+   * page transforms through pdf-lib. pdf-lib only ever operates on decrypted bytes; in
+   * 'preserve' mode its output is re-encrypted with the original file key.
+   *
+   * @param pageTransforms Optional page rotation and scaling transforms to bake.
+   * @param mode 'preserve' keeps encryption, 'plaintext' strips it for further rewrites.
+   * @return Serialised bytes and the encryption context of the source document.
+   */
+  private async serialiseWithPendingChanges(
+    pageTransforms: Record<number, PageTransform> | Map<number, PageTransform> | undefined,
+    mode: 'preserve' | 'plaintext'
+  ): Promise<{ bytes: Uint8Array; encryption: PdfEncryptionContext | null }> {
     const pendingFields = this.getAllPendingAcroFormFields();
     const hasRemovedFields = this.removedAcroFormFieldNames.size > 0;
-    this.closeAllPages();
-
-    const writerPtr = mod.PDFiumExt_OpenFileWriter();
-    if (!writerPtr) throw new Error('Failed to open PDF file writer.');
-
-    let pdfiumBytes: Uint8Array;
-    try {
-      const ok = mod.PDFiumExt_SaveAsCopy(docHandle, writerPtr);
-      if (!ok) throw new Error('Failed to save document copy.');
-
-      const size = mod.PDFiumExt_GetFileWriterSize(writerPtr);
-      const dataPtr = this.engine.allocateMemory(size);
-      try {
-        mod.PDFiumExt_GetFileWriterData(writerPtr, dataPtr, size);
-        const srcBytes = new Uint8Array(mod.pdfium.HEAPU8.buffer, dataPtr, size);
-        pdfiumBytes = new Uint8Array(size);
-        pdfiumBytes.set(srcBytes);
-      } finally {
-        this.engine.freeMemory(dataPtr);
-      }
-    } finally {
-      mod.PDFiumExt_CloseFileWriter(writerPtr);
-    }
 
     const getTransform = (idx: number): PageTransform | undefined => {
       if (!pageTransforms) return undefined;
@@ -1275,8 +1302,36 @@ export class PdfDocument {
     ));
     const hasPendingLinks = this.pendingLinkAnnotationsByPage.size > 0;
     const hasPendingAttachments = this.pendingAttachments.length > 0;
+    const hasModifiedFormFields = this._modifiedFormFieldValues.size > 0;
+    const hasPageRotationDeltas = this._pageRotationDeltas.size > 0;
+    const needsPdfLibPass =
+      pendingFields.length > 0 ||
+      hasTransforms ||
+      hasRemovedFields ||
+      hasPendingLinks ||
+      hasPendingAttachments ||
+      hasModifiedFormFields ||
+      hasPageRotationDeltas;
 
-    if (pendingFields.length > 0 || hasTransforms || hasRemovedFields || hasPendingLinks || hasPendingAttachments) {
+    let pdfiumBytes: Uint8Array;
+    let encryption: PdfEncryptionContext | null = null;
+
+    if (typeof this.engine.getModule !== 'function') {
+      if (this._rawBuffer) {
+        pdfiumBytes = this._rawBuffer instanceof Uint8Array ? this._rawBuffer : new Uint8Array(this._rawBuffer);
+      } else {
+        throw new Error('PDFium engine module not available.');
+      }
+    } else {
+      for (const page of this.pages.values()) {
+        page.generateContent();
+      }
+      // note: native PDFium saves already re-encrypt, so the key is only needed for pdf-lib passes
+      encryption = needsPdfLibPass || mode === 'plaintext' ? await this.getEncryptionContext() : null;
+      pdfiumBytes = this.serialise(encryption ? FPDF_REMOVE_SECURITY : 0);
+    }
+
+    if (needsPdfLibPass) {
       const {
         PDFDocument,
         TextAlignment,
@@ -1289,6 +1344,11 @@ export class PdfDocument {
         PDFString,
         StandardFonts,
         rgb,
+        PDFTextField,
+        PDFCheckBox,
+        PDFRadioGroup,
+        PDFDropdown,
+        PDFOptionList,
       } = await import('pdf-lib');
 
       const pdfDoc = await PDFDocument.load(pdfiumBytes, { ignoreEncryption: true });
@@ -1305,6 +1365,18 @@ export class PdfDocument {
         }
         if (field.id) {
           this.purgeAcroFormField(pdfDoc, field.id);
+        }
+      }
+
+      if (hasPageRotationDeltas) {
+        const pageCount = pdfDoc.getPageCount();
+        for (const [rotPageIdx, rotInfo] of this._pageRotationDeltas.entries()) {
+          if (rotPageIdx < 0 || rotPageIdx >= pageCount) continue;
+          const page = pdfDoc.getPage(rotPageIdx);
+          const currentAngle = (((page.getRotation().angle % 360) + 360) % 360);
+          if (currentAngle !== rotInfo.expectedAngle) {
+            page.setRotation(degrees(rotInfo.expectedAngle));
+          }
         }
       }
 
@@ -1417,6 +1489,43 @@ export class PdfDocument {
         }
       }
 
+      // Apply user-modified AcroForm field values to existing native fields
+      if (this._modifiedFormFieldValues.size > 0) {
+        form.acroForm.dict.set(PDFName.of('NeedAppearances'), PDFBool.True);
+        for (const [fieldName, val] of this._modifiedFormFieldValues.entries()) {
+          try {
+            const f = form.getFieldMaybe(fieldName);
+            if (!f) continue;
+            if (f instanceof PDFTextField) {
+              f.setText(typeof val === 'string' ? val : String(val));
+            } else if (f instanceof PDFCheckBox) {
+              const isChecked = val === true || val === 'true' || val === '1' || val === 'yes';
+              if (isChecked) {
+                f.check();
+              } else {
+                f.uncheck();
+              }
+            } else if (f instanceof PDFRadioGroup) {
+              if (typeof val === 'string' && val !== 'false' && val !== '') {
+                try {
+                  f.select(val);
+                } catch {}
+              } else {
+                try {
+                  f.clear();
+                } catch {}
+              }
+            } else if ((f instanceof PDFDropdown || f instanceof PDFOptionList) && typeof val === 'string') {
+              try {
+                f.select(val);
+              } catch {}
+            }
+          } catch (err) {
+            console.warn(`Failed to update AcroForm field "${fieldName}" in PDF:`, err);
+          }
+        }
+      }
+
       // Apply AcroForm fields
       if (pendingFields.length > 0) {
         // Ensure Chromium and PDF viewers refresh appearances from form values
@@ -1449,29 +1558,48 @@ export class PdfDocument {
           const scaledFontSize = field.fontSize ? Math.max(4, Math.round(field.fontSize * sMin * 10) / 10) : undefined;
           const scaledBorderWidth = field.borderWidth !== undefined ? Math.max(0.5, Math.round(field.borderWidth * sMin * 10) / 10) : undefined;
 
+          const isCenterRotatedWithPage = pageRot !== 0 && elemRot !== 0;
+
           let targetX = cropX + vx;
           let targetY = cropY + cropH - vy - vh;
+          let fieldRotationDegrees = degrees(effectiveRot);
 
-          switch (pageRot) {
-            case 0:
-              targetX = cropX + vx;
-              targetY = cropY + cropH - vy - vh;
-              break;
-            case 90:
-              targetX = cropX + cropW - vy;
-              targetY = cropY + vx;
-              break;
-            case 180:
-              targetX = cropX + cropW - vx;
-              targetY = cropY + vy + vh;
-              break;
-            case 270:
-              targetX = cropX + vy;
-              targetY = cropY + cropH - vx;
-              break;
+          if (isCenterRotatedWithPage) {
+            const isOrthogonal = pageRot === 90 || pageRot === 270;
+            const rotPageW = isOrthogonal ? cropH * sy : cropW * sx;
+            const rotPageH = isOrthogonal ? cropW * sx : cropH * sy;
+            const reverseRot = ((360 - pageRot) % 360) as 90 | 180 | 270;
+            const unrotCenter = transformPointForPageRotation(
+              { x: vx + vw / 2, y: vy + vh / 2 },
+              reverseRot,
+              rotPageW,
+              rotPageH,
+            );
+            const unrotX = Math.round((unrotCenter.x - vw / 2) * 10) / 10;
+            const unrotY = Math.round((unrotCenter.y - vh / 2) * 10) / 10;
+            targetX = cropX + unrotX;
+            targetY = cropY + cropH * sy - unrotY - vh;
+            fieldRotationDegrees = degrees(0);
+          } else {
+            switch (pageRot) {
+              case 0:
+                targetX = cropX + vx;
+                targetY = cropY + cropH - vy - vh;
+                break;
+              case 90:
+                targetX = cropX + cropW - vy;
+                targetY = cropY + vx;
+                break;
+              case 180:
+                targetX = cropX + cropW - vx;
+                targetY = cropY + vy + vh;
+                break;
+              case 270:
+                targetX = cropX + vy;
+                targetY = cropY + cropH - vx;
+                break;
+            }
           }
-
-          const fieldRotationDegrees = degrees(effectiveRot);
 
           const tooltipText = field.label || field.placeholder;
           const setTooltip = (acroField: PDFAcroField) => {
@@ -1730,19 +1858,23 @@ export class PdfDocument {
             const fieldName = getUniqueAcroFieldName(form, baseName, usedFieldNames);
 
             let sigRect: [number, number, number, number];
-            switch (pageRot) {
-              case 0:
-                sigRect = [cropX + vx, cropY + cropH - vy - vh, cropX + vx + vw, cropY + cropH - vy];
-                break;
-              case 90:
-                sigRect = [cropX + vy, cropY + vx, cropX + vy + vh, cropY + vx + vw];
-                break;
-              case 180:
-                sigRect = [cropX + cropW - vx - vw, cropY + vy, cropX + cropW - vx, cropY + vy + vh];
-                break;
-              case 270:
-                sigRect = [cropX + cropW - vy - vh, cropY + cropH - vx - vw, cropX + cropW - vy, cropY + cropH - vx];
-                break;
+            if (isCenterRotatedWithPage) {
+              sigRect = [targetX, targetY, targetX + vw, targetY + vh];
+            } else {
+              switch (pageRot) {
+                case 0:
+                  sigRect = [cropX + vx, cropY + cropH - vy - vh, cropX + vx + vw, cropY + cropH - vy];
+                  break;
+                case 90:
+                  sigRect = [cropX + vy, cropY + vx, cropX + vy + vh, cropY + vx + vw];
+                  break;
+                case 180:
+                  sigRect = [cropX + cropW - vx - vw, cropY + vy, cropX + cropW - vx, cropY + vy + vh];
+                  break;
+                case 270:
+                  sigRect = [cropX + cropW - vy - vh, cropY + cropH - vx - vw, cropX + cropW - vy, cropY + cropH - vx];
+                  break;
+              }
             }
 
             const widgetDict = pdfDoc.context.obj({
@@ -1754,6 +1886,15 @@ export class PdfDocument {
               F: 4,
               P: page.ref,
             });
+
+            if (effectiveRot !== 0) {
+              widgetDict.set(
+                PDFName.of('MK'),
+                pdfDoc.context.obj({
+                  R: PDFNumber.of(effectiveRot),
+                }),
+              );
+            }
 
             if (tooltipText) {
               widgetDict.set(PDFName.of('TU'), PDFHexString.fromText(tooltipText));
@@ -1965,7 +2106,12 @@ export class PdfDocument {
         }
       }
 
-      pdfiumBytes = await pdfDoc.save({ useObjectStreams: false });
+      if (encryption && mode === 'preserve') {
+        const { saveEncryptedPdfDocument } = await import('./encryption/pdf-lib-encryption');
+        pdfiumBytes = await saveEncryptedPdfDocument(pdfDoc, encryption);
+      } else {
+        pdfiumBytes = await pdfDoc.save({ useObjectStreams: false });
+      }
     }
 
     this._cachedAcroFormFieldSpans = null;
@@ -1974,7 +2120,7 @@ export class PdfDocument {
     this.pendingLinkAnnotationsByPage.clear();
     this.pendingAttachments = [];
     this.removedAcroFormFieldNames.clear();
-    return pdfiumBytes;
+    return { bytes: pdfiumBytes, encryption };
   }
 
   /**
@@ -2002,9 +2148,9 @@ export class PdfDocument {
     pageTransforms?: Record<number, PageTransform>
   ): Promise<{ bytes: Uint8Array; summary: SanitizeSummary }> {
     const { sanitizePdf } = await import('./operations/sanitize-ops');
-    const rawBytes = await this.saveAsync(pageTransforms);
-    const { sanitizedBytes, summary } = await sanitizePdf(rawBytes, options);
-    return { bytes: sanitizedBytes, summary };
+    const session = await this.saveForRewrite(pageTransforms);
+    const { sanitizedBytes, summary } = await sanitizePdf(session.bytes, options);
+    return { bytes: await session.seal(sanitizedBytes), summary };
   }
 
   /**
@@ -2033,7 +2179,7 @@ export class PdfDocument {
     pageTransforms?: Record<number, PageTransform>
   ): Promise<{ bytes: Uint8Array; summary: CompressSummary }> {
     const { compressPdf } = await import('./operations/compress-ops');
-    const rawBytes = await this.saveAsync(pageTransforms);
+    const session = await this.saveForRewrite(pageTransforms);
 
     let pageRasterizer: PageRasterizer | undefined = undefined;
     if (options.level === 'flat_image') {
@@ -2051,9 +2197,9 @@ export class PdfDocument {
       };
     }
 
-    const result = await compressPdf(rawBytes, options, pageRasterizer);
+    const result = await compressPdf(session.bytes, options, pageRasterizer);
     return {
-      bytes: result.compressedBytes,
+      bytes: await session.seal(result.compressedBytes),
       summary: result.summary,
     };
   }
@@ -2070,8 +2216,15 @@ export class PdfDocument {
     pageTransforms?: Record<number, PageTransform>
   ): Promise<Uint8Array> {
     const { signPdfIso32000 } = await import('./operations/signature-ops');
-    const rawBytes = await this.saveAsync(pageTransforms);
-    const signedBytes = await signPdfIso32000(rawBytes, options);
+    const { hasPopulatedSignatures } = await import('./operations/signature-revision-ops');
+    const encryption = await this.getEncryptionContext();
+    let rawBytes = resolveVerbatimPdfBytes(this, pageTransforms) ?? (await this.saveAsync(pageTransforms));
+    // note: first signatures rewrite the whole file, so encrypted sources are signed as plaintext
+    // and re-encrypted; later signatures append encrypted objects to the original bytes
+    if (encryption && !hasPopulatedSignatures(rawBytes)) {
+      rawBytes = (await this.saveForRewrite(pageTransforms)).bytes;
+    }
+    const signedBytes = await signPdfIso32000(rawBytes, options, encryption ?? undefined);
     this.setRawBuffer(signedBytes);
     this._cachedMetadata = null;
     return signedBytes;
@@ -2088,7 +2241,7 @@ export class PdfDocument {
     pageTransforms?: Record<number, PageTransform>
   ): Promise<SignatureValidationResult[]> {
     const { verifyPdfSignatures } = await import('./operations/signature-ops');
-    const rawBytes = await this.saveAsync(pageTransforms);
+    const rawBytes = resolveVerbatimPdfBytes(this, pageTransforms) ?? (await this.saveAsync(pageTransforms));
     return verifyPdfSignatures(rawBytes);
   }
 
@@ -2102,10 +2255,11 @@ export class PdfDocument {
   public async initAcroFormFieldSpans(
     rawBuffer?: ArrayBuffer | Uint8Array
   ): Promise<Map<number, EditableFormFieldSpan[]>> {
-    if (!rawBuffer && this._cachedAcroFormFieldSpans) {
+    const isInternalBuffer = !rawBuffer || rawBuffer === this._rawBuffer;
+    if (isInternalBuffer && this._cachedAcroFormFieldSpans) {
       return this._cachedAcroFormFieldSpans;
     }
-    if (!rawBuffer && this._acroFormInitPromise) {
+    if (isInternalBuffer && this._acroFormInitPromise) {
       return this._acroFormInitPromise;
     }
 
@@ -2124,6 +2278,7 @@ export class PdfDocument {
           PDFCheckBox,
           PDFRadioGroup,
           PDFDropdown,
+          PDFOptionList,
           PDFSignature,
           PDFButton,
           PDFName,
@@ -2166,14 +2321,17 @@ export class PdfDocument {
           else if (field instanceof PDFCheckBox) variant = 'checkbox';
           else if (field instanceof PDFRadioGroup) variant = 'radio';
           else if (field instanceof PDFDropdown) variant = 'dropdown';
+          else if (field instanceof PDFOptionList) variant = 'dropdown';
           else if (field instanceof PDFSignature) variant = 'signature';
           else if (field instanceof PDFButton) variant = 'button';
 
           let value: string | boolean | undefined;
+          let label: string | undefined;
           if (field instanceof PDFTextField) value = field.getText() || undefined;
           else if (field instanceof PDFCheckBox) value = field.isChecked();
           else if (field instanceof PDFRadioGroup) value = field.getSelected() || undefined;
           else if (field instanceof PDFDropdown) value = field.getSelected()?.[0] || undefined;
+          else if (field instanceof PDFOptionList) value = field.getSelected()?.[0] || undefined;
           else if (field instanceof PDFButton) {
             const mk = field.acroField.getWidgets()[0]?.getAppearanceCharacteristics();
             const ca = mk?.dict.lookup(PDFName.of('CA'));
@@ -2182,11 +2340,25 @@ export class PdfDocument {
             } else if (ca && 'asString' in ca && typeof (ca as { asString(): string }).asString === 'function') {
               value = (ca as { asString(): string }).asString();
             }
+            if (typeof value === 'string') {
+              label = value;
+            }
+          }
+
+          if (this._modifiedFormFieldValues.has(name)) {
+            value = this._modifiedFormFieldValues.get(name);
           }
 
           let options: string[] | undefined;
-          if (field instanceof PDFRadioGroup || field instanceof PDFDropdown) {
+          if (field instanceof PDFRadioGroup || field instanceof PDFDropdown || field instanceof PDFOptionList) {
             options = field.getOptions();
+          }
+
+          let multiline: boolean | undefined;
+          let password: boolean | undefined;
+          if (field instanceof PDFTextField) {
+            multiline = field.isMultiline();
+            password = field.isPassword();
           }
 
           const readOnly = field.isReadOnly();
@@ -2196,6 +2368,21 @@ export class PdfDocument {
           for (let wIdx = 0; wIdx < widgets.length; wIdx++) {
             const widget = widgets[wIdx];
             const rect = widget.getRectangle();
+            const rawFlags = widget.dict.lookup(PDFName.of('F'));
+            const flags = typeof (rawFlags as unknown as { asNumber?: () => number })?.asNumber === 'function'
+              ? (rawFlags as unknown as { asNumber(): number }).asNumber()
+              : (typeof rawFlags === 'number' ? rawFlags : 0);
+            if ((flags & 2) !== 0 || (flags & 32) !== 0 || Math.abs(rect.width) <= 0 || Math.abs(rect.height) <= 0) {
+              continue;
+            }
+            if (field instanceof PDFSignature) {
+              const hasSignedValue = Boolean(
+                field.acroField.dict.lookup(PDFName.of('V')) || widget.dict.lookup(PDFName.of('V'))
+              );
+              if (hasSignedValue || (flags & 128) !== 0 || (rect.width <= 0 && rect.height <= 0)) {
+                continue;
+              }
+            }
             const pRef = widget.P();
             let pageIndex = pRef ? pageMap.get(pRef) : undefined;
             if (pageIndex === undefined) {
@@ -2210,12 +2397,12 @@ export class PdfDocument {
 
             if (pageIndex !== undefined) {
               const targetPage = pages[pageIndex];
-              const cropBox = targetPage.getCropBox() || targetPage.getMediaBox();
+              const cropBox = targetPage.getCropBox?.() || targetPage.getMediaBox?.() || { x: 0, y: 0, width: targetPage.getWidth?.() ?? 612, height: targetPage.getHeight?.() ?? 792 };
               const cropX = cropBox.x ?? 0;
               const cropY = cropBox.y ?? 0;
               const cropW = cropBox.width;
               const cropH = cropBox.height;
-              const pageRotation = ((targetPage.getRotation().angle % 360) + 360) % 360 as 0 | 90 | 180 | 270;
+              const pageRotation = (((targetPage?.getRotation?.()?.angle ?? 0) % 360 + 360) % 360) as 0 | 90 | 180 | 270;
 
               const rawX1 = rect.x;
               const rawY1 = rect.y;
@@ -2256,6 +2443,11 @@ export class PdfDocument {
               let textAlign: 'left' | 'center' | 'right' | undefined;
 
               const mk = widget.getAppearanceCharacteristics();
+              const widgetRot = (((mk?.getRotation?.() || 0) % 360) + 360) % 360;
+              if (widgetRot !== 0 && widgetRot !== pageRotation) {
+                rotation = ((rotation + widgetRot) % 360 + 360) % 360;
+              }
+
               if (mk) {
                 const bgRgb = mk.getBackgroundColor();
                 if (bgRgb && bgRgb.length >= 3) {
@@ -2286,6 +2478,77 @@ export class PdfDocument {
                 else if (qVal === 2) textAlign = 'right';
                 else if (qVal === 0) textAlign = 'left';
               }
+
+              let fontSize: number | undefined;
+              let fontFamily: string | undefined;
+              let color: string | undefined;
+              try {
+                const daEntry = widget.dict.lookup(PDFName.of('DA'))
+                  || field.acroField.dict.lookup(PDFName.of('DA'))
+                  || form.acroForm.dict.lookup(PDFName.of('DA'));
+                let daStr = '';
+                if (daEntry && 'decodeText' in daEntry && typeof (daEntry as { decodeText(): string }).decodeText === 'function') {
+                  daStr = (daEntry as { decodeText(): string }).decodeText();
+                } else if (daEntry && 'asString' in daEntry && typeof (daEntry as { asString(): string }).asString === 'function') {
+                  daStr = (daEntry as { asString(): string }).asString();
+                }
+                if (daStr) {
+                  const tfMatch = /\/([A-Za-z0-9_+-]+)\s+([0-9.]+)\s+Tf/.exec(daStr);
+                  if (tfMatch) {
+                    const rawFontName = tfMatch[1].toLowerCase();
+                    const rawFontSize = parseFloat(tfMatch[2]);
+                    if (rawFontSize > 0) {
+                      fontSize = rawFontSize;
+                    }
+                    if (rawFontName.includes('cour')) fontFamily = 'Courier';
+                    else if (rawFontName.includes('time') || rawFontName.includes('tiro')) fontFamily = 'Times-Roman';
+                    else fontFamily = 'Helvetica';
+                  }
+                  const rgMatch = /([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+rg/.exec(daStr);
+                  if (rgMatch) {
+                    color = `rgb(${Math.round(parseFloat(rgMatch[1]) * 255)}, ${Math.round(parseFloat(rgMatch[2]) * 255)}, ${Math.round(parseFloat(rgMatch[3]) * 255)})`;
+                  } else {
+                    const gMatch = /([0-9.]+)\s+g/.exec(daStr);
+                    if (gMatch) {
+                      const g = Math.round(parseFloat(gMatch[1]) * 255);
+                      color = `rgb(${g}, ${g}, ${g})`;
+                    }
+                  }
+                }
+              } catch {
+                // Ignore DA parsing errors and fall back to standard defaults
+              }
+
+              let maxLength: number | undefined;
+              let isComb: boolean | undefined;
+              let doNotSpellCheck: boolean | undefined;
+              let doNotScroll: boolean | undefined;
+
+              if (field instanceof PDFTextField) {
+                const ml = field.getMaxLength();
+                if (typeof ml === 'number' && ml > 0) maxLength = ml;
+              } else if (field.acroField) {
+                const maxLenEntry = field.acroField.dict.get(PDFName.of('MaxLen'));
+                if (maxLenEntry) {
+                  const mlNum = Number(maxLenEntry);
+                  if (!Number.isNaN(mlNum) && mlNum > 0) maxLength = mlNum;
+                }
+              }
+
+              const rawFf = (field as { acroField?: { getFlags?: () => number } }).acroField?.getFlags?.() ?? 0;
+              if ((rawFf & 16777216) !== 0 && maxLength && maxLength > 0 && !multiline) {
+                isComb = true;
+              }
+              if ((rawFf & 4194304) !== 0) {
+                doNotSpellCheck = true;
+              }
+              if ((rawFf & 8388608) !== 0) {
+                doNotScroll = true;
+              }
+
+              const exportValue = (field instanceof PDFRadioGroup && options && wIdx < options.length)
+                ? options[wIdx]
+                : (widget.getOnValue?.()?.decodeText?.() || undefined);
 
               if (!byPage.has(pageIndex)) {
                 byPage.set(pageIndex, []);
