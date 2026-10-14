@@ -7,6 +7,7 @@ import type {
   FormFieldVariantType,
   HighlightRect,
   PageCharacter,
+  PageCropInfo,
   TextMutationOptions,
 } from '../../core/types';
 import { transformPointForPageRotation } from '../../utils/geometry';
@@ -20,6 +21,7 @@ import type {
 import type { NoteAnnotationOptions } from './operations/add-annotations';
 import type { PDFAcroTerminal, PDFRadioGroup, PDFForm, PDFAcroField, PDFArray, PDFString } from 'pdf-lib';
 import type { PdfiumEngine } from '../../core/pdfium-engine';
+import { pdfBoxToDomBounds } from '../../core/pdfium-helpers';
 import { PdfPage } from './pdf-page';
 import { FontCharsetIndex } from './font-charset-index';
 import type {
@@ -36,6 +38,7 @@ import type {
   PageRasterizer,
 } from '../../core/types';
 import * as docOps from './operations/document-ops';
+import { mergePdfBuffersWithAcroForms, splitPdfBufferWithAcroForms } from './operations/acroform-transfer-ops';
 import * as metadataOps from './operations/metadata-ops';
 import * as securityOps from './operations/security-ops';
 import type { SecurityOptions } from './operations/security-ops';
@@ -43,7 +46,66 @@ import type { AddOrUpdateOutlineOptions, OutlineItemFlat } from './operations/ou
 import { exportAsBlob } from './operations/page-ops';
 import type { SignPdfOptions, SignatureValidationResult } from './operations/signature-ops';
 import type { FormFieldPlaceholderOptions } from './operations/types';
+import {
+  applyPageNumbering as runPageNumberingOp,
+  type PageNumberingOptions,
+  type PageNumberingResult,
+} from './operations/page-numbering-ops';
+import type { DocumentTypographyProfile } from './operations/document-typography';
 import type { PageTransform } from '../../stores/types';
+import { resolveVerbatimPdfBytes } from './verbatim-bytes';
+import type { PdfEncryptionContext } from './encryption/pdf-lib-encryption';
+
+/** FPDF_SaveAsCopy flag that serialises the document without its security handler. */
+const FPDF_REMOVE_SECURITY = 3;
+
+/**
+ * Plaintext snapshot of the document for pdf-lib rewrites. Rewritten output must be
+ * passed through seal() so encrypted documents stay encrypted with their original
+ * file key, /Encrypt dictionary, passwords and permissions.
+ */
+export interface PdfRewriteSession {
+  /** Decrypted serialisation including pending AcroForm, link and transform changes. */
+  readonly bytes: Uint8Array;
+  /** Whether seal() re-encrypts its input. */
+  readonly isEncrypted: boolean;
+  /**
+   * Re-applies the source document encryption to rewritten bytes.
+   *
+   * @param output Plaintext bytes derived from this session.
+   * @return Encrypted bytes for encrypted sources, otherwise the input unchanged.
+   */
+  seal(output: Uint8Array): Promise<Uint8Array>;
+}
+
+/**
+ * Views a buffer as a Uint8Array without copying.
+ *
+ * @param buffer Source buffer.
+ * @return Byte view over the buffer.
+ */
+function toUint8Array(buffer: ArrayBuffer | Uint8Array): Uint8Array {
+  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+}
+
+/**
+ * Builds a rewrite session over plaintext bytes.
+ *
+ * @param bytes Plaintext serialisation.
+ * @param encryption Context of the source document, null when unencrypted.
+ * @return The rewrite session.
+ */
+function createRewriteSession(bytes: Uint8Array, encryption: PdfEncryptionContext | null): PdfRewriteSession {
+  return {
+    bytes,
+    isEncrypted: encryption !== null,
+    async seal(output: Uint8Array): Promise<Uint8Array> {
+      if (!encryption) return output;
+      const { encryptPdfBytes } = await import('./encryption/pdf-lib-encryption');
+      return encryptPdfBytes(output, encryption);
+    },
+  };
+}
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -100,8 +162,31 @@ export class PdfDocument {
   private _acroFormInitPromise: Promise<Map<number, EditableFormFieldSpan[]>> | null = null;
   private _rawBuffer: ArrayBuffer | Uint8Array | null = null;
   private _cachedMetadata: DocumentMetadata | null = null;
+  private _cachedTypographyProfile: DocumentTypographyProfile | null = null;
   private removedAcroFormFieldNames = new Set<string>();
   private pendingAcroFormFieldsByPage = new Map<number, FormFieldPlaceholderOptions[]>();
+  private _formHandle: number = 0;
+  private _formFillInfoPtr: number = 0;
+  private _modifiedFormFieldValues = new Map<string, string | boolean>();
+  private _pageRotationDeltas = new Map<
+    number,
+    {
+      delta: 90 | 180 | 270;
+      initialWidthPts: number;
+      initialHeightPts: number;
+      initialAngle: number;
+      expectedAngle: number;
+    }
+  >();
+
+  /** Password that opened or last re-secured the document, used to resolve the file key. */
+  private _securityCredential = '';
+  /** Memoised encryption context of the active security handler. */
+  private _encryptionContextPromise: Promise<PdfEncryptionContext | null> | null = null;
+  /** Whether the raw buffer no longer reflects the active security handler. */
+  private _isSecurityHandlerStale = false;
+  /** Resolves whether pdf-lib rewrites of encrypted documents must be re-encrypted. */
+  private _isEncryptionPreservationEnabled: () => boolean = () => true;
 
   /**
    * Cached physical page dimensions in points, mapped by page index.
@@ -156,15 +241,159 @@ export class PdfDocument {
     }
   }
 
+  private _isPdfiumDirty = false;
+
+  public markDirty(): void {
+    this._isPdfiumDirty = true;
+  }
+
+  public getRawBuffer(): ArrayBuffer | Uint8Array | null {
+    return this._rawBuffer;
+  }
+
+  /**
+   * Records the password that opened the document so pdf-lib rewrites can be re-encrypted.
+   *
+   * @param password User or owner password, empty for documents without an open password.
+   */
+  public setSecurityCredential(password: string): void {
+    this._securityCredential = password;
+    this._encryptionContextPromise = null;
+  }
+
+  /**
+   * Returns the password recorded for the active security handler.
+   *
+   * @return The recorded password, empty when none was required.
+   */
+  public getSecurityCredential(): string {
+    return this._securityCredential;
+  }
+
+  /**
+   * Installs the predicate deciding whether encrypted documents keep their encryption
+   * across pdf-lib rewrites (wired to the 'security.preserve-encryption' feature flag).
+   *
+   * @param resolver Predicate evaluated lazily on every rewrite.
+   */
+  public setEncryptionPreservationResolver(resolver: () => boolean): void {
+    this._isEncryptionPreservationEnabled = resolver;
+  }
+
+  /**
+   * Resolves the encryption context of the active security handler.
+   * Rejects when the handler cannot be reproduced, so callers never emit plaintext
+   * objects into a document that declares /Encrypt.
+   *
+   * @return The context, or null for unencrypted documents or when preservation is disabled.
+   */
+  public getEncryptionContext(): Promise<PdfEncryptionContext | null> {
+    if (
+      typeof this.engine.getModule !== 'function' ||
+      // note: engines without the EPDF security extension cannot report or reproduce encryption
+      typeof this.engine.getModule().EPDF_IsEncrypted !== 'function' ||
+      !this._isEncryptionPreservationEnabled() ||
+      !this.isEncrypted()
+    ) {
+      return Promise.resolve(null);
+    }
+
+    this._encryptionContextPromise ??= (async () => {
+      const { resolvePdfEncryptionContext } = await import('./encryption/pdf-lib-encryption');
+      const source =
+        !this._isSecurityHandlerStale && this._rawBuffer
+          ? toUint8Array(this._rawBuffer)
+          : this.serialise(0);
+      return resolvePdfEncryptionContext(source, this._securityCredential);
+    })().catch((err: unknown) => {
+      this._encryptionContextPromise = null;
+      throw err;
+    });
+    return this._encryptionContextPromise;
+  }
+
+  /**
+   * Serialises a plaintext snapshot for pdf-lib rewrites together with a sealer that
+   * restores the original encryption on the rewritten output.
+   *
+   * @param pageTransforms Optional page rotation and scaling transforms to bake.
+   * @return The rewrite session.
+   */
+  public async saveForRewrite(
+    pageTransforms?: Record<number, PageTransform> | Map<number, PageTransform>
+  ): Promise<PdfRewriteSession> {
+    const { bytes, encryption } = await this.serialiseWithPendingChanges(pageTransforms, 'plaintext');
+    return createRewriteSession(bytes, encryption);
+  }
+
+  /**
+   * Runs an external pdf-lib transform over a plaintext snapshot of the document and
+   * re-applies the source encryption to its output.
+   *
+   * @param transform Rewriter receiving decrypted bytes and returning plaintext output.
+   * @param pageTransforms Optional page rotation and scaling transforms to bake.
+   * @return The rewritten bytes, encrypted when the source document was encrypted.
+   */
+  public async rewrite(
+    transform: (bytes: Uint8Array) => Promise<Uint8Array>,
+    pageTransforms?: Record<number, PageTransform> | Map<number, PageTransform>
+  ): Promise<Uint8Array> {
+    const session = await this.saveForRewrite(pageTransforms);
+    return session.seal(await transform(session.bytes));
+  }
+
+  /**
+   * Returns true if the document has any unbaked in-memory PDFium mutations,
+   * modified form field values, pending annotations/attachments, or non-identity page transforms.
+   */
+  public hasUnbakedModifications(
+    pageTransforms?: Record<number, PageTransform> | Map<number, PageTransform>
+  ): boolean {
+    if (this._isPdfiumDirty) return true;
+    if (this._pageRotationDeltas.size > 0) return true;
+    if (this._modifiedFormFieldValues.size > 0) return true;
+    if (this.pendingAcroFormFieldsByPage.size > 0) return true;
+    if (this.removedAcroFormFieldNames.size > 0) return true;
+    if (this.pendingLinkAnnotationsByPage.size > 0) return true;
+    if (this.pendingAttachments.length > 0) return true;
+    if (pageTransforms) {
+      const entries =
+        pageTransforms instanceof Map
+          ? Array.from(pageTransforms.values())
+          : Object.values(pageTransforms);
+      for (const t of entries) {
+        if (
+          t &&
+          ((t.rotation && t.rotation % 360 !== 0) ||
+            (t.scaleX !== undefined && t.scaleX !== 1) ||
+            (t.scaleY !== undefined && t.scaleY !== 1))
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   public setRawBuffer(buffer: ArrayBuffer | Uint8Array | null): void {
+    this.disposeFormFillEnvironment();
+    this.clearModifiedFormFieldValues();
     this._rawBuffer = buffer;
+    this._encryptionContextPromise = null;
+    this._isSecurityHandlerStale = false;
+    this._isPdfiumDirty = false;
+    this._pageRotationDeltas.clear();
     this._cachedMetadata = null;
+    this._cachedTypographyProfile = null;
     this._cachedAcroFormFieldSpans = null;
     this._acroFormInitPromise = null;
     this.removedAcroFormFieldNames.clear();
     this.pendingAcroFormFieldsByPage.clear();
+    this.pendingLinkAnnotationsByPage.clear();
+    this.pendingAttachments = [];
     this._pageDimensionsCache.clear();
     this._pageSpansCache.clear();
+    this._fontCharsetIndex.invalidate();
     this.disposeDimScratch();
   }
 
@@ -233,6 +462,138 @@ export class PdfDocument {
 
   public clearRemovedAcroFormFields(): void {
     this.removedAcroFormFieldNames.clear();
+  }
+
+  /**
+   * Ensures the PDFium form fill environment is initialised for the active document.
+   * Conforms to Google Chromium PDFium form fill architecture.
+   *
+   * @return Form handle integer, or 0 if not available.
+   */
+  public ensureFormFillEnvironment(): number {
+    if (this._formHandle) return this._formHandle;
+    try {
+      const docHandle = this.getDocHandle();
+      const res = this.engine.initFormFillEnvironment(docHandle);
+      if (res) {
+        this._formHandle = res.formHandle;
+        this._formFillInfoPtr = res.formFillInfoPtr;
+      }
+    } catch {
+      // Safe fallback when docHandle is not yet ready
+    }
+    return this._formHandle;
+  }
+
+  /**
+   * Returns the active PDFium form fill environment handle, if initialised.
+   *
+   * @return Form handle integer.
+   */
+  public getFormHandle(): number {
+    return this._formHandle || this.ensureFormFillEnvironment();
+  }
+
+  /**
+   * Disposes the PDFium form fill environment and frees native resources.
+   */
+  public disposeFormFillEnvironment(): void {
+    if (this._formHandle || this._formFillInfoPtr) {
+      this.engine.exitFormFillEnvironment(this._formHandle, this._formFillInfoPtr);
+      this._formHandle = 0;
+      this._formFillInfoPtr = 0;
+    }
+  }
+
+  /**
+   * Returns true if AcroForm field definitions have already been extracted and cached.
+   */
+  public hasCachedAcroFormSpans(): boolean {
+    return this._cachedAcroFormFieldSpans !== null;
+  }
+
+  /**
+   * Updates an AcroForm field value in the active document state.
+   * Synchronises cached spans and queues the value for persistence upon save.
+   * Clones span arrays and objects immutably to notify Svelte 5 raw state consumers.
+   *
+   * @param fieldName Target field identifier or name.
+   * @param value New text value or boolean checkbox state.
+   * @param pageIndex Optional zero-based page index for targeting.
+   */
+  public setFormFieldValue(fieldName: string, value: string | boolean, pageIndex?: number): void {
+    this._modifiedFormFieldValues.set(fieldName, value);
+    if (this._cachedAcroFormFieldSpans) {
+      for (const [pageIdx, spans] of this._cachedAcroFormFieldSpans.entries()) {
+        const nextSpans = spans.map((span) => {
+          if (span.fieldName === fieldName || span.fieldId === fieldName || span.name === fieldName) {
+            return { ...span, value };
+          }
+          return span;
+        });
+        this._cachedAcroFormFieldSpans.set(pageIdx, nextSpans);
+      }
+    }
+    if (pageIndex !== undefined) {
+      const cached = this._pageSpansCache.get(pageIndex);
+      if (cached) {
+        cached.formFields = cached.formFields.map((span) => {
+          if (span.fieldName === fieldName || span.fieldId === fieldName || span.name === fieldName) {
+            return { ...span, value };
+          }
+          return span;
+        });
+      }
+    } else {
+      for (const cached of this._pageSpansCache.values()) {
+        cached.formFields = cached.formFields.map((span) => {
+          if (span.fieldName === fieldName || span.fieldId === fieldName || span.name === fieldName) {
+            return { ...span, value };
+          }
+          return span;
+        });
+      }
+    }
+  }
+
+  /**
+   * Restores or sets multiple user-modified AcroForm field values in batch.
+   *
+   * @param values Map or Record of field names to values.
+   */
+  public setAllFormFieldValues(values: ReadonlyMap<string, string | boolean> | Record<string, string | boolean>): void {
+    const entries = values instanceof Map || 'entries' in values && typeof values.entries === 'function'
+      ? (values as ReadonlyMap<string, string | boolean>).entries()
+      : Object.entries(values as Record<string, string | boolean>);
+    for (const [name, val] of entries) {
+      this.setFormFieldValue(name, val);
+    }
+  }
+
+  /**
+   * Retrieves the current modified value for an AcroForm field, if any.
+   *
+   * @param fieldName Target field identifier or name.
+   * @return Current field value or undefined.
+   */
+  public getFormFieldValue(fieldName: string): string | boolean | undefined {
+    return this._modifiedFormFieldValues.get(fieldName);
+  }
+
+  /**
+   * Retrieves all user-modified AcroForm field values.
+   *
+   * @return Readonly map of field names to values.
+   */
+  public getModifiedFormFieldValues(): ReadonlyMap<string, string | boolean> {
+    return this._modifiedFormFieldValues;
+  }
+
+  /**
+   * Clears all queued modified AcroForm field values.
+   */
+  public clearModifiedFormFieldValues(): void {
+    this._modifiedFormFieldValues.clear();
   }
 
   private static readonly MAX_CACHED_PAGES = 10;
@@ -312,6 +673,10 @@ export class PdfDocument {
         } catch {
           // Ignore error to ensure disposal
         } finally {
+          const formHandle = this.getFormHandle();
+          if (formHandle) {
+            this.engine.pageFormBeforeClose(oldPage.pageHandle, formHandle);
+          }
           oldPage.dispose();
           mod.FPDF_ClosePage(oldPage.pageHandle);
           this.pages.delete(oldestKey);
@@ -322,6 +687,11 @@ export class PdfDocument {
     const docHandle = this.getDocHandle();
     const pageHandle = mod.FPDF_LoadPage(docHandle, pageIndex);
     if (!pageHandle) throw new Error(`Failed to load page at index ${pageIndex}.`);
+
+    const formHandle = this.getFormHandle();
+    if (formHandle) {
+      this.engine.pageFormAfterLoad(pageHandle, formHandle);
+    }
 
     const page = new PdfPage(this.engine, this, pageIndex, docHandle, pageHandle);
     this.pages.set(pageIndex, page);
@@ -342,10 +712,15 @@ export class PdfDocument {
    * @param pageIndex The zero-based index of the page to invalidate.
    */
   public invalidatePage(pageIndex: number): void {
+    this._isPdfiumDirty = true;
     const existing = this.pages.get(pageIndex);
     if (existing) {
       if (this.engine.isReady) {
         const mod = this.engine.getModule();
+        const formHandle = this.getFormHandle();
+        if (formHandle) {
+          this.engine.pageFormBeforeClose(existing.pageHandle, formHandle);
+        }
         existing.generateContent();
         existing.dispose();
         mod.FPDF_ClosePage(existing.pageHandle);
@@ -354,9 +729,23 @@ export class PdfDocument {
       }
       this.pages.delete(pageIndex);
     }
-    this._fontCharsetIndex.invalidate();
+    this._fontCharsetIndex.invalidatePage(pageIndex);
+    this._cachedTypographyProfile = null;
     this._pageDimensionsCache.delete(pageIndex);
     this._pageSpansCache.delete(pageIndex);
+  }
+
+  /**
+   * Reorders an object in the page content stream.
+   *
+   * @param pageIndex Zero-based page index.
+   * @param fromIndex Zero-based source index of the object.
+   * @param toIndex Zero-based target index of the object.
+   * @returns Whether the object was successfully reordered.
+   */
+  public reorderPageObject(pageIndex: number, fromIndex: number, toIndex: number): boolean {
+    const page = this.getPage(pageIndex);
+    return page.reorderObject(fromIndex, toIndex);
   }
 
   /**
@@ -369,7 +758,11 @@ export class PdfDocument {
       return;
     }
     const mod = this.engine.getModule();
+    const formHandle = this.getFormHandle();
     for (const page of this.pages.values()) {
+      if (formHandle) {
+        this.engine.pageFormBeforeClose(page.pageHandle, formHandle);
+      }
       page.generateContent();
       page.dispose();
       mod.FPDF_ClosePage(page.pageHandle);
@@ -384,13 +777,44 @@ export class PdfDocument {
    * @param atIndex The zero-based index at which to insert the merged pages.
    */
   public merge(buffer: ArrayBuffer, atIndex: number): void {
+    this._isPdfiumDirty = true;
     this.closeAllPages();
+    this._pageRotationDeltas.clear();
     this._cachedAcroFormFieldSpans = null;
+    this._cachedTypographyProfile = null;
     this._fontCharsetIndex.invalidate();
     this._pageDimensionsCache.clear();
     this._pageSpansCache.clear();
     this.pendingAcroFormFieldsByPage.clear();
     docOps.mergePdfBuffer(this.engine, this.getDocHandle(), buffer, atIndex);
+  }
+
+  /**
+   * Asynchronously merges another PDF document into this one, preserving all AcroForms
+   * and reloading the engine state without dangling memory references.
+   * @param buffer The ArrayBuffer or Uint8Array containing the PDF to merge.
+   * @param atIndex The zero-based index at which to insert the merged pages.
+   */
+  public async mergeAsync(buffer: ArrayBuffer | Uint8Array, atIndex: number): Promise<void> {
+    this._isPdfiumDirty = true;
+    this.closeAllPages();
+    this._pageRotationDeltas.clear();
+    this._cachedAcroFormFieldSpans = null;
+    this._acroFormInitPromise = null;
+    this._cachedTypographyProfile = null;
+    this._fontCharsetIndex.invalidate();
+    this._pageDimensionsCache.clear();
+    this._pageSpansCache.clear();
+
+    const encryption = await this.getEncryptionContext();
+    const session = createRewriteSession(this.serialise(encryption ? FPDF_REMOVE_SECURITY : 0), encryption);
+    const mergedBytes = await session.seal(await mergePdfBuffersWithAcroForms(session.bytes, buffer, atIndex));
+    this.disposeFormFillEnvironment();
+    this._rawBuffer = mergedBytes;
+    this._encryptionContextPromise = null;
+    if (!this.getDocHandleFn) {
+      this.engine.loadDocumentFromBuffer(mergedBytes, this._securityCredential);
+    }
   }
 
   /**
@@ -403,14 +827,28 @@ export class PdfDocument {
   }
 
   /**
+   * Asynchronously splits specific pages from the current document into a new PDF,
+   * preserving all AcroForms, interactive form widgets, and values.
+   * @param pageIndices Array of zero-based page indices to extract.
+   * @returns A Promise resolving to a Uint8Array containing the newly created PDF.
+   */
+  public async splitAsync(pageIndices: number[]): Promise<Uint8Array> {
+    const session = await this.saveForRewrite();
+    return session.seal(await splitPdfBufferWithAcroForms(session.bytes, pageIndices));
+  }
+
+  /**
    * Adds a new blank page to the document.
    * @param atIndex The zero-based index at which to insert the blank page.
    * @param widthPts Optional width in points. Defaults to standard A4 (595.28).
    * @param heightPts Optional height in points. Defaults to standard A4 (841.89).
    */
   public addBlankPage(atIndex: number, widthPts?: number, heightPts?: number): void {
+    this._isPdfiumDirty = true;
     this.closeAllPages();
+    this._pageRotationDeltas.clear();
     this._cachedAcroFormFieldSpans = null;
+    this._cachedTypographyProfile = null;
     this._fontCharsetIndex.invalidate();
     this._pageDimensionsCache.clear();
     this._pageSpansCache.clear();
@@ -423,6 +861,7 @@ export class PdfDocument {
    * @param pageIndex The zero-based index of the page to duplicate.
    */
   public duplicatePage(pageIndex: number): void {
+    this._isPdfiumDirty = true;
     this.closeAllPages();
     this._cachedAcroFormFieldSpans = null;
     this._fontCharsetIndex.invalidate();
