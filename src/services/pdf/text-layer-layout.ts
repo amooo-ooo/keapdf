@@ -7,6 +7,7 @@
  */
 
 import type { TextLine, EditableTextSpan } from '../../core/types';
+import { parseLetterSpacingToPoints } from '../../core/typography-metrics';
 
 /**
  * Computed style parameters for a precision text layer span.
@@ -17,6 +18,7 @@ export interface TextLineLayoutStyle {
   width: number;
   height: number;
   fontSize: number;
+  letterSpacing: number;
   wordSpacing: number;
   scaleX: number;
   rotation: number;
@@ -92,12 +94,14 @@ export function computeLineLayoutStyle(
   const dominantFontSize = line.fontSize || 12;
   const fontSize = Math.min(targetHeight, dominantFontSize * visualScale);
 
-  const words = line.words || [];
-  let wordSpacing = 0;
-  let spacesCount = 0;
+  const letterSpacingPts = parseLetterSpacingToPoints(line.letterSpacing, dominantFontSize);
+  const letterSpacing = letterSpacingPts * visualScale;
 
-  if (words.length > 1) {
-    spacesCount = words.length - 1;
+  const words = line.words || [];
+  let wordSpacing = line.wordSpacing !== undefined ? line.wordSpacing * visualScale : 0;
+  let spacesCount = Math.max(0, words.length - 1);
+
+  if (words.length > 1 && line.wordSpacing === undefined) {
     const sumWordWidths = words.reduce((acc, w) => acc + w.width, 0);
     const totalSpaceInPdf = Math.max(0, line.width - sumWordWidths);
     const avgSpaceInPdf = totalSpaceInPdf / spacesCount;
@@ -109,7 +113,9 @@ export function computeLineLayoutStyle(
   }
 
   const baseWidth = measureBaseTextWidth(line.text, cssFontFamily);
-  const predictedWidth = (baseWidth * (fontSize / 100)) + (spacesCount * wordSpacing);
+  const charGaps = Math.max(0, line.text.length - 1);
+  const predictedWidth =
+    (baseWidth * (fontSize / 100)) + (spacesCount * wordSpacing) + (charGaps * letterSpacing);
 
   let scaleX = 1;
   if (predictedWidth > 0 && targetWidth > 0) {
@@ -125,11 +131,15 @@ export function computeLineLayoutStyle(
       ? `transform: scaleX(${scaleX.toFixed(4)});`
       : '';
 
+  const letterSpacingStyle = Math.abs(letterSpacing) > 0.05
+    ? `letter-spacing: ${letterSpacing.toFixed(2)}px;`
+    : '';
+
   const wordSpacingStyle = Math.abs(wordSpacing) > 0.1
     ? `word-spacing: ${wordSpacing.toFixed(2)}px;`
     : '';
 
-  const styleString = `left: ${left.toFixed(2)}px; top: ${top.toFixed(2)}px; font-size: ${fontSize.toFixed(2)}px; line-height: 1; height: ${targetHeight.toFixed(2)}px; overflow: hidden; font-family: ${cssFontFamily}; transform-origin: 0% 0%; ${transform} ${wordSpacingStyle}`.replace(/\s+/g, ' ').trim();
+  const styleString = `left: ${left.toFixed(2)}px; top: ${top.toFixed(2)}px; font-size: ${fontSize.toFixed(2)}px; line-height: 1; height: ${targetHeight.toFixed(2)}px; overflow: hidden; font-family: ${cssFontFamily}; transform-origin: 0% 0%; ${transform} ${letterSpacingStyle} ${wordSpacingStyle}`.replace(/\s+/g, ' ').trim();
 
   return {
     left,
@@ -137,6 +147,7 @@ export function computeLineLayoutStyle(
     width: targetWidth,
     height: targetHeight,
     fontSize,
+    letterSpacing,
     wordSpacing,
     scaleX,
     rotation,
@@ -164,12 +175,14 @@ export function computeSpanFallbackLayoutStyle(
   const dominantFontSize = span.fontSize || 12;
   const fontSize = Math.min(targetHeight, dominantFontSize * visualScale);
 
-  const words = span.text ? span.text.trim().split(/\s+/) : [];
-  let wordSpacing = 0;
-  let spacesCount = 0;
+  const letterSpacingPts = parseLetterSpacingToPoints(span.letterSpacing, dominantFontSize);
+  const letterSpacing = letterSpacingPts * visualScale;
 
-  if (words.length > 1) {
-    spacesCount = words.length - 1;
+  const words = span.text ? span.text.trim().split(/\s+/) : [];
+  let wordSpacing = span.wordSpacing !== undefined ? span.wordSpacing * visualScale : 0;
+  let spacesCount = Math.max(0, words.length - 1);
+
+  if (words.length > 1 && span.wordSpacing === undefined) {
     const estWordsWidth = words.reduce((acc, w) => acc + (w.length * dominantFontSize * 0.52), 0);
     const totalSpaceInPdf = Math.max(0, span.width - estWordsWidth);
     const avgSpaceInPdf = totalSpaceInPdf / spacesCount;
@@ -179,7 +192,9 @@ export function computeSpanFallbackLayoutStyle(
   }
 
   const baseWidth = measureBaseTextWidth(span.text, cssFontFamily);
-  const predictedWidth = (baseWidth * (fontSize / 100)) + (spacesCount * wordSpacing);
+  const charGaps = Math.max(0, (span.text || '').length - 1);
+  const predictedWidth =
+    (baseWidth * (fontSize / 100)) + (spacesCount * wordSpacing) + (charGaps * letterSpacing);
 
   let scaleX = 1;
   if (predictedWidth > 0 && targetWidth > 0) {
@@ -194,11 +209,15 @@ export function computeSpanFallbackLayoutStyle(
       ? `transform: scaleX(${scaleX.toFixed(4)});`
       : '';
 
+  const letterSpacingStyle = Math.abs(letterSpacing) > 0.05
+    ? `letter-spacing: ${letterSpacing.toFixed(2)}px;`
+    : '';
+
   const wordSpacingStyle = Math.abs(wordSpacing) > 0.1
     ? `word-spacing: ${wordSpacing.toFixed(2)}px;`
     : '';
 
-  const styleString = `left: ${left.toFixed(2)}px; top: ${top.toFixed(2)}px; font-size: ${fontSize.toFixed(2)}px; line-height: 1; height: ${targetHeight.toFixed(2)}px; overflow: hidden; font-family: ${cssFontFamily}; transform-origin: 0% 0%; ${transform} ${wordSpacingStyle}`.replace(/\s+/g, ' ').trim();
+  const styleString = `left: ${left.toFixed(2)}px; top: ${top.toFixed(2)}px; font-size: ${fontSize.toFixed(2)}px; line-height: 1; height: ${targetHeight.toFixed(2)}px; overflow: hidden; font-family: ${cssFontFamily}; transform-origin: 0% 0%; ${transform} ${letterSpacingStyle} ${wordSpacingStyle}`.replace(/\s+/g, ' ').trim();
 
   return {
     left,
@@ -206,6 +225,7 @@ export function computeSpanFallbackLayoutStyle(
     width: targetWidth,
     height: targetHeight,
     fontSize,
+    letterSpacing,
     wordSpacing,
     scaleX,
     rotation,
