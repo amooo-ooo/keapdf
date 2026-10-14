@@ -1,11 +1,17 @@
 import type { PdfiumEngine } from '../../core/pdfium-engine';
-import type { TextOptions, ShapeOptions, ImageOptions, FormFieldPlaceholderOptions, PathOptions } from './operations/types';
+import type { TextOptions, ShapeOptions, ImageOptions, FormFieldPlaceholderOptions, PathOptions, SvgPathOptions } from './operations/types';
 import type { EditableTextSpan, EditableFormFieldSpan, TextMutationOptions, AnnotationItem, EditableImageSpan, EditableShapeSpan, PageCharacter, PageCropInfo, HighlightRect, PdfMatrix } from '../../core/types';
 import type { FontCharsetIndex } from './font-charset-index';
-import { getPageObjectMatrix, getPageCropInfo, pdfBoxToDomBounds, pdfToDomCoords } from '../../core/pdfium-helpers';
+import {
+  extractImageObjectBitmap,
+  getPageObjectMatrix,
+  getPageCropInfo,
+  pdfBoxToDomBounds,
+  pdfToDomCoords,
+} from '../../core/pdfium-helpers';
 
 import { drawText } from './operations/draw-text';
-import { drawRectangle, drawCircle, drawLine, drawArrow, drawPath } from './operations/draw-shapes';
+import { drawRectangle, drawCircle, drawLine, drawArrow, drawPath, drawSvgPath } from './operations/draw-shapes';
 import { drawImage } from './operations/draw-image';
 import { drawFormFieldPlaceholder } from './operations/draw-form-field';
 
@@ -14,6 +20,12 @@ import * as textEditOps from './operations/text-edit-ops';
 import * as metadataOps from './operations/metadata-ops';
 import { addHighlightAnnotation, addInkAnnotation, addTextAnnotation, type NoteAnnotationOptions } from './operations/add-annotations';
 import type { ContentBounds } from './operations/crop-ops';
+import { allocatePathPointers, freePathPointers, extractRawPathProperties } from './operations/vector-shape-helpers';
+import {
+  extractBitmapToDataUrl,
+  extractPageAnnotations,
+  removeAnnotationWithFallback,
+} from './operations/annotation-extract-ops';
 
 /**
  * High-level facade for interacting with a specific page within a PDF document.
@@ -54,6 +66,7 @@ export class PdfPage {
    * @returns The current PdfPage instance for chaining.
    */
   public addAcroFormField(options: FormFieldPlaceholderOptions): this {
+    this.document?.markDirty?.();
     this.document.addPendingAcroFormField(this.pageIndex, options);
     return this;
   }
@@ -104,7 +117,12 @@ export class PdfPage {
   public render(scale: number = 1.0, options?: pageOps.RenderOptions): {
     widthPts: number; heightPts: number; canvas: HTMLCanvasElement } {
     this.assertNotDisposed();
-    return pageOps.render(this.engine, this.pageHandle, scale, options);
+    const docWithForm = this.document as { getFormHandle?: () => number | undefined } | null;
+    const formHandle = options?.formHandle ?? (typeof docWithForm?.getFormHandle === 'function' ? docWithForm.getFormHandle() : undefined);
+    return pageOps.render(this.engine, this.pageHandle, scale, {
+      ...options,
+      formHandle: formHandle || undefined,
+    });
   }
 
   /**
@@ -114,6 +132,7 @@ export class PdfPage {
    */
   public rotate(degreesDelta: 90 | 180 | 270): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     pageOps.rotate(this.engine, this.pageHandle, degreesDelta);
     return this;
   }
@@ -125,6 +144,7 @@ export class PdfPage {
    */
   public flatten(): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     pageOps.flatten(this.engine, this.pageHandle);
     return this;
   }
@@ -191,6 +211,7 @@ export class PdfPage {
     charsetIndex?: FontCharsetIndex
   ): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     textEditOps.replaceTextSpan(this.engine, this.docHandle, this.pageIndex, this.pageHandle, targetSpan, options, charsetIndex);
     return this;
   }
@@ -203,6 +224,7 @@ export class PdfPage {
    */
   public deleteTextSpan(targetSpan: EditableTextSpan, options: { reflowDownstream?: boolean } = {}): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     textEditOps.deleteTextSpan(this.engine, this.docHandle, this.pageIndex, this.pageHandle, targetSpan, options);
     return this;
   }
@@ -216,6 +238,7 @@ export class PdfPage {
    */
   public deleteTextInRects(rects: HighlightRect[]): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     textEditOps.removeTextInRects(
       this.engine,
       this.docHandle,
@@ -236,6 +259,7 @@ export class PdfPage {
    */
   public redactTextRange(startIndex: number, endIndex: number): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     textEditOps.redactTextRange(
       this.engine,
       this.docHandle,
@@ -256,6 +280,7 @@ export class PdfPage {
    */
   public updateTextSpanTransform(targetSpan: EditableTextSpan, newText: string, matrix: PdfMatrix): boolean {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     return textEditOps.updateTextSpanTransform(this.engine, this.pageHandle, targetSpan, newText, matrix);
   }
 
@@ -266,6 +291,7 @@ export class PdfPage {
    */
   public hideTextSpan(targetSpan: EditableTextSpan): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     textEditOps.hideTextSpan(this.engine, this.pageHandle, targetSpan);
     return this;
   }
@@ -288,6 +314,7 @@ export class PdfPage {
    */
   public removeObject(objectIndex: number): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     const mod = this.engine.getModule();
     const obj = mod.FPDFPage_GetObject(this.pageHandle, objectIndex);
     if (obj) {
@@ -298,21 +325,102 @@ export class PdfPage {
   }
 
   /**
-   * Removes a native PDF annotation from the page by its index.
-   * @param annotIndex The zero-based index of the annotation on the page.
-   * @returns The current PdfPage instance for chaining.
+   * Reorders an existing page object in the PDFium page content stream.
+   *
+   * @param fromIndex Zero-based source index of the object.
+   * @param toIndex Zero-based target index of the object.
+   * @returns Whether the object was successfully reordered.
    */
-  public removeAnnotation(annotIndex: number): this {
+  public reorderObject(fromIndex: number, toIndex: number): boolean {
+    this.assertNotDisposed();
+    const count = this.getObjectCount();
+    if (fromIndex < 0 || fromIndex >= count || toIndex < 0 || toIndex >= count || fromIndex === toIndex) {
+      return false;
+    }
+
+    const mod = this.engine.getModule();
+    const obj = mod.FPDFPage_GetObject(this.pageHandle, fromIndex);
+    if (!obj) return false;
+
+    const removed = mod.FPDFPage_RemoveObject(this.pageHandle, obj);
+    if (!removed) return false;
+
+    let success = false;
+    if (typeof mod.FPDFPage_InsertObjectAtIndex === 'function') {
+      success = Boolean(mod.FPDFPage_InsertObjectAtIndex(this.pageHandle, obj, toIndex));
+    } else if (toIndex >= count - 1 && typeof mod.FPDFPage_InsertObject === 'function') {
+      mod.FPDFPage_InsertObject(this.pageHandle, obj);
+      success = true;
+    }
+
+    if (success) {
+      if (typeof mod.FPDFPage_GenerateContent === 'function') {
+        mod.FPDFPage_GenerateContent(this.pageHandle);
+      }
+      this.document?.markDirty?.();
+    }
+    return success;
+  }
+
+  /**
+   * Moves a page object to the top of the paint order.
+   */
+  public bringObjectToFront(fromIndex: number): boolean {
+    const count = this.getObjectCount();
+    return this.reorderObject(fromIndex, count - 1);
+  }
+
+  /**
+   * Moves a page object to the bottom of the paint order.
+   */
+  public sendObjectToBack(fromIndex: number): boolean {
+    return this.reorderObject(fromIndex, 0);
+  }
+
+  /**
+   * Moves a page object one step higher in the paint order.
+   */
+  public bringObjectForward(fromIndex: number): boolean {
+    const count = this.getObjectCount();
+    return this.reorderObject(fromIndex, Math.min(count - 1, fromIndex + 1));
+  }
+
+  /**
+   * Moves a page object one step lower in the paint order.
+   */
+  public sendObjectBackward(fromIndex: number): boolean {
+    return this.reorderObject(fromIndex, Math.max(0, fromIndex - 1));
+  }
+
+  /**
+   * Returns the count of annotations currently present on this page.
+   */
+  public getAnnotationCount(): number {
     this.assertNotDisposed();
     const mod = this.engine.getModule();
-    if (typeof mod.FPDFPage_RemoveAnnot === 'function') {
-      mod.FPDFPage_RemoveAnnot(this.pageHandle, annotIndex);
-    }
+    return typeof mod.FPDFPage_GetAnnotCount === 'function'
+      ? mod.FPDFPage_GetAnnotCount(this.pageHandle)
+      : 0;
+  }
+
+  /**
+   * Removes a native PDF annotation from the page by its index.
+   * @param annotIndex The zero-based index of the annotation on the page.
+   * @param expectedDomBounds Optional expected DOM bounds for fallback resolution if earlier annotations were removed.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public removeAnnotation(
+    annotIndex: number,
+    expectedDomBounds?: { left: number; top: number; width: number; height: number }
+  ): this {
+    this.assertNotDisposed();
+    this.document?.markDirty?.();
+    removeAnnotationWithFallback(this.engine, this.pageHandle, annotIndex, expectedDomBounds);
     return this;
   }
 
   /**
-   * Analyses the page content stream to extract editable objects (images, shapes).
+   * Analyses the page content stream and annotation array to extract editable objects (images, shapes, highlights).
    * @returns An object containing arrays of EditableImageSpan and EditableShapeSpan.
    */
   public extractObjects(): {
@@ -331,6 +439,7 @@ export class PdfPage {
     const bottomPtr = this.engine.allocateMemory(4);
     const rightPtr = this.engine.allocateMemory(4);
     const topPtr = this.engine.allocateMemory(4);
+    const pathPtrs = allocatePathPointers(this.engine);
 
     try {
       const heapF32 = mod.pdfium.HEAPF32;
@@ -372,64 +481,29 @@ export class PdfPage {
             height = objTop - objBottom;
           }
           
-          if (width <= 0 || height <= 0) continue;
+          if (objType === 2) {
+            if (width <= 0 && height > 0) width = 1;
+            if (height <= 0 && width > 0) height = 1;
+            if (width <= 0 && height <= 0) continue;
+          } else {
+            if (width <= 0 || height <= 0) continue;
+          }
 
           if (objType === 3) {
             let src = '';
             const hasBitmapApi = typeof mod.FPDFImageObj_GetBitmap === 'function';
             
             if (hasBitmapApi) {
-              const bitmap = mod.FPDFImageObj_GetBitmap(objHandle);
+              const bitmap = extractImageObjectBitmap(
+                this.engine,
+                mod,
+                this.docHandle,
+                this.pageHandle,
+                objHandle,
+              );
               if (bitmap) {
                 try {
-                  const bmpWidth = mod.FPDFBitmap_GetWidth(bitmap);
-                  const bmpHeight = mod.FPDFBitmap_GetHeight(bitmap);
-                  const stride = mod.FPDFBitmap_GetStride(bitmap);
-                  const format = mod.FPDFBitmap_GetFormat(bitmap);
-                  const bufferPtr = mod.FPDFBitmap_GetBuffer(bitmap);
-                  
-                  if (bmpWidth > 0 && bmpHeight > 0 && bufferPtr) {
-                    const heapU8 = mod.pdfium.HEAPU8;
-                    const size = stride * bmpHeight;
-                    const rawBytes = new Uint8ClampedArray(heapU8.buffer, bufferPtr, size);
-                    
-                    let canvas: HTMLCanvasElement | null = null;
-                    if (typeof document !== 'undefined') {
-                        canvas = document.createElement('canvas');
-                        canvas.width = bmpWidth;
-                        canvas.height = bmpHeight;
-                        const ctx = canvas.getContext('2d');
-                        if (ctx) {
-                            const imgData = new ImageData(bmpWidth, bmpHeight);
-                            for (let y = 0; y < bmpHeight; y++) {
-                              for (let x = 0; x < bmpWidth; x++) {
-                                const bytesPerPixel = (format === 4 || format === 3) ? 4 : (format === 2 ? 3 : 1);
-                                const srcIdx = y * stride + x * bytesPerPixel; 
-                                const dstIdx = (y * bmpWidth + x) * 4;
-                                
-                                if (format === 4 || format === 3) { // BGRA or BGRx
-                                  imgData.data[dstIdx] = rawBytes[srcIdx + 2];     // R
-                                  imgData.data[dstIdx + 1] = rawBytes[srcIdx + 1]; // G
-                                  imgData.data[dstIdx + 2] = rawBytes[srcIdx];     // B
-                                  imgData.data[dstIdx + 3] = format === 4 ? rawBytes[srcIdx + 3] : 255; // A
-                                } else if (format === 2) { // BGR (3 bytes per pixel)
-                                  imgData.data[dstIdx] = rawBytes[srcIdx + 2];     // R
-                                  imgData.data[dstIdx + 1] = rawBytes[srcIdx + 1]; // G
-                                  imgData.data[dstIdx + 2] = rawBytes[srcIdx];     // B
-                                  imgData.data[dstIdx + 3] = 255;
-                                } else if (format === 1) { // Greyscale
-                                  imgData.data[dstIdx] = rawBytes[srcIdx];
-                                  imgData.data[dstIdx + 1] = rawBytes[srcIdx];
-                                  imgData.data[dstIdx + 2] = rawBytes[srcIdx];
-                                  imgData.data[dstIdx + 3] = 255;
-                                }
-                              }
-                            }
-                            ctx.putImageData(imgData, 0, 0);
-                            src = canvas.toDataURL('image/png');
-                        }
-                    }
-                  }
+                  src = extractBitmapToDataUrl(mod, bitmap);
                 } catch (e) {
                   console.error('Failed to extract image bitmap', e);
                 } finally {
@@ -511,6 +585,29 @@ export class PdfPage {
               pdfObjectIndex: i
             });
           } else {
+            const pathMatrix = getPageObjectMatrix(this.engine, mod, objHandle);
+            const pathProps = extractRawPathProperties(
+              mod,
+              objHandle,
+              cropInfo,
+              left,
+              top,
+              width,
+              height,
+              pathPtrs,
+              pathMatrix
+            );
+
+            const isHighlightLikeRect =
+              pathProps.variant === 'rectangle' &&
+              pathProps.hasFill &&
+              !pathProps.hasStroke &&
+              pathProps.opacity > 0 &&
+              pathProps.opacity < 0.95 &&
+              height >= 6 &&
+              height <= 42 &&
+              width > height * 1.5;
+
             shapes.push({
               type: 'shape',
               id: `shape_${this.pageIndex}_${i}`,
@@ -522,17 +619,46 @@ export class PdfPage {
               rotation: 0,
               flipX: false,
               flipY: false,
-              fill: 'transparent',
+              fill: pathProps.fill,
+              stroke: pathProps.stroke,
+              strokeWidth: pathProps.strokeWidth,
+              variant: pathProps.variant,
+              opacity: pathProps.opacity,
+              isHighlight: isHighlightLikeRect ? true : undefined,
+              hasFill: pathProps.hasFill,
+              hasStroke: pathProps.hasStroke,
+              fillMode: pathProps.fillMode,
+              fillRule: pathProps.fillRule,
+              strokeLineCap: pathProps.strokeLineCap,
+              strokeLineJoin: pathProps.strokeLineJoin,
+              svgPath: pathProps.svgPath,
+              viewBox: pathProps.viewBox,
+              baseWidth: width,
+              baseHeight: height,
               pdfObjectIndex: i
             });
           }
         }
       }
+
+      const annotExtracted = extractPageAnnotations(
+        this.engine,
+        mod,
+        this.pageIndex,
+        this.pageHandle,
+        cropInfo,
+        heightPts,
+        { leftPtr, bottomPtr, rightPtr, topPtr },
+        pathPtrs
+      );
+      images.push(...annotExtracted.images);
+      shapes.push(...annotExtracted.shapes);
     } finally {
       this.engine.freeMemory(leftPtr);
       this.engine.freeMemory(bottomPtr);
       this.engine.freeMemory(rightPtr);
       this.engine.freeMemory(topPtr);
+      freePathPointers(this.engine, pathPtrs);
     }
 
     // Sort spans by area (width * height) in descending order to fix layering/click-through.
@@ -709,6 +835,7 @@ export class PdfPage {
    */
   public drawText(options: TextOptions, charsetIndex?: FontCharsetIndex): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     drawText(this.engine, this.docHandle, this.pageHandle, options, charsetIndex);
     return this;
   }
@@ -720,6 +847,7 @@ export class PdfPage {
    */
   public drawRectangle(options: ShapeOptions): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     drawRectangle(this.engine, this.pageHandle, options);
     return this;
   }
@@ -731,6 +859,7 @@ export class PdfPage {
    */
   public drawCircle(options: ShapeOptions): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     drawCircle(this.engine, this.pageHandle, options);
     return this;
   }
@@ -742,6 +871,7 @@ export class PdfPage {
    */
   public drawLine(options: ShapeOptions): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     drawLine(this.engine, this.pageHandle, options);
     return this;
   }
@@ -753,6 +883,7 @@ export class PdfPage {
    */
   public drawArrow(options: ShapeOptions): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     drawArrow(this.engine, this.pageHandle, options);
     return this;
   }
@@ -764,7 +895,20 @@ export class PdfPage {
    */
   public drawPath(options: PathOptions): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     drawPath(this.engine, this.pageHandle, options);
+    return this;
+  }
+
+  /**
+   * Draws an SVG path or spline onto the page.
+   * @param options The SVG path string, dimensions, position, and styling.
+   * @returns The current PdfPage instance for chaining.
+   */
+  public drawSvgPath(options: SvgPathOptions): this {
+    this.assertNotDisposed();
+    this.document?.markDirty?.();
+    drawSvgPath(this.engine, this.pageHandle, options);
     return this;
   }
 
@@ -775,6 +919,7 @@ export class PdfPage {
    */
   public addHighlightAnnotation(options: ShapeOptions): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     addHighlightAnnotation(this.engine, this.pageHandle, options);
     return this;
   }
@@ -786,6 +931,7 @@ export class PdfPage {
    */
   public addInkAnnotation(options: PathOptions): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     addInkAnnotation(this.engine, this.pageHandle, options);
     return this;
   }
@@ -797,6 +943,7 @@ export class PdfPage {
    */
   public drawImage(options: ImageOptions): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     drawImage(this.engine, this.docHandle, this.pageHandle, options);
     return this;
   }
@@ -808,6 +955,7 @@ export class PdfPage {
    */
   public addTextAnnotation(options: NoteAnnotationOptions): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     addTextAnnotation(this.engine, this.pageHandle, options);
     return this;
   }
@@ -819,6 +967,7 @@ export class PdfPage {
    */
   public drawFormFieldPlaceholder(options: FormFieldPlaceholderOptions): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     drawFormFieldPlaceholder(this.engine, this.docHandle, this.pageHandle, options);
     return this;
   }
@@ -838,6 +987,7 @@ export class PdfPage {
     fileName?: string;
   }): this {
     this.assertNotDisposed();
+    this.document?.markDirty?.();
     this.document.addPendingLinkAnnotation(this.pageIndex, options);
     return this;
   }
