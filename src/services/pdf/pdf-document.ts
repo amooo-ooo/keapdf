@@ -2567,7 +2567,14 @@ export class PdfDocument {
                 height,
                 rotation,
                 value,
+                label,
                 options,
+                exportValue,
+                multiline,
+                password,
+                fontSize,
+                fontFamily,
+                color,
                 readOnly,
                 required,
                 backgroundColor,
@@ -2575,12 +2582,44 @@ export class PdfDocument {
                 borderWidth,
                 borderStyle,
                 textAlign,
+                maxLength,
+                isComb,
+                combCellCount: isComb ? maxLength : undefined,
+                doNotSpellCheck,
+                doNotScroll,
               });
             }
           }
         }
 
+        if (isInternalBuffer && this._pageRotationDeltas.size > 0) {
+          for (const [rotPageIdx, rotInfo] of this._pageRotationDeltas.entries()) {
+            const spans = byPage.get(rotPageIdx);
+            if (!spans || spans.length === 0) continue;
+            const rotatedSpans = spans.map((span) => {
+              const cx = span.left + span.width / 2;
+              const cy = span.top + span.height / 2;
+              const newCenter = transformPointForPageRotation(
+                { x: cx, y: cy },
+                rotInfo.delta,
+                rotInfo.initialWidthPts,
+                rotInfo.initialHeightPts,
+              );
+              return {
+                ...span,
+                left: Math.round((newCenter.x - span.width / 2) * 10) / 10,
+                top: Math.round((newCenter.y - span.height / 2) * 10) / 10,
+                rotation: (((span.rotation || 0) + rotInfo.delta) % 360 + 360) % 360,
+              };
+            });
+            byPage.set(rotPageIdx, rotatedSpans);
+          }
+        }
+
         this._cachedAcroFormFieldSpans = byPage;
+        for (const [pageIdx, pageSpans] of this._pageSpansCache.entries()) {
+          pageSpans.formFields = byPage.get(pageIdx) || [];
+        }
         return byPage;
       } catch (err) {
         console.warn('Failed to extract AcroForm fields with pdf-lib:', err);
@@ -2606,40 +2645,270 @@ export class PdfDocument {
       return this._cachedAcroFormFieldSpans.get(pageIndex) || [];
     }
     if (!this._acroFormInitPromise && this._rawBuffer) {
-      this.initAcroFormFieldSpans(this._rawBuffer).catch((err: unknown) => {
+      this.initAcroFormFieldSpans().catch((err: unknown) => {
         console.warn('Lazy AcroForm extraction error:', err);
       });
     }
 
     try {
       const page = this.getPage(pageIndex);
-      const annots = page.getAnnotations();
-      const dims = page.getDimensions();
-      const widgetSpans: EditableFormFieldSpan[] = [];
-      let idx = 0;
-      for (const annot of annots) {
-        if (annot.subtype === 'Widget') {
-          const w = annot.rect.right - annot.rect.left;
-          const h = annot.rect.top - annot.rect.bottom;
-          const left = annot.rect.left;
-          const top = dims.heightPts - annot.rect.top;
-          widgetSpans.push({
-            id: `form_field_${pageIndex}_widget_${idx}`,
-            type: 'form-field',
-            pageIndex,
-            fieldId: `widget_${idx}`,
-            fieldName: annot.contents && annot.contents !== '(No text content)' ? annot.contents : `Field ${idx + 1}`,
-            variant: 'text-input',
-            left,
-            top,
-            width: w,
-            height: h,
+      const dims = typeof page.getDimensions === 'function' ? page.getDimensions() : { widthPts: 612, heightPts: 792 };
+      const cropInfo: PageCropInfo = typeof page.getCropInfo === 'function'
+        ? page.getCropInfo()
+        : {
+            cropLeft: 0,
+            cropBottom: 0,
+            cropRight: dims.widthPts,
+            cropTop: dims.heightPts,
+            cropWidth: dims.widthPts,
+            cropHeight: dims.heightPts,
             rotation: 0,
-          });
-          idx++;
+            hasCrop: false,
+            hasCropBox: false,
+            domCropLeft: 0,
+            domCropTop: 0,
+            marginLeft: 0,
+            marginBottom: 0,
+            marginRight: 0,
+            marginTop: 0,
+          };
+
+      const mod = this.engine?.getModule?.();
+      if (typeof mod?.FPDFPage_GetAnnotCount === 'function') {
+        const formHandle = this.getFormHandle();
+        if (formHandle && page.pageHandle) {
+          this.engine.pageFormAfterLoad(page.pageHandle, formHandle);
         }
+
+        const annotCount = mod.FPDFPage_GetAnnotCount(page.pageHandle);
+        const rectPtr = this.engine.allocateMemory(16);
+        const widgetSpans: EditableFormFieldSpan[] = [];
+        const nameWidgetCounts = new Map<string, number>();
+
+        try {
+          for (let i = 0; i < annotCount; i++) {
+            const annotHandle = mod.FPDFPage_GetAnnot(page.pageHandle, i);
+            if (!annotHandle) continue;
+
+            try {
+              const subtypeCode = mod.FPDFAnnot_GetSubtype(annotHandle);
+              if (subtypeCode !== 20) continue;
+
+              const annotFlags = typeof mod.FPDFAnnot_GetFlags === 'function'
+                ? mod.FPDFAnnot_GetFlags(annotHandle)
+                : 0;
+
+              if ((annotFlags & 2) !== 0 || (annotFlags & 32) !== 0) {
+                continue;
+              }
+
+              mod.FPDFAnnot_GetRect(annotHandle, rectPtr);
+              const heap = mod.pdfium.HEAPF32;
+              const rLeft = heap[rectPtr >> 2] || 0;
+              const rTop = heap[(rectPtr >> 2) + 1] || 0;
+              const rRight = heap[(rectPtr >> 2) + 2] || 0;
+              const rBottom = heap[(rectPtr >> 2) + 3] || 0;
+
+              const pdfXMin = Math.min(rLeft, rRight);
+              const pdfXMax = Math.max(rLeft, rRight);
+              const pdfYMin = Math.min(rTop, rBottom);
+              const pdfYMax = Math.max(rTop, rBottom);
+
+              const w = pdfXMax - pdfXMin;
+              const h = pdfYMax - pdfYMin;
+              if (w <= 0 || h <= 0) {
+                continue;
+              }
+
+              const pageRotation = (cropInfo.rotation * 90) % 360;
+              const domBounds = pdfBoxToDomBounds(pdfXMin, pdfYMin, pdfXMax, pdfYMax, cropInfo);
+              const unrotW = Math.round((pdfXMax - pdfXMin) * 10) / 10;
+              const unrotH = Math.round((pdfYMax - pdfYMin) * 10) / 10;
+
+              let left = Math.round(domBounds.left * 10) / 10;
+              let top = Math.round(domBounds.top * 10) / 10;
+              let width = Math.round((domBounds.right - domBounds.left) * 10) / 10;
+              let height = Math.round((domBounds.bottom - domBounds.top) * 10) / 10;
+              let rotation = 0;
+
+              if (pageRotation !== 0) {
+                const centerX = (domBounds.left + domBounds.right) / 2;
+                const centerY = (domBounds.top + domBounds.bottom) / 2;
+                width = unrotW;
+                height = unrotH;
+                left = Math.round((centerX - width / 2) * 10) / 10;
+                top = Math.round((centerY - height / 2) * 10) / 10;
+                rotation = pageRotation;
+              }
+
+              const rawFormType = formHandle && typeof mod.FPDFAnnot_GetFormFieldType === 'function'
+                ? mod.FPDFAnnot_GetFormFieldType(formHandle, annotHandle)
+                : -1;
+
+              if (rawFormType === 7 && (width <= 0 || height <= 0 || (annotFlags & 128) !== 0)) {
+                continue;
+              }
+
+              let variant: FormFieldVariantType = 'text-input';
+              if (rawFormType === 1) variant = 'button';
+              else if (rawFormType === 2) variant = 'checkbox';
+              else if (rawFormType === 3) variant = 'radio';
+              else if (rawFormType === 4 || rawFormType === 5) variant = 'dropdown';
+              else if (rawFormType === 7) variant = 'signature';
+
+              const readUtf16 = (fn: (...args: number[]) => number, ...args: number[]): string => {
+                if (typeof fn !== 'function') return '';
+                const req = fn(...args, 0, 0);
+                if (req <= 2) return '';
+                const ptr = this.engine.allocateMemory(req);
+                try {
+                  fn(...args, ptr, req);
+                  const u8 = new Uint8Array(mod.pdfium.HEAPU8.buffer, ptr, req - 2);
+                  let str = '';
+                  for (let b = 0; b < u8.length; b += 2) {
+                    const ch = u8[b] | (u8[b + 1] << 8);
+                    if (ch !== 0) str += String.fromCharCode(ch);
+                  }
+                  return str;
+                } finally {
+                  this.engine.freeMemory(ptr);
+                }
+              };
+
+              const fieldName = formHandle ? readUtf16(mod.FPDFAnnot_GetFormFieldName, formHandle, annotHandle) : '';
+              const finalName = fieldName || `widget_${i}`;
+              const wIdx = nameWidgetCounts.get(finalName) || 0;
+              nameWidgetCounts.set(finalName, wIdx + 1);
+
+              let rawValue: string | boolean | undefined;
+
+              if (formHandle && typeof mod.FPDFAnnot_GetFormFieldValue === 'function') {
+                const valStr = readUtf16(mod.FPDFAnnot_GetFormFieldValue, formHandle, annotHandle);
+                if (valStr) rawValue = valStr;
+              }
+
+              let exportValue: string | undefined;
+              if (formHandle && typeof mod.FPDFAnnot_GetFormFieldExportValue === 'function') {
+                const expStr = readUtf16(mod.FPDFAnnot_GetFormFieldExportValue, formHandle, annotHandle);
+                if (expStr) exportValue = expStr;
+              }
+
+              if (variant === 'checkbox' && formHandle && typeof mod.FPDFAnnot_IsChecked === 'function') {
+                rawValue = Boolean(mod.FPDFAnnot_IsChecked(formHandle, annotHandle));
+              }
+
+              if (this._modifiedFormFieldValues.has(finalName)) {
+                rawValue = this._modifiedFormFieldValues.get(finalName);
+              }
+
+              let options: string[] | undefined;
+              if (formHandle && (variant === 'dropdown' || variant === 'radio') && typeof mod.FPDFAnnot_GetOptionCount === 'function') {
+                const optCount = mod.FPDFAnnot_GetOptionCount(formHandle, annotHandle);
+                if (optCount > 0 && typeof mod.FPDFAnnot_GetOptionLabel === 'function') {
+                  options = [];
+                  for (let o = 0; o < optCount; o++) {
+                    options.push(readUtf16(mod.FPDFAnnot_GetOptionLabel, formHandle, annotHandle, o));
+                  }
+                }
+              }
+
+              const fieldFlags = formHandle && typeof mod.FPDFAnnot_GetFormFieldFlags === 'function'
+                ? mod.FPDFAnnot_GetFormFieldFlags(formHandle, annotHandle)
+                : 0;
+
+              const readOnly = (fieldFlags & 1) !== 0;
+              const required = (fieldFlags & 2) !== 0;
+              const multiline = variant === 'text-input' ? (fieldFlags & 4096) !== 0 : undefined;
+              const password = variant === 'text-input' ? (fieldFlags & 8192) !== 0 : undefined;
+              const doNotSpellCheck = (fieldFlags & 4194304) !== 0;
+              const doNotScroll = (fieldFlags & 8388608) !== 0;
+              const isComb = (fieldFlags & 16777216) !== 0;
+
+              widgetSpans.push({
+                id: `form_field_${pageIndex}_${finalName}_${wIdx}`,
+                type: 'form-field',
+                pageIndex,
+                fieldId: finalName,
+                fieldName: finalName,
+                variant,
+                left,
+                top,
+                width,
+                height,
+                rotation,
+                value: rawValue,
+                exportValue,
+                options,
+                multiline,
+                password,
+                readOnly,
+                required,
+                isComb,
+                doNotSpellCheck,
+                doNotScroll,
+              });
+            } finally {
+              mod.FPDFPage_CloseAnnot(annotHandle);
+            }
+          }
+        } finally {
+          this.engine.freeMemory(rectPtr);
+        }
+
+        return widgetSpans;
       }
-      return widgetSpans;
+
+      if (typeof page.getAnnotations === 'function') {
+        const annots = page.getAnnotations();
+        const widgetSpans: EditableFormFieldSpan[] = [];
+        const pageRotation = (cropInfo.rotation * 90) % 360;
+        let idx = 0;
+        for (const annot of annots) {
+          if (annot.subtype === 'Widget') {
+            const pdfXMin = Math.min(annot.rect.left, annot.rect.right);
+            const pdfXMax = Math.max(annot.rect.left, annot.rect.right);
+            const pdfYMin = Math.min(annot.rect.bottom, annot.rect.top);
+            const pdfYMax = Math.max(annot.rect.bottom, annot.rect.top);
+            const unrotW = Math.round((pdfXMax - pdfXMin) * 10) / 10;
+            const unrotH = Math.round((pdfYMax - pdfYMin) * 10) / 10;
+            const domBounds = pdfBoxToDomBounds(pdfXMin, pdfYMin, pdfXMax, pdfYMax, cropInfo);
+            let left = Math.round(domBounds.left * 10) / 10;
+            let top = Math.round(domBounds.top * 10) / 10;
+            let width = Math.round((domBounds.right - domBounds.left) * 10) / 10;
+            let height = Math.round((domBounds.bottom - domBounds.top) * 10) / 10;
+            let rotation = 0;
+            if (pageRotation !== 0) {
+              const centerX = (domBounds.left + domBounds.right) / 2;
+              const centerY = (domBounds.top + domBounds.bottom) / 2;
+              width = unrotW;
+              height = unrotH;
+              left = Math.round((centerX - width / 2) * 10) / 10;
+              top = Math.round((centerY - height / 2) * 10) / 10;
+              rotation = pageRotation;
+            }
+            const fieldName = annot.contents && annot.contents !== '(No text content)' ? annot.contents : `Field ${idx + 1}`;
+            const modifiedValue = this._modifiedFormFieldValues.get(fieldName);
+            widgetSpans.push({
+              id: `form_field_${pageIndex}_widget_${idx}`,
+              type: 'form-field',
+              pageIndex,
+              fieldId: `widget_${idx}`,
+              fieldName,
+              variant: 'text-input',
+              left,
+              top,
+              width,
+              height,
+              rotation,
+              value: modifiedValue,
+            });
+            idx++;
+          }
+        }
+        return widgetSpans;
+      }
+
+      return [];
     } catch {
       return [];
     }
@@ -2698,44 +2967,82 @@ export class PdfDocument {
   public rotatePage(pageIndex: number, degreesDelta: 90 | 180 | 270): void {
     const page = this.getPage(pageIndex);
     const prevDims = page.getDimensions();
+    const mod = this.engine?.getModule?.();
+    const prevRotCode =
+      page.pageHandle && typeof mod?.FPDFPage_GetRotation === 'function'
+        ? mod.FPDFPage_GetRotation(page.pageHandle)
+        : 0;
+    const prevAngle = (((prevRotCode * 90) % 360) + 360) % 360;
+    const existingRot = this._pageRotationDeltas.get(pageIndex);
+    const initialWidthPts = existingRot ? existingRot.initialWidthPts : prevDims.widthPts;
+    const initialHeightPts = existingRot ? existingRot.initialHeightPts : prevDims.heightPts;
+    const initialAngle = existingRot ? existingRot.initialAngle : prevAngle;
+    const nextDelta = (((existingRot ? existingRot.delta : 0) + degreesDelta) % 360 + 360) % 360;
+    const expectedAngle = (((initialAngle + nextDelta) % 360) + 360) % 360;
+    if (nextDelta === 0) {
+      this._pageRotationDeltas.delete(pageIndex);
+    } else {
+      this._pageRotationDeltas.set(pageIndex, {
+        delta: nextDelta as 90 | 180 | 270,
+        initialWidthPts,
+        initialHeightPts,
+        initialAngle,
+        expectedAngle,
+      });
+    }
+
     page.rotate(degreesDelta);
-    this.invalidatePage(pageIndex);
+    this._isPdfiumDirty = true;
+    try {
+      this._pageDimensionsCache.set(pageIndex, page.getDimensions());
+    } catch {
+      this._pageDimensionsCache.delete(pageIndex);
+    }
+    this._pageSpansCache.delete(pageIndex);
 
     if (this._cachedAcroFormFieldSpans?.has(pageIndex)) {
       const spans = this._cachedAcroFormFieldSpans.get(pageIndex);
       if (spans) {
-        for (const span of spans) {
+        const nextSpans = spans.map((span) => {
           const cx = span.left + span.width / 2;
           const cy = span.top + span.height / 2;
           const newCenter = transformPointForPageRotation(
             { x: cx, y: cy },
             degreesDelta,
             prevDims.widthPts,
-            prevDims.heightPts
+            prevDims.heightPts,
           );
-          span.left = Math.round((newCenter.x - span.width / 2) * 10) / 10;
-          span.top = Math.round((newCenter.y - span.height / 2) * 10) / 10;
-          span.rotation = (((span.rotation || 0) + degreesDelta) % 360 + 360) % 360;
-        }
+          return {
+            ...span,
+            left: Math.round((newCenter.x - span.width / 2) * 10) / 10,
+            top: Math.round((newCenter.y - span.height / 2) * 10) / 10,
+            rotation: (((span.rotation || 0) + degreesDelta) % 360 + 360) % 360,
+          };
+        });
+        this._cachedAcroFormFieldSpans.set(pageIndex, nextSpans);
       }
     }
 
     if (this.pendingAcroFormFieldsByPage.has(pageIndex)) {
       const pendingFields = this.pendingAcroFormFieldsByPage.get(pageIndex);
       if (pendingFields) {
-        for (const field of pendingFields) {
+        const nextFields = pendingFields.map((field) => {
           const cx = field.x + field.width / 2;
           const cy = field.y + field.height / 2;
           const newCenter = transformPointForPageRotation(
             { x: cx, y: cy },
             degreesDelta,
             prevDims.widthPts,
-            prevDims.heightPts
+            prevDims.heightPts,
           );
-          field.x = Math.round((newCenter.x - field.width / 2) * 10) / 10;
-          field.y = Math.round((newCenter.y - field.height / 2) * 10) / 10;
-          field.rotation = (((field.rotation || 0) + degreesDelta) % 360 + 360) % 360;
-        }
+          return {
+            ...field,
+            x: Math.round((newCenter.x - field.width / 2) * 10) / 10,
+            y: Math.round((newCenter.y - field.height / 2) * 10) / 10,
+            rotation: (((field.rotation || 0) + degreesDelta) % 360 + 360) % 360,
+          };
+        });
+        this.pendingAcroFormFieldsByPage.set(pageIndex, nextFields);
       }
     }
   }
@@ -2848,11 +3155,28 @@ export class PdfDocument {
   }
 
   /**
-   * Clears memoized overlay spans for a specific page or the entire document.
+   * Retrieves the memoised document typography profile, if available.
+   */
+  public getCachedTypographyProfile(): DocumentTypographyProfile | null {
+    return this._cachedTypographyProfile;
+  }
+
+  /**
+   * Stores the memoised document typography profile.
+   *
+   * @param profile Computed document typography profile or null.
+   */
+  public setCachedTypographyProfile(profile: DocumentTypographyProfile | null): void {
+    this._cachedTypographyProfile = profile;
+  }
+
+  /**
+   * Clears memoised overlay spans for a specific page or the entire document.
    *
    * @param pageIndex Optional zero-based page index. Clears all pages if omitted.
    */
   public clearCachedPageSpans(pageIndex?: number): void {
+    this._cachedTypographyProfile = null;
     if (pageIndex !== undefined) {
       this._pageSpansCache.delete(pageIndex);
     } else {
@@ -2864,6 +3188,32 @@ export class PdfDocument {
     const page = this.getPage(pageIndex);
     page.drawText(options);
     this.invalidatePage(pageIndex);
+  }
+
+  /**
+   * Apply page numbering, Bates numbering, or running header/footer text across document pages.
+   *
+   * @param options Configuration for numbering mode, page scope, position, and typography.
+   * @param metadata Optional metadata context for {file} and {date} tokens.
+   * @return Summary of stamped page indices and generated labels.
+   */
+  public applyPageNumbering(
+    options: PageNumberingOptions,
+    metadata?: { fileName?: string; dateStr?: string }
+  ): PageNumberingResult {
+    this._isPdfiumDirty = true;
+    this.closeAllPages();
+    const result = runPageNumberingOp(this.engine, this.getDocHandle(), options, {
+      fileName: metadata?.fileName,
+      dateStr: metadata?.dateStr,
+      charsetIndex: this._fontCharsetIndex,
+    });
+    for (const pageIdx of result.stampedPageIndices) {
+      this._pageSpansCache.delete(pageIdx);
+      this._fontCharsetIndex.invalidatePage(pageIdx);
+    }
+    this._cachedTypographyProfile = null;
+    return result;
   }
 
   public drawRectangle(pageIndex: number, options: ShapeOptions): void {
@@ -3041,6 +3391,7 @@ export class PdfDocument {
     this.engine.closeCurrentDocument();
     this.pastCommands = [];
     this.futureCommands = [];
+    this._cachedTypographyProfile = null;
     this._fontCharsetIndex.invalidate();
   }
 
