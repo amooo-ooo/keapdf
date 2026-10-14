@@ -10,7 +10,7 @@ import type { HighlightRect, PageCharacter } from '../../core/types';
 import type { CanvasElement, TextElement, TextElementLine } from '../../stores/canvas-types';
 
 /** Base negative offset index for synthetic canvas character IDs to prevent collision with PDFium indices. */
-const SYNTHETIC_CHAR_INDEX_BASE = -1000000;
+export const SYNTHETIC_CHAR_INDEX_BASE = -1000000;
 
 /** Average character width ratio relative to font size for layout approximation. */
 const DEFAULT_CHAR_WIDTH_RATIO = 0.55;
@@ -96,7 +96,16 @@ export function getCanvasTextCharacters(
 
       let charCursor = 0;
       if (line.segments && line.segments.length > 0) {
-        for (const seg of line.segments) {
+        for (let sIdx = 0; sIdx < line.segments.length; sIdx++) {
+          const seg = line.segments[sIdx];
+          if (
+            sIdx > 0 &&
+            globalCharOffset < element.text.length &&
+            element.text[globalCharOffset] === ' ' &&
+            seg.text[0] !== ' '
+          ) {
+            globalCharOffset++;
+          }
           const segFontSize = seg.fontSize || lineFontSize;
           if (seg.left !== undefined) {
             cursorX = element.x + seg.left;
@@ -162,7 +171,7 @@ export function getCanvasTextCharacters(
       if (lIdx < element.lines.length - 1 && globalCharOffset < element.text.length) {
         if (element.text[globalCharOffset] === '\r' && element.text[globalCharOffset + 1] === '\n') {
           globalCharOffset += 2;
-        } else if (element.text[globalCharOffset] === '\n') {
+        } else if (element.text[globalCharOffset] === '\n' || element.text[globalCharOffset] === '\r') {
           globalCharOffset += 1;
         }
       }
@@ -173,7 +182,16 @@ export function getCanvasTextCharacters(
     let currentY = element.y;
     let cursorX = element.x;
 
-    for (const seg of element.segments) {
+    for (let sIdx = 0; sIdx < element.segments.length; sIdx++) {
+      const seg = element.segments[sIdx];
+      if (
+        sIdx > 0 &&
+        globalCharOffset < element.text.length &&
+        element.text[globalCharOffset] === ' ' &&
+        seg.text[0] !== ' '
+      ) {
+        globalCharOffset++;
+      }
       const segFontSize = seg.fontSize || baseFontSize;
       if (seg.left !== undefined) {
         cursorX = element.x + seg.left;
@@ -273,12 +291,49 @@ export function getCanvasTextCharacters(
       if (lIdx < rawLines.length - 1 && globalCharOffset < element.text.length) {
         if (element.text[globalCharOffset] === '\r' && element.text[globalCharOffset + 1] === '\n') {
           globalCharOffset += 2;
-        } else if (element.text[globalCharOffset] === '\n') {
+        } else if (element.text[globalCharOffset] === '\n' || element.text[globalCharOffset] === '\r') {
           globalCharOffset += 1;
         }
       }
 
       currentY += lineSpacing;
+    }
+  }
+
+  if (elementRotation !== 0 && characters.length > 0) {
+    const cx = element.x + (element.width || 0) / 2;
+    const cy = element.y + (element.height || 0) / 2;
+    const rad = (elementRotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    for (let i = 0; i < characters.length; i++) {
+      const ch = characters[i];
+      const charW = ch.domRight - ch.domLeft;
+      const charH = ch.domBottom - ch.domTop;
+      const charCx = (ch.domLeft + ch.domRight) / 2;
+      const charCy = (ch.domTop + ch.domBottom) / 2;
+      const dx = charCx - cx;
+      const dy = charCy - cy;
+      const rotCx = cx + dx * cos - dy * sin;
+      const rotCy = cy + dx * sin + dy * cos;
+
+      const ox = ch.originX - cx;
+      const oy = ch.originY - cy;
+      const rotOx = cx + ox * cos - oy * sin;
+      const rotOy = cy + ox * sin + oy * cos;
+
+      ch.left = rotCx - charW / 2;
+      ch.right = rotCx + charW / 2;
+      ch.top = rotCy - charH / 2;
+      ch.bottom = rotCy + charH / 2;
+      ch.domLeft = ch.left;
+      ch.domRight = ch.right;
+      ch.domTop = ch.top;
+      ch.domBottom = ch.bottom;
+      ch.originX = rotOx;
+      ch.originY = rotOy;
+      ch.domBaseline = rotOy;
     }
   }
 
@@ -566,6 +621,151 @@ export function calculateUnifiedUnderlines(
 }
 
 /**
+ * Calculates strikethrough line segments for a character range across PDF and canvas text layers.
+ *
+ * @param characters Combined unified page characters.
+ * @param startIndex Starting character index.
+ * @param endIndex Ending character index.
+ * @param strokeWidth Line thickness in PDF points.
+ * @return Array of strikethrough line segments positioned across character midpoints.
+ */
+export function calculateUnifiedStrikethroughs(
+  characters: PageCharacter[],
+  startIndex: number,
+  endIndex: number,
+  strokeWidth: number = 2
+): UnderlineSegment[] {
+  const rects = calculateUnifiedHighlightRects(characters, startIndex, endIndex);
+  const segments: UnderlineSegment[] = [];
+
+  for (const rect of rects) {
+    if (rect.width <= 0) continue;
+    // Calibrate strikethrough midpoint across character vertical centre
+    const lineY = rect.baselineY !== undefined
+      ? rect.baselineY - (rect.height * 0.28)
+      : rect.y + rect.height * 0.52;
+
+    segments.push({
+      startX: rect.x,
+      endX: rect.x + rect.width,
+      lineY,
+      width: rect.width,
+      height: strokeWidth,
+    });
+  }
+
+  return segments;
+}
+
+/**
+ * Checks whether a character has valid spatial bounding geometry on the page.
+ *
+ * @param c The page character to inspect.
+ * @return True if the character has valid bounding coordinates.
+ */
+function hasValidCharGeometry(c: PageCharacter): boolean {
+  if (c.charIndex < 0) return true;
+  if (c.unicode.trim().length > 0) return true;
+  return (c.left > 0 || c.right > 0) && (c.top > 0 || c.bottom > 0 || c.originY > 0);
+}
+
+/**
+ * Resolves the selected characters between startIndex and endIndex using visual reading
+ * geometry on horizontal lines so that out-of-order PDF stream indices never include
+ * unselected words before or after the visual selection.
+ *
+ * @param characters Combined unified page characters.
+ * @param startIndex Starting character index (inclusive).
+ * @param endIndex Ending character index (inclusive).
+ * @return Array of selected PageCharacter items.
+ */
+export function resolveUnifiedCharacterRange(
+  characters: PageCharacter[],
+  startIndex: number,
+  endIndex: number
+): PageCharacter[] {
+  if (characters.length === 0) return [];
+
+  const minIndex = Math.min(startIndex, endIndex);
+  const maxIndex = Math.max(startIndex, endIndex);
+
+  const isCanvasRange =
+    isSyntheticCanvasCharIndex(startIndex) || isSyntheticCanvasCharIndex(endIndex);
+
+  const layerChars = isCanvasRange
+    ? characters.filter((c) => isSyntheticCanvasCharIndex(c.charIndex))
+    : characters.filter((c) => c.charIndex >= 0);
+
+  if (layerChars.length === 0) return [];
+
+  const startChar = layerChars.find((c) => c.charIndex === startIndex);
+  const endChar = layerChars.find((c) => c.charIndex === endIndex);
+
+  if (
+    startChar &&
+    endChar &&
+    !startChar.rotation &&
+    !endChar.rotation &&
+    !startChar.isVertical &&
+    !endChar.isVertical &&
+    hasValidCharGeometry(startChar) &&
+    hasValidCharGeometry(endChar)
+  ) {
+    const startCenterY = (startChar.domTop + startChar.domBottom) / 2;
+    const endCenterY = (endChar.domTop + endChar.domBottom) / 2;
+    const sameLineThreshold = Math.max(startChar.fontSize, endChar.fontSize) * 0.75;
+
+    if (Math.abs(startCenterY - endCenterY) < sameLineThreshold) {
+      const avgLineCenterY = (startCenterY + endCenterY) / 2;
+      const minDomX = Math.min(startChar.domLeft, endChar.domLeft) - 0.5;
+      const maxDomX = Math.max(startChar.domRight, endChar.domRight) + 0.5;
+
+      return layerChars.filter((c) => {
+        if (c.rotation || c.isVertical) return false;
+        if (!hasValidCharGeometry(c)) {
+          return c.charIndex >= minIndex && c.charIndex <= maxIndex;
+        }
+        const cCenterY = (c.domTop + c.domBottom) / 2;
+        const tolY = Math.max(sameLineThreshold, c.fontSize * 0.75);
+        if (Math.abs(cCenterY - avgLineCenterY) >= tolY) return false;
+        const cCenterX = (c.domLeft + c.domRight) / 2;
+        return cCenterX >= minDomX && cCenterX <= maxDomX;
+      });
+    }
+
+    const topChar = startCenterY <= endCenterY ? startChar : endChar;
+    const bottomChar = startCenterY <= endCenterY ? endChar : startChar;
+    const topCenterY = (topChar.domTop + topChar.domBottom) / 2;
+    const bottomCenterY = (bottomChar.domTop + bottomChar.domBottom) / 2;
+
+    return layerChars.filter((c) => {
+      if (c.charIndex < minIndex || c.charIndex > maxIndex) return false;
+      if (c.rotation || c.isVertical || !hasValidCharGeometry(c)) return true;
+
+      const cCenterY = (c.domTop + c.domBottom) / 2;
+      const topTol = Math.max(topChar.fontSize, c.fontSize) * 0.75;
+      const bottomTol = Math.max(bottomChar.fontSize, c.fontSize) * 0.75;
+
+      if (cCenterY < topCenterY - topTol || cCenterY > bottomCenterY + bottomTol) {
+        return false;
+      }
+
+      const cCenterX = (c.domLeft + c.domRight) / 2;
+      if (Math.abs(cCenterY - topCenterY) < topTol) {
+        return cCenterX >= topChar.domLeft - 0.5;
+      }
+      if (Math.abs(cCenterY - bottomCenterY) < bottomTol) {
+        return cCenterX <= bottomChar.domRight + 0.5;
+      }
+
+      return true;
+    });
+  }
+
+  return layerChars.filter((c) => c.charIndex >= minIndex && c.charIndex <= maxIndex);
+}
+
+/**
  * Calculates highlight rectangles for a character range across both PDF and canvas text layers.
  *
  * @param characters Combined unified page characters.
@@ -580,36 +780,44 @@ export function calculateUnifiedHighlightRects(
 ): HighlightRect[] {
   if (characters.length === 0) return [];
 
-  const minIndex = Math.min(startIndex, endIndex);
-  const maxIndex = Math.max(startIndex, endIndex);
-
-  let selectedChars: PageCharacter[];
-  if (isSyntheticCanvasCharIndex(startIndex) || isSyntheticCanvasCharIndex(endIndex)) {
-    selectedChars = characters.filter(
-      (c) => isSyntheticCanvasCharIndex(c.charIndex) && c.charIndex >= minIndex && c.charIndex <= maxIndex
-    );
-  } else {
-    selectedChars = characters.filter(
-      (c) => c.charIndex >= 0 && c.charIndex >= minIndex && c.charIndex <= maxIndex
-    );
-  }
+  const selectedChars = resolveUnifiedCharacterRange(characters, startIndex, endIndex).filter(
+    (c) => hasValidCharGeometry(c)
+  );
 
   if (selectedChars.length === 0) return [];
 
-  // Group characters by line based on vertical overlap
+  const isCharVertical = (c: PageCharacter): boolean => {
+    const rad = ((c.rotation || 0) * Math.PI) / 180;
+    return Math.abs(Math.sin(rad)) > 0.707;
+  };
+
+  // Group characters by line based on vertical overlap (or horizontal column overlap for vertical text)
   const lines: PageCharacter[][] = [];
   for (const char of selectedChars) {
+    const charVertical = isCharVertical(char);
     let placed = false;
     for (const line of lines) {
       const rep = line[0];
-      const lineCenterY = (rep.domTop + rep.domBottom) / 2;
-      const charCenterY = (char.domTop + char.domBottom) / 2;
-      const threshold = Math.max(rep.fontSize, char.fontSize) * 0.75;
+      const repVertical = isCharVertical(rep);
+      if (repVertical !== charVertical) continue;
 
-      if (Math.abs(lineCenterY - charCenterY) < threshold) {
-        line.push(char);
-        placed = true;
-        break;
+      const threshold = Math.max(rep.fontSize, char.fontSize) * 0.75;
+      if (charVertical) {
+        const lineCenterX = (rep.domLeft + rep.domRight) / 2;
+        const charCenterX = (char.domLeft + char.domRight) / 2;
+        if (Math.abs(lineCenterX - charCenterX) < threshold) {
+          line.push(char);
+          placed = true;
+          break;
+        }
+      } else {
+        const lineCenterY = (rep.domTop + rep.domBottom) / 2;
+        const charCenterY = (char.domTop + char.domBottom) / 2;
+        if (Math.abs(lineCenterY - charCenterY) < threshold) {
+          line.push(char);
+          placed = true;
+          break;
+        }
       }
     }
 
@@ -639,9 +847,10 @@ export function calculateUnifiedHighlightRects(
     }
 
     const avgBaseline = sumBaseline / line.length;
-    const top = Math.max(0, avgBaseline - maxFontSize * 0.85);
-    const height = Math.max(maxFontSize * 1.15, maxY - minY);
-    const width = Math.max(0, maxX - minX);
+    const verticalLine = isCharVertical(line[0]);
+    const top = verticalLine ? Math.max(0, minY) : Math.max(0, avgBaseline - maxFontSize * 0.85);
+    const height = verticalLine ? Math.max(0, maxY - minY) : Math.max(maxFontSize * 1.15, maxY - minY);
+    const width = verticalLine ? Math.max(maxFontSize * 1.0, maxX - minX) : Math.max(0, maxX - minX);
 
     if (width > 0 && height > 0) {
       rects.push({
