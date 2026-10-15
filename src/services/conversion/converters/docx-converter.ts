@@ -13,15 +13,17 @@ import type {
   TableBlock,
   TableCell,
   TableRow,
+  ImageBlock,
   StyledRun,
   TextStyle,
   FormatConverter,
   BlockAlignment,
 } from '../types';
-import { unzipArchive, getZipText } from '../zip-utils';
+import { unzipArchive, getZipText, type ZipEntryMap } from '../zip-utils';
 import {
   parseXml,
   findChildren,
+  findDescendants,
   findFirstChild,
   findFirstDescendant,
   getAttribute,
@@ -29,6 +31,105 @@ import {
 } from '../xml-parser';
 import { layoutFlowDocument } from '../pdf-layout-engine';
 import { sanitizeTextForWinAnsi } from '../winansi-sanitizer';
+
+interface DocxRelTarget {
+  readonly id: string;
+  readonly target: string;
+  readonly type: string;
+}
+
+/**
+ * Parses word/_rels/document.xml.rels to map relationship IDs (rId*) to targets.
+ */
+function parseDocxRelationships(entries: ZipEntryMap): Map<string, DocxRelTarget> {
+  const map = new Map<string, DocxRelTarget>();
+  const relsXml =
+    getZipText(entries, 'word/_rels/document.xml.rels') ??
+    getZipText(entries, 'word/_rels/document.xml.RELS');
+  if (!relsXml) return map;
+
+  const root = parseXml(relsXml);
+  const relNodes = findDescendants(root, 'Relationship');
+  for (const rel of relNodes) {
+    const id = getAttribute(rel, 'Id');
+    const target = getAttribute(rel, 'Target');
+    const type = getAttribute(rel, 'Type') ?? '';
+    if (id && target) {
+      map.set(id, { id, target, type });
+    }
+  }
+  return map;
+}
+
+/**
+ * Parses word/numbering.xml to determine whether a given (numId, ilvl) is ordered or bulleted.
+ */
+function parseDocxNumbering(entries: ZipEntryMap): Map<string, boolean> {
+  const orderedMap = new Map<string, boolean>();
+  const numXml = getZipText(entries, 'word/numbering.xml');
+  if (!numXml) return orderedMap;
+
+  const root = parseXml(numXml);
+  const abstractMap = new Map<string, Map<string, boolean>>();
+
+  for (const absNode of findDescendants(root, 'abstractNum')) {
+    const absId = getAttribute(absNode, 'abstractNumId');
+    if (!absId) continue;
+    const lvlMap = new Map<string, boolean>();
+    for (const lvlNode of findChildren(absNode, 'lvl')) {
+      const ilvl = getAttribute(lvlNode, 'ilvl') ?? '0';
+      const numFmtNode = findFirstChild(lvlNode, 'numFmt');
+      const fmtVal = (numFmtNode ? getAttribute(numFmtNode, 'val') ?? '' : '').toLowerCase();
+      const isOrdered =
+        fmtVal === 'decimal' ||
+        fmtVal === 'lowerletter' ||
+        fmtVal === 'upperletter' ||
+        fmtVal === 'lowerroman' ||
+        fmtVal === 'upperroman' ||
+        fmtVal === 'ordinal' ||
+        fmtVal === 'decimalzero';
+      lvlMap.set(ilvl, isOrdered);
+    }
+    abstractMap.set(absId, lvlMap);
+  }
+
+  for (const numNode of findDescendants(root, 'num')) {
+    const numId = getAttribute(numNode, 'numId');
+    const absIdNode = findFirstChild(numNode, 'abstractNumId');
+    const absId = absIdNode ? getAttribute(absIdNode, 'val') : undefined;
+    if (!numId || !absId) continue;
+    const lvlMap = abstractMap.get(absId);
+    if (!lvlMap) continue;
+    for (const [ilvl, isOrdered] of lvlMap.entries()) {
+      orderedMap.set(`${numId}:${ilvl}`, isOrdered);
+    }
+  }
+
+  return orderedMap;
+}
+
+/**
+ * Resolves a zip entry binary payload from a relationship target path relative to word/.
+ */
+function resolveWordMediaBytes(
+  entries: ZipEntryMap,
+  target: string
+): { data: Uint8Array; mimeType: string } | undefined {
+  const cleanTarget = target.replace(/^\/+/, '').replace(/^\.\.\//, '');
+  const candidates = [
+    cleanTarget.startsWith('word/') ? cleanTarget : `word/${cleanTarget}`,
+    cleanTarget,
+  ];
+  for (const path of candidates) {
+    const data = entries[path];
+    if (data && data.byteLength > 0) {
+      const lower = path.toLowerCase();
+      if (lower.endsWith('.png')) return { data, mimeType: 'image/png' };
+      if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return { data, mimeType: 'image/jpeg' };
+    }
+  }
+  return undefined;
+}
 
 /**
  * Parses OpenXML CT_OnOff boolean nodes where val="0" or "off" indicates false.
@@ -58,7 +159,7 @@ function parseRunStyle(rPr?: XmlNode): TextStyle {
     if (val) {
       const halfPts = parseInt(val, 10);
       if (!isNaN(halfPts) && halfPts > 0) {
-        fontSize = halfPts / 2; // OOXML sz is in half-points
+        fontSize = halfPts / 2; // note: OOXML sz is in half-points
       }
     }
   }
@@ -76,22 +177,38 @@ function parseRunStyle(rPr?: XmlNode): TextStyle {
 }
 
 /**
- * Extracts styled runs from a paragraph (w:p) node in sequential document order.
+ * Extracts styled runs and embedded images from a paragraph (w:p) node in sequential document order.
  */
-function extractRunsFromParagraph(pNode: XmlNode): { runs: StyledRun[]; hasPageBreak: boolean } {
+function extractRunsFromParagraph(
+  pNode: XmlNode,
+  rels?: Map<string, DocxRelTarget>,
+  entries?: ZipEntryMap,
+  inheritedLink?: string
+): { runs: StyledRun[]; images: ImageBlock[]; hasPageBreak: boolean } {
   const runs: StyledRun[] = [];
+  const images: ImageBlock[] = [];
   let hasPageBreak = false;
 
   for (const child of pNode.children) {
     if (child.localName === 'r') {
       const rPr = findFirstChild(child, 'rPr');
-      const style = parseRunStyle(rPr);
+      const baseStyle = parseRunStyle(rPr);
+      const style: TextStyle = inheritedLink
+        ? {
+            ...baseStyle,
+            underline: true,
+            fontColor: baseStyle.fontColor ?? '#0969DA',
+          }
+        : baseStyle;
 
-      // Iterate children in sequential document order to prevent inverted line breaks
       for (const rChild of child.children) {
         if (rChild.localName === 't') {
           if (rChild.text.length > 0) {
-            runs.push({ text: sanitizeTextForWinAnsi(rChild.text), style });
+            runs.push({
+              text: sanitizeTextForWinAnsi(rChild.text),
+              style,
+              link: inheritedLink,
+            });
           }
         } else if (rChild.localName === 'br') {
           const brType = getAttribute(rChild, 'type');
@@ -104,22 +221,61 @@ function extractRunsFromParagraph(pNode: XmlNode): { runs: StyledRun[]; hasPageB
           runs.push({ text: '\n' });
         } else if (rChild.localName === 'tab') {
           runs.push({ text: '    ', style });
+        } else if ((rChild.localName === 'drawing' || rChild.localName === 'pict') && rels && entries) {
+          const blip = findFirstDescendant(rChild, 'blip');
+          const embedId = blip ? getAttribute(blip, 'embed') : undefined;
+          if (embedId) {
+            const rel = rels.get(embedId);
+            if (rel) {
+              const media = resolveWordMediaBytes(entries, rel.target);
+              if (media) {
+                const extent = findFirstDescendant(rChild, 'extent');
+                const cx = extent ? parseInt(getAttribute(extent, 'cx') ?? '0', 10) : 0;
+                const cy = extent ? parseInt(getAttribute(extent, 'cy') ?? '0', 10) : 0;
+                const widthPts = cx > 0 ? Math.round(cx / 12700) : undefined;
+                const heightPts = cy > 0 ? Math.round(cy / 12700) : undefined;
+                images.push({
+                  type: 'image',
+                  data: media.data,
+                  mimeType: media.mimeType,
+                  width: widthPts,
+                  height: heightPts,
+                });
+              }
+            }
+          }
         }
       }
     } else if (child.localName === 'hyperlink') {
-      const subResult = extractRunsFromParagraph(child);
+      const rId = getAttribute(child, 'id');
+      const anchor = getAttribute(child, 'anchor');
+      let linkTarget = inheritedLink;
+      if (rId && rels) {
+        const rel = rels.get(rId);
+        if (rel && rel.target) {
+          linkTarget = rel.target;
+        }
+      } else if (anchor) {
+        linkTarget = `#${anchor}`;
+      }
+      const subResult = extractRunsFromParagraph(child, rels, entries, linkTarget);
       if (subResult.hasPageBreak) hasPageBreak = true;
       runs.push(...subResult.runs);
+      images.push(...subResult.images);
     }
   }
 
-  return { runs, hasPageBreak };
+  return { runs, images, hasPageBreak };
 }
 
 /**
  * Parses a table (w:tbl) node into an IDR TableBlock with column spans and widths.
  */
-function parseTableNode(tblNode: XmlNode): TableBlock {
+function parseTableNode(
+  tblNode: XmlNode,
+  rels?: Map<string, DocxRelTarget>,
+  entries?: ZipEntryMap
+): TableBlock {
   const rows: TableRow[] = [];
   const trNodes = findChildren(tblNode, 'tr');
 
@@ -160,7 +316,7 @@ function parseTableNode(tblNode: XmlNode): TableBlock {
           if (jc === 'center') cellAlign = 'center';
           else if (jc === 'right') cellAlign = 'right';
         }
-        const { runs } = extractRunsFromParagraph(pNodes[pIdx]);
+        const { runs } = extractRunsFromParagraph(pNodes[pIdx], rels, entries);
         cellRuns.push(...runs);
       }
 
@@ -230,6 +386,9 @@ export async function parseDocxPackage(
     throw new Error('Invalid DOCX archive: word/document.xml missing.');
   }
 
+  const rels = parseDocxRelationships(entries);
+  const numberingMap = parseDocxNumbering(entries);
+
   const root = parseXml(docXml);
   const body = findFirstDescendant(root, 'body');
   if (!body) {
@@ -258,7 +417,8 @@ export async function parseDocxPackage(
     if (child.localName === 'p') {
       const pPr = findFirstChild(child, 'pPr');
       let pStyle = '';
-      let isBullet = false;
+      let isListParagraph = false;
+      let isOrderedList = false;
       let indentLevel = 0;
       let align: BlockAlignment | undefined;
 
@@ -278,24 +438,40 @@ export async function parseDocxPackage(
 
         const numPr = findFirstChild(pPr, 'numPr');
         if (numPr) {
-          isBullet = true;
+          isListParagraph = true;
           const ilvlNode = findFirstChild(numPr, 'ilvl');
+          let ilvlStr = '0';
           if (ilvlNode) {
-            const ilvl = parseInt(getAttribute(ilvlNode, 'val') ?? '0', 10);
+            ilvlStr = getAttribute(ilvlNode, 'val') ?? '0';
+            const ilvl = parseInt(ilvlStr, 10);
             if (!isNaN(ilvl)) indentLevel = ilvl;
+          }
+          const numIdNode = findFirstChild(numPr, 'numId');
+          const numIdStr = numIdNode ? getAttribute(numIdNode, 'val') : undefined;
+          if (numIdStr && numberingMap.has(`${numIdStr}:${ilvlStr}`)) {
+            isOrderedList = Boolean(numberingMap.get(`${numIdStr}:${ilvlStr}`));
+          } else if (pStyle.includes('number') || pStyle.includes('ordered')) {
+            isOrderedList = true;
           }
         }
       }
 
-      const { runs, hasPageBreak } = extractRunsFromParagraph(child);
+      const { runs, images, hasPageBreak } = extractRunsFromParagraph(child, rels, entries);
       const plainText = runs.map((r) => r.text).join('').trim();
 
-      // Preserve empty paragraphs as vertical spacing
+      if (images.length > 0) {
+        flushList();
+        for (const img of images) {
+          blocks.push(img);
+        }
+      }
+
+      // Preserve empty paragraphs as vertical spacing when no text or images exist
       if (runs.length === 0 || plainText.length === 0) {
         flushList();
         if (hasPageBreak) {
           blocks.push({ type: 'pageBreak' });
-        } else {
+        } else if (images.length === 0) {
           blocks.push({
             type: 'paragraph',
             runs: [{ text: '' }],
@@ -321,6 +497,7 @@ export async function parseDocxPackage(
           type: 'heading',
           level: 1,
           text: plainText,
+          runs,
           align,
         });
       } else if (pStyle.includes('heading2') || outlineLvl === 1) {
@@ -329,6 +506,7 @@ export async function parseDocxPackage(
           type: 'heading',
           level: 2,
           text: plainText,
+          runs,
           align,
         });
       } else if (pStyle.includes('heading3') || outlineLvl === 2) {
@@ -337,6 +515,7 @@ export async function parseDocxPackage(
           type: 'heading',
           level: 3,
           text: plainText,
+          runs,
           align,
         });
       } else if (pStyle.includes('heading4') || outlineLvl === 3) {
@@ -345,16 +524,21 @@ export async function parseDocxPackage(
           type: 'heading',
           level: 4,
           text: plainText,
+          runs,
           align,
         });
-      } else if (isBullet) {
-        // Coalesce list items into active list
-        if (activeListItems && activeListIndent === indentLevel) {
+      } else if (isListParagraph) {
+        // Coalesce list items into active list when indentation and ordered type match
+        if (
+          activeListItems &&
+          activeListIndent === indentLevel &&
+          activeListOrdered === isOrderedList
+        ) {
           activeListItems.push(runs);
         } else {
           flushList();
           activeListItems = [runs];
-          activeListOrdered = false;
+          activeListOrdered = isOrderedList;
           activeListIndent = indentLevel;
         }
       } else {
@@ -368,7 +552,7 @@ export async function parseDocxPackage(
       }
     } else if (child.localName === 'tbl') {
       flushList();
-      const tableBlock = parseTableNode(child);
+      const tableBlock = parseTableNode(child, rels, entries);
       if (tableBlock.rows.length > 0) {
         blocks.push(tableBlock);
       }
@@ -425,8 +609,11 @@ export class DocxConverter implements FormatConverter {
         wordCount += b.text.match(/\S+/g)?.length ?? 0;
       } else if (b.type === 'list') {
         for (const item of b.items) {
-          wordCount += item.reduce((acc, r) => acc + (r.text.match(/\S+/g)?.length ?? 0), 0);
+          const itemRuns: readonly StyledRun[] = 'runs' in item ? item.runs : item;
+          wordCount += itemRuns.reduce((acc: number, r: StyledRun) => acc + (r.text.match(/\S+/g)?.length ?? 0), 0);
         }
+      } else if (b.type === 'alert') {
+        wordCount += b.runs.reduce((acc, r) => acc + (r.text.match(/\S+/g)?.length ?? 0), 0);
       } else if (b.type === 'table') {
         for (const row of b.rows) {
           for (const cell of row.cells) {
