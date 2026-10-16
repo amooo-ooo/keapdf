@@ -8,11 +8,14 @@
 import {
   PDFDocument,
   PDFFont,
+  PDFImage,
   PDFPage,
+  PDFString,
   StandardFonts,
   rgb,
   type RGB,
 } from 'pdf-lib';
+import { normalizePngBytesForEmbed } from '../pdf/operations/annotation-extract-ops';
 import type {
   DocumentConversionOptions,
   DocumentMargins,
@@ -22,8 +25,13 @@ import type {
   ParagraphBlock,
   HeadingBlock,
   ListBlock,
+  ListItem,
   CodeBlock,
   QuoteBlock,
+  AlertBlock,
+  AlertType,
+  DiagramBlock,
+  MathBlock,
   TableBlock,
   ImageBlock,
   StyledRun,
@@ -32,6 +40,10 @@ import type {
   PageSizePreset,
 } from './types';
 import { sanitizeTextForWinAnsi, safeWidthOfText } from './winansi-sanitizer';
+import { measureDiagramBlock, renderMermaidVectorDiagram } from './diagram-renderer';
+import { formatLatexFormula, layoutMathBlock, renderMathBlock } from './math-renderer';
+import { buildOutlineTree, type OutlineItemFlat } from '../pdf/operations/outline-tree';
+import { writeOutlinesToPdf } from '../pdf/operations/outline-ops';
 
 export const STANDARD_PAGE_SIZES: Record<PageSizePreset, PageDimensions> = {
   a4: { width: 595.28, height: 841.89 },
@@ -42,11 +54,75 @@ export const STANDARD_PAGE_SIZES: Record<PageSizePreset, PageDimensions> = {
   custom: { width: 595.28, height: 841.89 },
 };
 
-const DEFAULT_MARGINS: DocumentMargins = {
-  top: 54,
-  right: 54,
-  bottom: 54,
-  left: 54,
+/**
+ * Conventional standard page margins (0.50 in / 12.7 mm / 36 pt) for Markdown, HTML, and document conversion.
+ */
+export const DEFAULT_MARGINS: DocumentMargins = {
+  top: 36,
+  right: 36,
+  bottom: 36,
+  left: 36,
+};
+
+/**
+ * Conventional compact page margins for wide tabular spreadsheets (0.50 in vertical, 0.40 in / 10 mm horizontal).
+ */
+export const DEFAULT_SPREADSHEET_MARGINS: DocumentMargins = {
+  top: 36,
+  right: 28,
+  bottom: 36,
+  left: 28,
+};
+
+/**
+ * Exact GitHub Markdown and industry standard colour palette tokens.
+ */
+export const GFM_COLOURS = {
+  text: rgb(0.122, 0.137, 0.157), // #1F2328 primary text
+  slateText: rgb(0.118, 0.161, 0.231), // #1E293B spreadsheet/code text
+  muted: rgb(0.349, 0.388, 0.431), // #59636E muted secondary text
+  border: rgb(0.816, 0.843, 0.871), // #D0D7DE standard dividing border
+  subtleBorder: rgb(0.886, 0.910, 0.941), // #E2E8F0 light gridline
+  subtleBg: rgb(0.965, 0.973, 0.980), // #F6F8FA surface/zebra/code background
+  spreadsheetHeaderBg: rgb(0.945, 0.961, 0.976), // #F1F5F9 slate header fill
+  spreadsheetZebraBg: rgb(0.973, 0.980, 0.988), // #F8FAFC spreadsheet alternating fill
+  link: rgb(0.035, 0.412, 0.855), // #0969DA accent link/checkbox fill
+  gutterText: rgb(0.392, 0.455, 0.545), // #64748B code gutter numbers
+  gutterBorder: rgb(0.882, 0.894, 0.910), // #E1E4E8 gutter separator
+  codeHeaderBg: rgb(0.918, 0.933, 0.949), // #EAEEF2 code language banner fill
+} as const;
+
+export const GFM_COLORS = GFM_COLOURS;
+
+/**
+ * GitHub Markdown Alert / Callout configuration adhering to Primer design tokens.
+ */
+export const ALERT_CONFIGS: Record<AlertType, { border: RGB; bg: RGB; defaultTitle: string }> = {
+  note: {
+    border: rgb(0.035, 0.412, 0.855), // #0969DA
+    bg: rgb(0.941, 0.965, 0.988), // #F0F6FC
+    defaultTitle: 'Note',
+  },
+  tip: {
+    border: rgb(0.102, 0.498, 0.216), // #1A7F37
+    bg: rgb(0.953, 0.984, 0.961), // #DAFBE1
+    defaultTitle: 'Tip',
+  },
+  important: {
+    border: rgb(0.510, 0.314, 0.875), // #8250DF
+    bg: rgb(0.984, 0.941, 1.0), // #FBF0FF
+    defaultTitle: 'Important',
+  },
+  warning: {
+    border: rgb(0.604, 0.404, 0.0), // #9A6700
+    bg: rgb(1.0, 0.973, 0.871), // #FFF8C5
+    defaultTitle: 'Warning',
+  },
+  caution: {
+    border: rgb(0.812, 0.133, 0.180), // #CF222E
+    bg: rgb(1.0, 0.922, 0.914), // #FFEBE9
+    defaultTitle: 'Caution',
+  },
 };
 
 /**
@@ -157,6 +233,7 @@ interface LayoutContext {
   pages: PDFPage[];
   activePage: PDFPage;
   cursorY: number;
+  outlineItems?: OutlineItemFlat[];
 }
 
 /**
@@ -206,6 +283,7 @@ async function createLayoutContext(
     pages,
     activePage: initialPage,
     cursorY: margins.top,
+    outlineItems: [],
   };
 }
 
@@ -249,6 +327,9 @@ interface WrappedTextLine {
     readonly color: RGB;
     readonly width: number;
     readonly isWhitespace?: boolean;
+    readonly link?: string;
+    readonly underline?: boolean;
+    readonly strike?: boolean;
   }>;
   readonly width: number;
   readonly height: number;
@@ -291,7 +372,7 @@ function wrapRunsToLines(
   fonts: FontSet,
   maxWidth: number,
   defaultSize: number,
-  defaultColor: RGB = rgb(0.1, 0.1, 0.1)
+  defaultColor: RGB = GFM_COLOURS.text
 ): WrappedTextLine[] {
   const lines: WrappedTextLine[] = [];
   let currentSegments: WrappedTextLine['segments'] = [];
@@ -313,7 +394,11 @@ function wrapRunsToLines(
     const font = resolveFontForStyle(fonts, run.style);
     const size = run.style?.fontSize ?? defaultSize;
     const color = parseColor(run.style?.fontColor, defaultColor);
-    const words = splitIntoWords(run.text);
+    const link = run.link;
+    const underline = Boolean(run.style?.underline || run.link);
+    const strike = Boolean(run.style?.strike);
+    const rawText = run.style?.math ? formatLatexFormula(run.text) : run.text;
+    const words = splitIntoWords(rawText);
 
     for (const word of words) {
       if (word === '\n') {
@@ -333,12 +418,12 @@ function wrapRunsToLines(
           const chunkWidth = safeWidthOfText(font, chunk, size);
           if (cIdx < subChunks.length - 1) {
             lines.push({
-              segments: [{ text: chunk, font, size, color, width: chunkWidth }],
+              segments: [{ text: chunk, font, size, color, width: chunkWidth, link, underline, strike }],
               width: chunkWidth,
               height: wordHeight,
             });
           } else {
-            currentSegments.push({ text: chunk, font, size, color, width: chunkWidth });
+            currentSegments.push({ text: chunk, font, size, color, width: chunkWidth, link, underline, strike });
             currentLineWidth = chunkWidth;
             currentMaxHeight = wordHeight;
           }
@@ -354,6 +439,9 @@ function wrapRunsToLines(
           color,
           width: wordWidth,
           isWhitespace: isSpace,
+          link,
+          underline,
+          strike,
         });
         currentLineWidth += wordWidth;
         if (wordHeight > currentMaxHeight) currentMaxHeight = wordHeight;
@@ -370,6 +458,9 @@ function wrapRunsToLines(
             color,
             width: wordWidth,
             isWhitespace: false,
+            link,
+            underline,
+            strike,
           });
           currentLineWidth = wordWidth;
           if (wordHeight > currentMaxHeight) currentMaxHeight = wordHeight;
@@ -387,7 +478,7 @@ function wrapRunsToLines(
 
 /**
  * Renders a wrapped line at the given top-down cursor position.
- * Trims trailing whitespace width for exact horizontal alignment.
+ * Trims trailing whitespace width for exact horizontal alignment and registers PDF URI link annotations.
  */
 function drawWrappedLine(
   page: PDFPage,
@@ -428,6 +519,42 @@ function drawWrappedLine(
         font: seg.font,
         color: seg.color,
       });
+
+      if (!seg.isWhitespace) {
+        if (seg.underline) {
+          page.drawLine({
+            start: { x: curX, y: baselineY - 1.5 },
+            end: { x: curX + seg.width, y: baselineY - 1.5 },
+            thickness: 0.6,
+            color: seg.color,
+          });
+        }
+
+        if (seg.strike) {
+          page.drawLine({
+            start: { x: curX, y: baselineY + seg.size * 0.32 },
+            end: { x: curX + seg.width, y: baselineY + seg.size * 0.32 },
+            thickness: 0.6,
+            color: seg.color,
+          });
+        }
+
+        if (seg.link) {
+          const action = page.doc.context.obj({
+            Type: 'Action',
+            S: 'URI',
+            URI: PDFString.of(seg.link),
+          });
+          const annot = page.doc.context.obj({
+            Type: 'Annot',
+            Subtype: 'Link',
+            Rect: [curX, baselineY - 2, curX + seg.width, baselineY + seg.size + 2],
+            Border: [0, 0, 0],
+            A: action,
+          });
+          page.node.addAnnot(page.doc.context.register(annot));
+        }
+      }
     }
     curX += seg.width;
   }
@@ -442,11 +569,12 @@ function renderParagraph(ctx: LayoutContext, block: ParagraphBlock): void {
     block.runs,
     ctx.fonts,
     ctx.printableWidth,
-    defaultSize
+    defaultSize,
+    GFM_COLOURS.text
   );
 
   const spaceBefore = block.spaceBefore ?? 0;
-  const spaceAfter = block.spaceAfter ?? 6;
+  const spaceAfter = block.spaceAfter ?? 8;
 
   if (spaceBefore > 0) {
     ctx.cursorY += spaceBefore;
@@ -470,28 +598,43 @@ function renderParagraph(ctx: LayoutContext, block: ParagraphBlock): void {
 }
 
 /**
- * Renders a heading block into the layout context supporting levels 1 to 6.
+ * Renders a heading block into the layout context adhering strictly to GitHub Markdown typography hierarchy.
+ * Levels 1 and 2 feature iconic full-width bottom dividing borders.
  */
 function renderHeading(ctx: LayoutContext, block: HeadingBlock): void {
-  const levelConfigs: Record<number, { size: number; before: number; after: number; color: RGB }> = {
-    1: { size: 22, before: 18, after: 8, color: rgb(0.1, 0.15, 0.28) },
-    2: { size: 16, before: 14, after: 6, color: rgb(0.15, 0.2, 0.32) },
-    3: { size: 13, before: 10, after: 4, color: rgb(0.2, 0.25, 0.38) },
-    4: { size: 11, before: 8, after: 4, color: rgb(0.25, 0.3, 0.42) },
-    5: { size: 10, before: 6, after: 3, color: rgb(0.3, 0.35, 0.45) },
-    6: { size: 9, before: 4, after: 2, color: rgb(0.35, 0.4, 0.5) },
+  const levelConfigs: Record<
+    number,
+    { size: number; before: number; after: number; color: RGB; hasBottomRule?: boolean }
+  > = {
+    1: { size: 22, before: 24, after: 12, color: GFM_COLOURS.text, hasBottomRule: true },
+    2: { size: 16.5, before: 20, after: 10, color: GFM_COLOURS.text, hasBottomRule: true },
+    3: { size: 13.5, before: 16, after: 6, color: GFM_COLOURS.text },
+    4: { size: 11, before: 12, after: 4, color: GFM_COLOURS.text },
+    5: { size: 9.5, before: 10, after: 4, color: GFM_COLOURS.text },
+    6: { size: 8.5, before: 8, after: 4, color: GFM_COLOURS.muted },
   };
 
   const config = levelConfigs[block.level] ?? levelConfigs[1];
-  const runs: StyledRun[] = [
-    {
-      text: sanitizeTextForWinAnsi(block.text),
-      style: {
-        bold: true,
-        fontSize: config.size,
-      },
-    },
-  ];
+  const runs: readonly StyledRun[] =
+    block.runs && block.runs.length > 0
+      ? block.runs.map((r) => ({
+          ...r,
+          text: sanitizeTextForWinAnsi(r.text),
+          style: {
+            bold: true,
+            fontSize: config.size,
+            ...r.style,
+          },
+        }))
+      : [
+          {
+            text: sanitizeTextForWinAnsi(block.text),
+            style: {
+              bold: true,
+              fontSize: config.size,
+            },
+          },
+        ];
 
   const lines = wrapRunsToLines(
     runs,
@@ -501,7 +644,22 @@ function renderHeading(ctx: LayoutContext, block: HeadingBlock): void {
     config.color
   );
 
+  // Keep with next: ensure heading and at least one subsequent line have space
+  ensureVerticalSpace(ctx, config.size * 2 + config.before);
   ctx.cursorY += config.before;
+
+  if (lines.length > 0) {
+    ensureVerticalSpace(ctx, lines[0].height);
+  }
+
+  if (!block.unlisted && block.text.trim().length > 0 && ctx.outlineItems) {
+    ctx.outlineItems.push({
+      title: sanitizeTextForWinAnsi(block.text.trim()),
+      pageIndex: ctx.pages.length - 1,
+      level: block.level,
+      destY: ctx.pageHeight - ctx.cursorY,
+    });
+  }
 
   for (const line of lines) {
     ensureVerticalSpace(ctx, line.height);
@@ -517,41 +675,109 @@ function renderHeading(ctx: LayoutContext, block: HeadingBlock): void {
     ctx.cursorY += line.height;
   }
 
+  // Draw GFM full-width bottom border rule for H1 and H2
+  if (config.hasBottomRule) {
+    ctx.cursorY += 4;
+    ensureVerticalSpace(ctx, 4);
+    const rulePdfY = ctx.pageHeight - ctx.cursorY;
+    ctx.activePage.drawLine({
+      start: { x: ctx.margins.left, y: rulePdfY },
+      end: { x: ctx.margins.left + ctx.printableWidth, y: rulePdfY },
+      thickness: 1.0,
+      color: GFM_COLOURS.border,
+    });
+    ctx.cursorY += 4;
+  }
+
   ctx.cursorY += config.after;
 }
 
 /**
- * Renders a bullet or ordered list block into the layout context.
+ * Renders a bullet, ordered, or GFM task list block into the layout context.
+ * GFM task lists render interactive-style vector checkbox glyphs.
  */
 function renderList(ctx: LayoutContext, block: ListBlock): void {
   const defaultSize = ctx.options.fontSize ?? 10.5;
-  const indentOffset = (block.indentLevel ?? 0) * 16;
-  const bulletWidth = 16;
-  const contentWidth = Math.max(100, ctx.printableWidth - indentOffset - bulletWidth);
 
   for (let i = 0; i < block.items.length; i++) {
-    const itemRuns = block.items[i];
-    const bulletText = block.ordered ? `${i + 1}.` : '\u2022';
+    const rawItem = block.items[i];
+    const isTask = typeof rawItem === 'object' && rawItem !== null && 'isTask' in rawItem && Boolean((rawItem as ListItem).isTask);
+    const isChecked = typeof rawItem === 'object' && rawItem !== null && 'isChecked' in rawItem && Boolean((rawItem as ListItem).isChecked);
+    const indentLevel = (typeof rawItem === 'object' && rawItem !== null && 'indentLevel' in rawItem ? (rawItem as ListItem).indentLevel : block.indentLevel) ?? 0;
+    const itemRuns: readonly StyledRun[] = 'runs' in rawItem ? (rawItem as ListItem).runs : (rawItem as readonly StyledRun[]);
+
+    const indentOffset = indentLevel * 16;
+    const markerWidth = 16;
+    const contentWidth = Math.max(100, ctx.printableWidth - indentOffset - markerWidth);
+
     const lines = wrapRunsToLines(
       itemRuns,
       ctx.fonts,
       contentWidth,
-      defaultSize
+      defaultSize,
+      isChecked ? GFM_COLOURS.muted : GFM_COLOURS.text
     );
 
     if (lines.length === 0) continue;
 
     ensureVerticalSpace(ctx, lines[0].height);
 
-    // Draw bullet / number
-    const bulletPdfY = ctx.pageHeight - ctx.cursorY - lines[0].height * 0.8;
-    ctx.activePage.drawText(bulletText, {
-      x: ctx.margins.left + indentOffset,
-      y: bulletPdfY,
-      size: defaultSize,
-      font: block.ordered ? ctx.fonts.regular : ctx.fonts.bold,
-      color: rgb(0.2, 0.25, 0.35),
-    });
+    if (isTask) {
+      // Draw GFM vector task list checkbox
+      const boxSize = 9.5;
+      const boxX = ctx.margins.left + indentOffset;
+      const boxPdfY = ctx.pageHeight - ctx.cursorY - lines[0].height * 0.8;
+
+      if (isChecked) {
+        // Checked state: accent blue filled square with crisp white tick
+        ctx.activePage.drawRectangle({
+          x: boxX,
+          y: boxPdfY,
+          width: boxSize,
+          height: boxSize,
+          color: GFM_COLOURS.link,
+        });
+        ctx.activePage.drawLine({
+          start: { x: boxX + 2, y: boxPdfY + 4.2 },
+          end: { x: boxX + 3.8, y: boxPdfY + 2.2 },
+          thickness: 1.3,
+          color: rgb(1, 1, 1),
+        });
+        ctx.activePage.drawLine({
+          start: { x: boxX + 3.8, y: boxPdfY + 2.2 },
+          end: { x: boxX + 7.5, y: boxPdfY + 7.2 },
+          thickness: 1.3,
+          color: rgb(1, 1, 1),
+        });
+      } else {
+        // Unchecked state: clean white card with subtle border
+        ctx.activePage.drawRectangle({
+          x: boxX,
+          y: boxPdfY,
+          width: boxSize,
+          height: boxSize,
+          color: rgb(1, 1, 1),
+          borderColor: GFM_COLOURS.border,
+          borderWidth: 1.0,
+        });
+      }
+    } else {
+      // Standard bullet or counter
+      let bulletText = block.ordered ? `${i + 1}.` : '\u2022';
+      if (!block.ordered) {
+        if (indentLevel === 1) bulletText = '-';
+        else if (indentLevel >= 2) bulletText = '\u2022';
+      }
+
+      const bulletPdfY = ctx.pageHeight - ctx.cursorY - lines[0].height * 0.8;
+      ctx.activePage.drawText(bulletText, {
+        x: ctx.margins.left + indentOffset,
+        y: bulletPdfY,
+        size: defaultSize,
+        font: block.ordered ? ctx.fonts.regular : ctx.fonts.bold,
+        color: GFM_COLOURS.text,
+      });
+    }
 
     for (const line of lines) {
       ensureVerticalSpace(ctx, line.height);
@@ -559,7 +785,7 @@ function renderList(ctx: LayoutContext, block: ListBlock): void {
         ctx.activePage,
         ctx.pageHeight,
         line,
-        ctx.margins.left + indentOffset + bulletWidth,
+        ctx.margins.left + indentOffset + markerWidth,
         ctx.cursorY,
         'left',
         contentWidth
@@ -574,20 +800,21 @@ function renderList(ctx: LayoutContext, block: ListBlock): void {
 }
 
 /**
- * Renders a code block into the layout context with syntax background card.
- * Draws cohesive background rectangles rather than per-line bordered boxes.
+ * Renders a code block into the layout context with syntax background card, language pill, and line numbers.
+ * Strictly draws the background card before foreground text to adhere to the PDF painter's algorithm.
  */
 function renderCodeBlock(ctx: LayoutContext, block: CodeBlock): void {
   const codeLines = block.code.split('\n');
   const fontSize = 8.5;
-  const lineHeight = fontSize * 1.35;
+  const lineHeight = fontSize * 1.38;
   const padding = 10;
   const digits = Math.max(3, String(codeLines.length).length);
   const lineNumberWidth = block.showLineNumbers !== false ? digits * 7 + 8 : 0;
   const textStartX = ctx.margins.left + padding + lineNumberWidth;
   const contentWidth = Math.max(100, ctx.printableWidth - padding * 2 - lineNumberWidth);
 
-  const totalHeight = codeLines.length * lineHeight + padding * 2;
+  const headerHeight = block.language ? 18 : 0;
+  const totalHeight = codeLines.length * lineHeight + padding * 2 + headerHeight;
 
   if (totalHeight <= ctx.printableHeight && ctx.cursorY + totalHeight > ctx.pageHeight - ctx.margins.bottom) {
     breakPage(ctx);
@@ -595,74 +822,99 @@ function renderCodeBlock(ctx: LayoutContext, block: CodeBlock): void {
 
   ctx.cursorY += 6;
 
-  let currentBlockTop = ctx.cursorY;
-  let currentBlockLineCount = 0;
+  // Ensure room for language header and at least one line of code
+  if (ctx.cursorY + headerHeight + lineHeight + padding * 2 > ctx.pageHeight - ctx.margins.bottom) {
+    breakPage(ctx);
+  }
 
-  for (let idx = 0; idx < codeLines.length; idx++) {
-    if (ctx.cursorY > ctx.margins.top && ctx.cursorY + lineHeight + padding > ctx.pageHeight - ctx.margins.bottom) {
-      // Draw background for accumulated lines on current page
-      if (currentBlockLineCount > 0) {
-        const sliceHeight = currentBlockLineCount * lineHeight + padding;
-        const pdfY = ctx.pageHeight - currentBlockTop - sliceHeight;
-        ctx.activePage.drawRectangle({
-          x: ctx.margins.left,
-          y: pdfY,
-          width: ctx.printableWidth,
-          height: sliceHeight,
-          color: rgb(0.96, 0.97, 0.98),
-          borderColor: rgb(0.88, 0.9, 0.93),
-          borderWidth: 0.5,
+  // Language header banner if specified
+  if (block.language) {
+    const headerPdfY = ctx.pageHeight - ctx.cursorY - headerHeight;
+    ctx.activePage.drawRectangle({
+      x: ctx.margins.left,
+      y: headerPdfY,
+      width: ctx.printableWidth,
+      height: headerHeight,
+      color: GFM_COLOURS.codeHeaderBg,
+      borderColor: GFM_COLOURS.border,
+      borderWidth: 0.5,
+    });
+    ctx.activePage.drawText(sanitizeTextForWinAnsi(block.language.toLowerCase()), {
+      x: ctx.margins.left + 10,
+      y: headerPdfY + 5,
+      size: 7.5,
+      font: ctx.fonts.bold,
+      color: GFM_COLOURS.muted,
+    });
+    ctx.cursorY += headerHeight;
+  }
+
+  let startIdx = 0;
+  while (startIdx < codeLines.length) {
+    const pageBottom = ctx.pageHeight - ctx.margins.bottom;
+    const availableHeight = pageBottom - ctx.cursorY - padding * 2;
+    const maxLinesOnPage = Math.max(1, Math.floor(availableHeight / lineHeight));
+    const endIdx = Math.min(codeLines.length, startIdx + maxLinesOnPage);
+    const chunkLineCount = endIdx - startIdx;
+
+    const sliceHeight = chunkLineCount * lineHeight + padding * 2;
+    const pdfY = ctx.pageHeight - ctx.cursorY - sliceHeight;
+
+    // Draw background card first so foreground code text renders cleanly on top
+    ctx.activePage.drawRectangle({
+      x: ctx.margins.left,
+      y: pdfY,
+      width: ctx.printableWidth,
+      height: sliceHeight,
+      color: GFM_COLOURS.subtleBg,
+      borderColor: GFM_COLOURS.border,
+      borderWidth: 0.5,
+    });
+
+    ctx.cursorY += padding;
+
+    for (let idx = startIdx; idx < endIdx; idx++) {
+      if (block.showLineNumbers !== false) {
+        const lineNumStr = `${idx + 1}`.padStart(digits, ' ');
+        ctx.activePage.drawText(lineNumStr, {
+          x: ctx.margins.left + padding,
+          y: ctx.pageHeight - ctx.cursorY - lineHeight * 0.8,
+          size: fontSize,
+          font: ctx.fonts.mono,
+          color: GFM_COLOURS.gutterText,
+        });
+
+        const gutterRuleX = ctx.margins.left + padding + lineNumberWidth - 4;
+        const gutterRulePdfY = ctx.pageHeight - ctx.cursorY - lineHeight;
+        ctx.activePage.drawLine({
+          start: { x: gutterRuleX, y: gutterRulePdfY },
+          end: { x: gutterRuleX, y: gutterRulePdfY + lineHeight },
+          thickness: 0.5,
+          color: GFM_COLOURS.gutterBorder,
         });
       }
-      breakPage(ctx);
-      currentBlockTop = ctx.cursorY;
-      currentBlockLineCount = 0;
-    }
 
-    if (idx === 0) ctx.cursorY += padding;
+      const rawCode = codeLines[idx];
+      const text = sanitizeTextForWinAnsi(rawCode);
+      const maxChars = Math.floor(contentWidth / (fontSize * 0.6));
+      const truncated = text.length > maxChars ? text.slice(0, maxChars) : text;
 
-    // Draw line number if enabled
-    if (block.showLineNumbers !== false) {
-      const lineNumStr = `${idx + 1}`.padStart(digits, ' ');
-      ctx.activePage.drawText(lineNumStr, {
-        x: ctx.margins.left + padding,
+      ctx.activePage.drawText(truncated, {
+        x: textStartX,
         y: ctx.pageHeight - ctx.cursorY - lineHeight * 0.8,
         size: fontSize,
         font: ctx.fonts.mono,
-        color: rgb(0.6, 0.65, 0.72),
+        color: GFM_COLOURS.text,
       });
+
+      ctx.cursorY += lineHeight;
     }
 
-    // Draw code text
-    const rawCode = codeLines[idx];
-    const text = sanitizeTextForWinAnsi(rawCode);
-    const maxChars = Math.floor(contentWidth / (fontSize * 0.6));
-    const truncated = text.length > maxChars ? text.slice(0, maxChars) : text;
+    ctx.cursorY += padding;
+    startIdx = endIdx;
 
-    ctx.activePage.drawText(truncated, {
-      x: textStartX,
-      y: ctx.pageHeight - ctx.cursorY - lineHeight * 0.8,
-      size: fontSize,
-      font: ctx.fonts.mono,
-      color: rgb(0.15, 0.18, 0.24),
-    });
-
-    ctx.cursorY += lineHeight;
-    currentBlockLineCount++;
-
-    if (idx === codeLines.length - 1) {
-      ctx.cursorY += padding;
-      const sliceHeight = currentBlockLineCount * lineHeight + padding * 2;
-      const pdfY = ctx.pageHeight - currentBlockTop - sliceHeight;
-      ctx.activePage.drawRectangle({
-        x: ctx.margins.left,
-        y: pdfY,
-        width: ctx.printableWidth,
-        height: sliceHeight,
-        color: rgb(0.96, 0.97, 0.98),
-        borderColor: rgb(0.88, 0.9, 0.93),
-        borderWidth: 0.5,
-      });
+    if (startIdx < codeLines.length) {
+      breakPage(ctx);
     }
   }
 
@@ -670,25 +922,36 @@ function renderCodeBlock(ctx: LayoutContext, block: CodeBlock): void {
 }
 
 /**
- * Renders a blockquote into the layout context with an accent left border.
- * Supports multi-page pagination.
+ * Renders a blockquote into the layout context with an accent left border and muted text.
+ * Adheres to GitHub Markdown 0.25em border-left in #D0D7DE.
  */
 function renderQuote(ctx: LayoutContext, block: QuoteBlock): void {
-  const fontSize = (ctx.options.fontSize ?? 10.5) * 1.05;
+  const fontSize = ctx.options.fontSize ?? 10.5;
   const paddingLeft = 14;
   const contentWidth = ctx.printableWidth - paddingLeft;
 
-  const runs: StyledRun[] = [
-    {
-      text: sanitizeTextForWinAnsi(block.text),
-      style: {
-        italic: true,
-        fontSize,
-      },
-    },
-  ];
+  const runs: readonly StyledRun[] =
+    block.runs && block.runs.length > 0
+      ? block.runs.map((r) => ({
+          ...r,
+          text: sanitizeTextForWinAnsi(r.text),
+          style: {
+            italic: true,
+            fontSize,
+            ...r.style,
+          },
+        }))
+      : [
+          {
+            text: sanitizeTextForWinAnsi(block.text),
+            style: {
+              italic: true,
+              fontSize,
+            },
+          },
+        ];
 
-  const lines = wrapRunsToLines(runs, ctx.fonts, contentWidth, fontSize, rgb(0.25, 0.3, 0.4));
+  const lines = wrapRunsToLines(runs, ctx.fonts, contentWidth, fontSize, GFM_COLOURS.muted);
   ctx.cursorY += 4;
 
   for (const line of lines) {
