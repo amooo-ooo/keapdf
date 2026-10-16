@@ -957,14 +957,14 @@ function renderQuote(ctx: LayoutContext, block: QuoteBlock): void {
   for (const line of lines) {
     ensureVerticalSpace(ctx, line.height);
 
-    // Accent line alongside current line
+    // GFM border-left 3.5 pt in #D0D7DE
     const pdfBorderY = ctx.pageHeight - ctx.cursorY - line.height;
     ctx.activePage.drawRectangle({
       x: ctx.margins.left,
       y: pdfBorderY,
       width: 3.5,
       height: line.height,
-      color: rgb(0.2, 0.45, 0.85),
+      color: GFM_COLOURS.border,
     });
 
     drawWrappedLine(
@@ -983,6 +983,179 @@ function renderQuote(ctx: LayoutContext, block: QuoteBlock): void {
 }
 
 /**
+ * Renders a Mermaid vector diagram block into the layout context.
+ */
+function renderDiagram(ctx: LayoutContext, block: DiagramBlock): void {
+  const metrics = measureDiagramBlock(block, ctx.printableWidth);
+  ctx.cursorY += 6;
+  ensureVerticalSpace(ctx, metrics.totalHeight + 8);
+  const consumed = renderMermaidVectorDiagram(
+    ctx.activePage,
+    ctx.pageHeight,
+    ctx.margins.left,
+    ctx.cursorY,
+    ctx.printableWidth,
+    block,
+    {
+      regular: ctx.fonts.regular,
+      bold: ctx.fonts.bold,
+      mono: ctx.fonts.mono,
+    }
+  );
+  ctx.cursorY += consumed + 8;
+}
+
+/**
+ * Renders a display LaTeX mathematical formula block into the layout context.
+ */
+function renderMath(ctx: LayoutContext, block: MathBlock): void {
+  const layout = layoutMathBlock(block, ctx.printableWidth, ctx.fonts.italic, 11);
+  ctx.cursorY += 6;
+  ensureVerticalSpace(ctx, layout.cardHeight + 8);
+  const consumed = renderMathBlock(
+    ctx.activePage,
+    ctx.pageHeight,
+    ctx.margins.left,
+    ctx.cursorY,
+    ctx.printableWidth,
+    block,
+    {
+      regular: ctx.fonts.regular,
+      italic: ctx.fonts.italic,
+      mono: ctx.fonts.mono,
+    }
+  );
+  ctx.cursorY += consumed + 8;
+}
+
+/**
+ * Renders a GitHub Flavored Markdown Alert / Callout block.
+ * Supports note, tip, important, warning, and caution variants matching Primer design tokens.
+ */
+function renderAlert(ctx: LayoutContext, block: AlertBlock): void {
+  const config = ALERT_CONFIGS[block.alertType] ?? ALERT_CONFIGS.note;
+  const title = block.title ?? config.defaultTitle;
+  const defaultSize = ctx.options.fontSize ?? 10.5;
+  const paddingX = 12;
+  const paddingY = 8;
+  const contentWidth = ctx.printableWidth - paddingX * 2;
+
+  const headerSize = 10;
+  const headerHeight = headerSize * 1.3;
+
+  const lines = wrapRunsToLines(
+    block.runs,
+    ctx.fonts,
+    contentWidth,
+    defaultSize,
+    GFM_COLOURS.text
+  );
+
+  const totalContentHeight = lines.reduce((sum, l) => sum + l.height, 0);
+  const totalBoxHeight = headerHeight + 4 + totalContentHeight + paddingY * 2;
+
+  ensureVerticalSpace(ctx, Math.min(totalBoxHeight, 60));
+
+  if (ctx.cursorY + totalBoxHeight <= ctx.pageHeight - ctx.margins.bottom) {
+    const boxPdfY = ctx.pageHeight - ctx.cursorY - totalBoxHeight;
+
+    // Alert background card
+    ctx.activePage.drawRectangle({
+      x: ctx.margins.left,
+      y: boxPdfY,
+      width: ctx.printableWidth,
+      height: totalBoxHeight,
+      color: config.bg,
+      borderColor: GFM_COLOURS.border,
+      borderWidth: 0.5,
+    });
+
+    // 3.5 pt Left accent border
+    ctx.activePage.drawRectangle({
+      x: ctx.margins.left,
+      y: boxPdfY,
+      width: 3.5,
+      height: totalBoxHeight,
+      color: config.border,
+    });
+
+    ctx.cursorY += paddingY;
+
+    // Alert title row
+    const titlePdfY = ctx.pageHeight - ctx.cursorY - headerHeight * 0.8;
+    ctx.activePage.drawText(sanitizeTextForWinAnsi(title), {
+      x: ctx.margins.left + paddingX,
+      y: titlePdfY,
+      size: headerSize,
+      font: ctx.fonts.bold,
+      color: config.border,
+    });
+
+    ctx.cursorY += headerHeight + 4;
+
+    for (const line of lines) {
+      drawWrappedLine(
+        ctx.activePage,
+        ctx.pageHeight,
+        line,
+        ctx.margins.left + paddingX,
+        ctx.cursorY,
+        'left',
+        contentWidth
+      );
+      ctx.cursorY += line.height;
+    }
+
+    ctx.cursorY += paddingY + 8;
+  } else {
+    // Multi-page streaming fallback
+    ctx.cursorY += paddingY;
+
+    ensureVerticalSpace(ctx, headerHeight + 10);
+    const titlePdfY = ctx.pageHeight - ctx.cursorY - headerHeight * 0.8;
+    ctx.activePage.drawRectangle({
+      x: ctx.margins.left,
+      y: titlePdfY - 2,
+      width: 3.5,
+      height: headerHeight + 4,
+      color: config.border,
+    });
+    ctx.activePage.drawText(sanitizeTextForWinAnsi(title), {
+      x: ctx.margins.left + paddingX,
+      y: titlePdfY,
+      size: headerSize,
+      font: ctx.fonts.bold,
+      color: config.border,
+    });
+    ctx.cursorY += headerHeight + 6;
+
+    for (const line of lines) {
+      ensureVerticalSpace(ctx, line.height);
+      const pdfBorderY = ctx.pageHeight - ctx.cursorY - line.height;
+      ctx.activePage.drawRectangle({
+        x: ctx.margins.left,
+        y: pdfBorderY,
+        width: 3.5,
+        height: line.height,
+        color: config.border,
+      });
+      drawWrappedLine(
+        ctx.activePage,
+        ctx.pageHeight,
+        line,
+        ctx.margins.left + paddingX,
+        ctx.cursorY,
+        'left',
+        contentWidth
+      );
+      ctx.cursorY += line.height;
+    }
+
+    ctx.cursorY += paddingY + 8;
+  }
+}
+
+/**
  * Renders a horizontal divider line into the layout context.
  */
 function renderDivider(ctx: LayoutContext): void {
@@ -993,25 +1166,89 @@ function renderDivider(ctx: LayoutContext): void {
   ctx.activePage.drawLine({
     start: { x: ctx.margins.left, y: pdfY },
     end: { x: ctx.margins.left + ctx.printableWidth, y: pdfY },
-    thickness: 0.5,
-    color: rgb(0.85, 0.88, 0.92),
+    thickness: 1.0,
+    color: GFM_COLOURS.border,
   });
 
-  ctx.cursorY += 8;
+  ctx.cursorY += 16;
+}
+
+/**
+ * Embeds an image byte buffer into a pdf-lib document, inspecting binary magic
+ * bytes before MIME hints and normalising APNG or 16-bit greyscale + tRNS PNGs.
+ *
+ * @param doc Target pdf-lib document.
+ * @param data Raw image bytes.
+ * @param mimeType Optional MIME type hint.
+ * @return Embedded PDFImage or null if unsupported.
+ */
+async function embedImageBytesInPdf(
+  doc: PDFDocument,
+  data: Uint8Array,
+  mimeType?: string
+): Promise<PDFImage | null> {
+  if (!data || data.byteLength === 0) return null;
+
+  const isPng =
+    data.byteLength >= 8 &&
+    data[0] === 0x89 &&
+    data[1] === 0x50 &&
+    data[2] === 0x4e &&
+    data[3] === 0x47;
+  const isJpeg =
+    data.byteLength >= 3 &&
+    data[0] === 0xff &&
+    data[1] === 0xd8 &&
+    data[2] === 0xff;
+
+  if (isPng || (!isJpeg && mimeType?.toLowerCase().includes('png'))) {
+    const bitDepth = data.byteLength >= 26 ? data[24] : 8;
+    const colorType = data.byteLength >= 26 ? data[25] : 6;
+    if (bitDepth === 16 && colorType === 0) {
+      const normalized = normalizePngBytesForEmbed(data);
+      if (normalized) return doc.embedPng(normalized);
+    }
+    try {
+      return await doc.embedPng(data);
+    } catch {
+      const normalized = normalizePngBytesForEmbed(data);
+      if (normalized) {
+        try {
+          return await doc.embedPng(normalized);
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    }
+  }
+
+  if (isJpeg || mimeType?.toLowerCase().includes('jp')) {
+    try {
+      return await doc.embedJpg(data);
+    } catch {
+      return null;
+    }
+  }
+
+  const fallbackPng = normalizePngBytesForEmbed(data);
+  if (fallbackPng) {
+    try {
+      return await doc.embedPng(fallbackPng);
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
 }
 
 /**
  * Renders an image block into the layout context.
  */
 async function renderImage(ctx: LayoutContext, block: ImageBlock): Promise<void> {
-  let embeddedImage;
-  try {
-    embeddedImage = block.mimeType.includes('png')
-      ? await ctx.doc.embedPng(block.data)
-      : await ctx.doc.embedJpg(block.data);
-  } catch {
-    return;
-  }
+  const embeddedImage = await embedImageBytesInPdf(ctx.doc, block.data, block.mimeType);
+  if (!embeddedImage) return;
 
   const naturalWidth = Math.max(1, block.width ?? embeddedImage.width);
   const naturalHeight = Math.max(1, block.height ?? embeddedImage.height);
@@ -1042,6 +1279,8 @@ async function renderImage(ctx: LayoutContext, block: ImageBlock): Promise<void>
 
 /**
  * Resolves column widths for a table.
+ * If explicit column widths are provided, normalises them to printableWidth.
+ * Otherwise, calculates proportional widths weighted by maximum content character lengths.
  */
 function resolveColumnWidths(
   table: TableBlock,
@@ -1060,12 +1299,57 @@ function resolveColumnWidths(
     }
   }
 
+  // Calculate proportional column weights based on content lengths
+  const weights: number[] = [];
+  for (let c = 0; c < colCount; c++) {
+    let maxCharLen = 0;
+    for (const row of table.rows) {
+      const cell = row.cells[c];
+      if (cell) {
+        const textLen = cell.runs.reduce((acc, r) => acc + r.text.length, 0);
+        if (textLen > maxCharLen) {
+          maxCharLen = textLen;
+        }
+      }
+    }
+    // Clamp weight between 4 and 60 to prevent wide columns starving compact columns
+    weights.push(Math.min(Math.max(maxCharLen, 4), 60));
+  }
+
+  const totalWeight = weights.reduce((acc, w) => acc + w, 0);
+  if (totalWeight > 0) {
+    const minWidth = 24;
+    if (colCount * minWidth < printableWidth) {
+      const widths = weights.map((w) => (w / totalWeight) * printableWidth);
+      let needed = 0;
+      let available = 0;
+      for (let i = 0; i < widths.length; i++) {
+        if (widths[i] < minWidth) {
+          needed += minWidth - widths[i];
+          widths[i] = minWidth;
+        } else {
+          available += widths[i] - minWidth;
+        }
+      }
+      if (needed > 0 && available > 0) {
+        for (let i = 0; i < widths.length; i++) {
+          if (widths[i] > minWidth) {
+            const surplus = widths[i] - minWidth;
+            widths[i] -= (surplus / available) * needed;
+          }
+        }
+      }
+      return widths;
+    }
+  }
+
   const equalWidth = printableWidth / colCount;
   return Array(colCount).fill(equalWidth);
 }
 
 /**
  * Renders a single table row, returning the computed row height.
+ * Adheres to GitHub Markdown and modern spreadsheet specifications with crisp borders.
  */
 function drawTableRow(
   ctx: LayoutContext,
@@ -1077,9 +1361,9 @@ function drawTableRow(
   hasZebra: boolean
 ): number {
   const isWide = colWidths.length > 10;
-  const paddingX = isWide ? 3 : 6;
-  const paddingY = isWide ? 3 : 5;
-  const fontSize = isHeader ? (isWide ? 7.5 : 9.5) : (ctx.options.fontSize ?? (isWide ? 7 : 9));
+  const paddingX = isWide ? 4 : 8;
+  const paddingY = isWide ? 3 : 6;
+  const fontSize = isHeader ? (isWide ? 8 : 9.5) : (ctx.options.fontSize ?? (isWide ? 7.5 : 9));
 
   // Measure cell line wraps to determine maximum row height
   const cellWrappedLines = rowCells.map((cell, colIdx) => {
@@ -1090,7 +1374,7 @@ function drawTableRow(
       ctx.fonts,
       cellInnerW,
       fontSize,
-      isHeader ? rgb(1, 1, 1) : rgb(0.12, 0.15, 0.22)
+      GFM_COLOURS.text
     );
   });
 
@@ -1103,12 +1387,12 @@ function drawTableRow(
 
   const rowHeight = maxContentHeight + paddingY * 2;
 
-  // Background shading
+  // Background shading: GFM header #F6F8FA, zebra striping #F6F8FA
   let bgColor: RGB | undefined;
   if (isHeader) {
-    bgColor = rgb(0.12, 0.16, 0.26); // Dark slate header
+    bgColor = GFM_COLOURS.subtleBg;
   } else if (hasZebra && rowIndex % 2 === 1) {
-    bgColor = rgb(0.97, 0.98, 0.995); // Zebra light fill
+    bgColor = GFM_COLOURS.subtleBg;
   }
 
   const pdfY = ctx.pageHeight - ctx.cursorY - rowHeight;
@@ -1143,17 +1427,37 @@ function drawTableRow(
       textCursorY += line.height;
     }
 
-    if (hasBorders && !isHeader) {
-      // Vertical cell border
+    if (hasBorders) {
+      // Left border on first cell
+      if (c === 0) {
+        ctx.activePage.drawLine({
+          start: { x: ctx.margins.left, y: pdfY },
+          end: { x: ctx.margins.left, y: pdfY + rowHeight },
+          thickness: 0.5,
+          color: GFM_COLOURS.border,
+        });
+      }
+
+      // Vertical cell divider / right border
       ctx.activePage.drawLine({
         start: { x: currentX + colW, y: pdfY },
         end: { x: currentX + colW, y: pdfY + rowHeight },
         thickness: 0.5,
-        color: rgb(0.88, 0.9, 0.93),
+        color: GFM_COLOURS.border,
       });
     }
 
     currentX += colW;
+  }
+
+  // Top border on first row
+  if (hasBorders && (isHeader || rowIndex === 0)) {
+    ctx.activePage.drawLine({
+      start: { x: ctx.margins.left, y: pdfY + rowHeight },
+      end: { x: ctx.margins.left + ctx.printableWidth, y: pdfY + rowHeight },
+      thickness: 0.5,
+      color: GFM_COLOURS.border,
+    });
   }
 
   // Horizontal border under row
@@ -1162,7 +1466,7 @@ function drawTableRow(
       start: { x: ctx.margins.left, y: pdfY },
       end: { x: ctx.margins.left + ctx.printableWidth, y: pdfY },
       thickness: isHeader ? 1.5 : 0.5,
-      color: isHeader ? rgb(0.2, 0.45, 0.85) : rgb(0.88, 0.9, 0.93),
+      color: GFM_COLOURS.border,
     });
   }
 
@@ -1206,9 +1510,15 @@ function renderTable(ctx: LayoutContext, table: TableBlock): void {
 }
 
 /**
- * Decorates pages with running headers, thin rules, and "Page X of Y" page numbers.
+ * Decorates pages with optional running headers, thin rules, and "Page X of Y" page numbers when explicitly enabled.
  */
 function decorateDocumentPages(ctx: LayoutContext, title?: string): void {
+  const includeHeader = ctx.options.includeHeader === true;
+  const includePageNumbers = ctx.options.includePageNumbers === true;
+  if (!includeHeader && !includePageNumbers) {
+    return;
+  }
+
   const totalPages = ctx.pages.length;
   const rawTitle = title ?? ctx.options.title;
   const docTitle = rawTitle ? sanitizeTextForWinAnsi(rawTitle) : undefined;
@@ -1216,8 +1526,8 @@ function decorateDocumentPages(ctx: LayoutContext, title?: string): void {
   for (let i = 0; i < totalPages; i++) {
     const page = ctx.pages[i];
 
-    // Running header on pages > 0 if title is available
-    if (i > 0 && docTitle) {
+    // Running header on pages > 0 only when explicitly enabled
+    if (includeHeader && i > 0 && docTitle) {
       const headerY = Math.min(ctx.pageHeight - 15, ctx.pageHeight - ctx.margins.top + 15);
       const maxTitleWidth = ctx.printableWidth - 20;
       let displayTitle = docTitle;
@@ -1230,19 +1540,19 @@ function decorateDocumentPages(ctx: LayoutContext, title?: string): void {
         y: headerY,
         size: 8.5,
         font: ctx.fonts.regular,
-        color: rgb(0.5, 0.55, 0.65),
+        color: GFM_COLOURS.muted,
       });
 
       page.drawLine({
         start: { x: ctx.margins.left, y: headerY - 6 },
         end: { x: ctx.pageWidth - ctx.margins.right, y: headerY - 6 },
         thickness: 0.5,
-        color: rgb(0.88, 0.9, 0.94),
+        color: GFM_COLOURS.border,
       });
     }
 
-    // Running footer with page counter if enabled
-    if (ctx.options.includePageNumbers !== false) {
+    // Running footer with page counter only when explicitly enabled
+    if (includePageNumbers) {
       const footerY = Math.max(12, Math.min(ctx.margins.bottom - 20, 24));
       const pageText = `Page ${i + 1} of ${totalPages}`;
       const pageTextWidth = safeWidthOfText(ctx.fonts.regular, pageText, 8.5);
@@ -1251,7 +1561,7 @@ function decorateDocumentPages(ctx: LayoutContext, title?: string): void {
         start: { x: ctx.margins.left, y: footerY + 12 },
         end: { x: ctx.pageWidth - ctx.margins.right, y: footerY + 12 },
         thickness: 0.5,
-        color: rgb(0.88, 0.9, 0.94),
+        color: GFM_COLOURS.border,
       });
 
       page.drawText(pageText, {
@@ -1259,7 +1569,7 @@ function decorateDocumentPages(ctx: LayoutContext, title?: string): void {
         y: footerY,
         size: 8.5,
         font: ctx.fonts.regular,
-        color: rgb(0.5, 0.55, 0.65),
+        color: GFM_COLOURS.muted,
       });
     }
   }
@@ -1292,6 +1602,15 @@ export async function layoutFlowDocument(
       case 'quote':
         renderQuote(ctx, block);
         break;
+      case 'alert':
+        renderAlert(ctx, block);
+        break;
+      case 'diagram':
+        renderDiagram(ctx, block);
+        break;
+      case 'math':
+        renderMath(ctx, block);
+        break;
       case 'divider':
         renderDivider(ctx);
         break;
@@ -1305,6 +1624,11 @@ export async function layoutFlowDocument(
         await renderImage(ctx, block);
         break;
     }
+  }
+
+  if (options?.includeOutline !== false && ctx.outlineItems && ctx.outlineItems.length > 0) {
+    const outlineTree = buildOutlineTree(ctx.outlineItems);
+    writeOutlinesToPdf(doc, outlineTree);
   }
 
   decorateDocumentPages(ctx, flowDoc.title);
@@ -1327,6 +1651,7 @@ export async function layoutGridDocument(
   const effectiveOrientation = options?.orientation ?? (maxCols > 5 ? 'landscape' : 'portrait');
   const effectiveOptions: DocumentConversionOptions = {
     ...options,
+    margins: options?.margins ?? DEFAULT_SPREADSHEET_MARGINS,
     orientation: effectiveOrientation,
   };
 
@@ -1348,14 +1673,25 @@ export async function layoutGridDocument(
 
     if (sheet.rows.length === 0) continue;
 
+    const smartNumeric = options?.smartNumericAlignment !== false;
+
     const tableBlock: TableBlock = {
       type: 'table',
       rows: sheet.rows.map((row, rIdx) => ({
         isHeader: rIdx === 0,
-        cells: row.map((cellText) => ({
-          runs: [{ text: cellText }],
-          isHeader: rIdx === 0,
-        })),
+        cells: row.map((cellText) => {
+          const trimmed = cellText.trim();
+          const isNumeric =
+            smartNumeric &&
+            rIdx > 0 &&
+            /^-?\$?[\d,]+(\.\d+)?%?$/.test(trimmed) &&
+            !/^[A-Za-z]/.test(trimmed);
+          return {
+            runs: [{ text: cellText, style: rIdx === 0 ? { bold: true } : undefined }],
+            isHeader: rIdx === 0,
+            align: isNumeric ? 'right' : 'left',
+          };
+        }),
       })),
       hasBorders: options?.includeGridlines !== false,
       hasZebraStriping: options?.alternateRowShading !== false,
@@ -1525,11 +1861,59 @@ export async function layoutSlideDocument(
         }
 
         cursorY += cardH + 16;
+      } else if (el.kind === 'table' && el.table && el.table.rows.length > 0) {
+        const tableWidth = slideDims.width - 96;
+        const colWidths = resolveColumnWidths(el.table, tableWidth);
+        const slideCtx: LayoutContext = {
+          doc,
+          fonts,
+          pageWidth: slideDims.width,
+          pageHeight: slideDims.height,
+          margins: { top: 48, right: 48, bottom: 48, left: 48 },
+          printableWidth: tableWidth,
+          printableHeight: slideDims.height - 96,
+          activePage: page,
+          cursorY,
+          pages: [page],
+          options: options ?? {},
+        };
+        for (let rIdx = 0; rIdx < el.table.rows.length; rIdx++) {
+          const row = el.table.rows[rIdx];
+          const isHeader = Boolean(row.isHeader || rIdx === 0);
+          const rowH = drawTableRow(slideCtx, row.cells, colWidths, isHeader, rIdx, true, !isHeader);
+          slideCtx.cursorY += rowH;
+        }
+        cursorY = slideCtx.cursorY + 12;
+      } else if (el.kind === 'image' && el.imageData && el.imageData.byteLength > 0) {
+        try {
+          const embedded = await embedImageBytesInPdf(doc, el.imageData, el.imageMime);
+          if (!embedded) continue;
+          const maxW = el.width ?? Math.min(slideDims.width - 96, embedded.width);
+          const maxH = el.height ?? Math.min(Math.max(80, slideDims.height - cursorY - 60), embedded.height);
+          const aspect = Math.max(1, embedded.width) / Math.max(1, embedded.height);
+          let renderW = maxW;
+          let renderH = renderW / aspect;
+          if (renderH > maxH) {
+            renderH = maxH;
+            renderW = renderH * aspect;
+          }
+          const imgX = el.x ?? 48 + (slideDims.width - 96 - renderW) / 2;
+          const imgPdfY = slideDims.height - cursorY - renderH;
+          page.drawImage(embedded, {
+            x: imgX,
+            y: Math.max(36, imgPdfY),
+            width: renderW,
+            height: renderH,
+          });
+          cursorY += renderH + 12;
+        } catch {
+          // note: skip invalid image stream on slide
+        }
       }
     }
 
-    // Slide footer numbering
-    if (options?.showSlideNumbers !== false) {
+    // Slide footer numbering only when explicitly enabled
+    if (options?.showSlideNumbers === true || options?.includePageNumbers === true) {
       const footerText = `Slide ${sIdx + 1} of ${slidesToRender.length}`;
       const footerW = safeWidthOfText(fonts.regular, footerText, 9);
       page.drawText(footerText, {
