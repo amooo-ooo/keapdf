@@ -13,6 +13,7 @@ export type DemoPresetId =
   | 'vector-graphics'
   | 'linearized-multipage'
   | 'pdfa-signatures'
+  | 'pades-multi-signatures'
   | 'annotations-redaction';
 
 export type DemoDocumentCategory =

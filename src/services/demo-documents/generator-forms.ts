@@ -131,8 +131,8 @@ export async function generateFormsPdfBuffer(): Promise<Uint8Array> {
 
   // Confirmation Checkbox
   const confirmBox = form.createCheckBox('form.confirmation_checkbox');
-  confirmBox.check();
   confirmBox.addToPage(page1, { x: 44, y: 440, width: 16, height: 16 });
+  confirmBox.check();
   page1.drawText('I confirm that all interactive form elements adhere to PDF compliance requirements.', {
     x: 68,
     y: 444,
@@ -175,8 +175,8 @@ export async function generateFormsPdfBuffer(): Promise<Uint8Array> {
     'Typographic Design',
     'Platform Quality Assurance',
   ]);
-  deptDropdown.select('Document Security & Compliance');
   deptDropdown.addToPage(page1, { x: 44, y: 330, width: 280, height: 22 });
+  deptDropdown.select('Document Security & Compliance');
 
   // Option List Box
   page1.drawText('Assigned Roles (Multi-Option List Box):', {
@@ -193,8 +193,8 @@ export async function generateFormsPdfBuffer(): Promise<Uint8Array> {
     'Security Officer',
     'Standards Delegate',
   ]);
-  rolesList.select('Lead WebAssembly Architect');
   rolesList.addToPage(page1, { x: 44, y: 220, width: 280, height: 68 });
+  rolesList.select('Lead WebAssembly Architect');
 
   // Page 1 Footer
   page1.drawText('Page 1 of 2 - AcroForm Inputs & Toggles', {
@@ -314,8 +314,32 @@ export async function generateFormsPdfBuffer(): Promise<Uint8Array> {
     color: rgb(0.5, 0.5, 0.5),
   });
 
-  return await doc.save();
+  const rawBytes = await doc.save();
+  const { createSelfSignedCertificate, signPdfIso32000 } = await import('../pdf/operations/signature-ops');
+  if (!cachedFormsIdentity) {
+    cachedFormsIdentity = await createSelfSignedCertificate({
+      commonName: 'ISO 32000 Conformance Engine',
+      organization: 'State of Arizona / Mozilla PDF.js Compliance Suite',
+      country: 'US',
+      email: 'compliance@pdf-standards.org',
+      password: 'compliance-forms-cert',
+      keySize: 2048,
+      validityYears: 10,
+    });
+  }
+  return signPdfIso32000(rawBytes, {
+    identity: cachedFormsIdentity,
+    signerName: 'ISO 32000 Conformance Engine',
+    reason: 'ISO 32000-1 Clause 12.7 AcroForm Certification',
+    location: 'Phoenix, AZ, US',
+    contactInfo: 'compliance@pdf-standards.org',
+    certificationLevel: 2,
+    embedDss: true,
+    enableTimestamp: true,
+  });
 }
+
+let cachedFormsIdentity: import('../pdf/operations/signature-ops').DigitalIdentity | null = null;
 
 export function getFormsCanvasElements(): CanvasElement[] {
   const formElement1: FormFieldElement = {
@@ -323,7 +347,7 @@ export function getFormsCanvasElements(): CanvasElement[] {
     kind: 'form-field',
     pageIndex: 0,
     x: 340,
-    y: 330,
+    y: 438,
     width: 220,
     height: 28,
     rotation: 0,

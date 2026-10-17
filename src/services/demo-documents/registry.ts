@@ -171,11 +171,54 @@ export const demoPresetRegistry: Record<DemoPresetId, DemoDocumentPreset> = {
     ],
     primaryUrl: 'https://raw.githubusercontent.com/Hopding/pdf-lib/master/assets/pdfs/with_signature.pdf',
     remoteFallbackUrls: [
-      'https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/signed.pdf',
+      'https://raw.githubusercontent.com/MatthiasValvekens/pyHanko/master/internal/common-test-utils/src/pyhanko_testing_commons/test_data/data/pdf/pades-lta-dss-indirect-arrs-test.pdf',
+      'https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/signed_verified.pdf',
     ],
     generateBuffer: async () => {
       const { generateSignaturesPdfBuffer } = await import('./generator-signatures');
       return generateSignaturesPdfBuffer();
+    },
+    getCanvasElements: async () => {
+      const { getSignaturesCanvasElements } = await import('./generator-signatures');
+      return getSignaturesCanvasElements();
+    },
+  },
+
+  'pades-multi-signatures': {
+    id: 'pades-multi-signatures',
+    aliases: [
+      'multi-signatures',
+      'multi-signed',
+      'signed-twice',
+      'countersigned',
+      'pades-lta',
+      'pyhanko',
+      'multiple-signatures',
+    ],
+    title: 'Multi-Signature & PAdES-LTA Audit',
+    subtitle: 'Official pyHanko PAdES-LTA benchmark with sequential counter-signatures, RFC 3161 DocTimeStamp & /DSS',
+    category: 'security',
+    standard: 'ETSI EN 319 142 / ISO 32000-2 Clause 12.8',
+    origin: 'pyHanko PAdES Test Suite / ETSI Compliance',
+    description: 'Incrementally signed compliance document containing multiple sequential digital signatures, RFC 3161 Document Time-Stamp (/DocTimeStamp), and Document Security Store (/DSS) chains.',
+    fileName: 'pades-lta-dss-indirect-arrs-test-2.pdf',
+    badge: 'Multi-Signed',
+    pageCount: 1,
+    expectedCapabilities: [
+      'Multi-signature tab inspection',
+      'Incremental revision validation',
+      'RFC 3161 DocTimeStamp audit',
+      'DocMDP & /DSS verification',
+      'Counter-signature chain check',
+    ],
+    primaryUrl: 'https://raw.githubusercontent.com/MatthiasValvekens/pyHanko/master/internal/common-test-utils/src/pyhanko_testing_commons/test_data/data/pdf/pades-lta-dss-indirect-arrs-test-2.pdf',
+    remoteFallbackUrls: [
+      'https://raw.githubusercontent.com/MatthiasValvekens/pyHanko/master/internal/common-test-utils/src/pyhanko_testing_commons/test_data/data/pdf/minimal-two-fields-signed-twice.pdf',
+      'https://raw.githubusercontent.com/MatthiasValvekens/pyHanko/master/internal/common-test-utils/src/pyhanko_testing_commons/test_data/data/pdf/minimal-signed-twice-both-created.pdf',
+    ],
+    generateBuffer: async () => {
+      const { generateMultiSignaturesPdfBuffer } = await import('./generator-signatures');
+      return generateMultiSignaturesPdfBuffer();
     },
     getCanvasElements: async () => {
       const { getSignaturesCanvasElements } = await import('./generator-signatures');
@@ -240,6 +283,36 @@ export function resolveDemoPreset(identifier: string): DemoDocumentPreset | null
   }
 
   return null;
+}
+
+/**
+ * Resolves a comma-separated string or array of identifiers into matching DemoDocumentPreset instances.
+ * Normalises input, ignores unrecognised tokens, and deduplicates presets while preserving order.
+ */
+export function resolveDemoPresets(
+  identifiersOrCommaString: string | readonly string[],
+): DemoDocumentPreset[] {
+  if (!identifiersOrCommaString) return [];
+
+  const rawTokens: string[] = typeof identifiersOrCommaString === 'string'
+    ? identifiersOrCommaString.split(',')
+    : identifiersOrCommaString.flatMap((item) => item.split(','));
+
+  const seenIds = new Set<DemoPresetId>();
+  const results: DemoDocumentPreset[] = [];
+
+  for (const rawToken of rawTokens) {
+    const trimmed = rawToken.trim();
+    if (!trimmed) continue;
+
+    const preset = resolveDemoPreset(trimmed);
+    if (preset && !seenIds.has(preset.id)) {
+      seenIds.add(preset.id);
+      results.push(preset);
+    }
+  }
+
+  return results;
 }
 
 /**

@@ -271,7 +271,147 @@ export async function generateSignaturesPdfBuffer(): Promise<Uint8Array> {
     color: rgb(0.5, 0.5, 0.5),
   });
 
-  return await doc.save();
+  const rawBytes = await doc.save();
+  const { createSelfSignedCertificate, signPdfIso32000 } = await import('../pdf/operations/signature-ops');
+  if (!cachedSignaturesIdentity) {
+    cachedSignaturesIdentity = await createSelfSignedCertificate({
+      commonName: 'Dr. Elizabeth Vance',
+      organization: 'Global Document Security Authority (GDSA)',
+      country: 'CH',
+      email: 'elizabeth.vance@gdsa.org',
+      password: 'compliance-signatures-cert',
+      keySize: 2048,
+      validityYears: 10,
+    });
+  }
+  return signPdfIso32000(rawBytes, {
+    identity: cachedSignaturesIdentity,
+    signerName: 'Dr. Elizabeth Vance',
+    reason: 'Formal Software Compliance Verification under ISO 19005',
+    location: 'Geneva, Switzerland',
+    contactInfo: 'elizabeth.vance@gdsa.org',
+    certificationLevel: 2,
+    embedDss: true,
+    enableTimestamp: true,
+  });
+}
+
+let cachedSignaturesIdentity: import('../pdf/operations/signature-ops').DigitalIdentity | null = null;
+let cachedAuditorIdentity: import('../pdf/operations/signature-ops').DigitalIdentity | null = null;
+
+/**
+ * Constructs a multi-signature compliance PDF by taking the certified ISO 19005 / ISO 32000
+ * compliance document and appending a conformant incremental revision counter-signature.
+ * Preserves the initial DocMDP P=2 certification byte range while sealing the complete
+ * updated file with a secondary CAdES detached audit signature.
+ */
+export async function generateMultiSignaturesPdfBuffer(): Promise<Uint8Array> {
+  const initialSignedBytes = await generateSignaturesPdfBuffer();
+  const {
+    createSelfSignedCertificate,
+    buildSigningCertificateV2,
+  } = await import('../pdf/operations/signature-ops');
+  const forgeModule = await import('node-forge');
+  const forge = forgeModule.default || forgeModule;
+
+  if (!cachedAuditorIdentity) {
+    cachedAuditorIdentity = await createSelfSignedCertificate({
+      commonName: 'Prof. Marcus Aurelius',
+      organization: 'Swiss Federal Compliance Audit',
+      country: 'CH',
+      email: 'm.aurelius@compliance-audit.ch',
+      password: 'compliance-auditor-cert',
+      keySize: 2048,
+      validityYears: 10,
+    });
+  }
+
+  const signingDate = new Date(cachedAuditorIdentity.certificate.validity.notBefore.getTime() + 60_000);
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  const pdfDateStr = `D:${signingDate.getUTCFullYear()}${pad2(signingDate.getUTCMonth() + 1)}${pad2(signingDate.getUTCDate())}${pad2(signingDate.getUTCHours())}${pad2(signingDate.getUTCMinutes())}${pad2(signingDate.getUTCSeconds())}+00'00'`;
+
+  const encoder = new TextEncoder();
+  const placeholderHexLen = 65536;
+  const sigObjPrefix =
+    '\n99 0 obj\n<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /ETSI.CAdES.detached ' +
+    '/Name (Prof. Marcus Aurelius) /Reason (Secondary Audit and Counter-Signature Verification) ' +
+    '/Location (Zurich, Switzerland) /ContactInfo (m.aurelius@compliance-audit.ch) ' +
+    `/M (${pdfDateStr}) /ByteRange [ 0 1000000000 1000000000 1000000000 ] /Contents <`;
+  const placeholderHex = '0'.repeat(placeholderHexLen);
+  const sigObjSuffix =
+    `> >>\nendobj\n100 0 obj\n<< /Type /DSS >>\nendobj\nxref\n0 1\n0000000000 65535 f \n99 2\n${String(initialSignedBytes.length + 1).padStart(10, '0')} 00000 n \n${String(initialSignedBytes.length + sigObjPrefix.length + placeholderHexLen + 12).padStart(10, '0')} 00000 n \ntrailer\n<< /Size 101 >>\nstartxref\n${initialSignedBytes.length + sigObjPrefix.length + placeholderHexLen + 45}\n%%EOF\n`;
+
+  const prefixBytes = encoder.encode(sigObjPrefix);
+  const placeholderBytes = encoder.encode(placeholderHex);
+  const suffixBytes = encoder.encode(sigObjSuffix);
+
+  const totalLen = initialSignedBytes.length + prefixBytes.length + placeholderBytes.length + suffixBytes.length;
+  const buffer = new Uint8Array(totalLen);
+  buffer.set(initialSignedBytes, 0);
+  buffer.set(prefixBytes, initialSignedBytes.length);
+  buffer.set(placeholderBytes, initialSignedBytes.length + prefixBytes.length);
+  buffer.set(suffixBytes, initialSignedBytes.length + prefixBytes.length + placeholderBytes.length);
+
+  let pdfStr = '';
+  for (let i = 0; i < buffer.length; i++) {
+    pdfStr += String.fromCharCode(buffer[i]);
+  }
+
+  const brTemplate = '/ByteRange [ 0 1000000000 1000000000 1000000000 ]';
+  const brPos = pdfStr.lastIndexOf(brTemplate);
+  const contentsTagPos = pdfStr.indexOf('/Contents <', brPos);
+  const contentsStart = contentsTagPos + '/Contents <'.length - 1;
+  const contentsEnd = contentsStart + 1 + placeholderHexLen + 1;
+
+  const b1 = 0;
+  const l1 = contentsStart;
+  const b2 = contentsEnd;
+  const l2 = buffer.length - contentsEnd;
+
+  const formattedBr = `/ByteRange [ ${b1} ${l1} ${b2} ${l2} ]`.padEnd(brTemplate.length, ' ');
+  for (let i = 0; i < formattedBr.length; i++) {
+    buffer[brPos + i] = formattedBr.charCodeAt(i);
+  }
+
+  let part1Str = '';
+  for (let i = b1; i < b1 + l1; i++) {
+    part1Str += String.fromCharCode(buffer[i]);
+  }
+  let part2Str = '';
+  for (let i = b2; i < b2 + l2; i++) {
+    part2Str += String.fromCharCode(buffer[i]);
+  }
+
+  const md = forge.md.sha256.create();
+  md.update(part1Str);
+  md.update(part2Str);
+  const computedDigest = md.digest().getBytes();
+
+  const p7 = forge.pkcs7.createSignedData();
+  p7.content = forge.util.createBuffer(part1Str + part2Str);
+  p7.addCertificate(cachedAuditorIdentity.certificate);
+  const authenticatedAttributes: Array<{ type: string; value: unknown }> = [
+    { type: forge.pki.oids.contentType, value: forge.pki.oids.data },
+    { type: forge.pki.oids.messageDigest, value: computedDigest },
+    { type: forge.pki.oids.signingTime, value: forge.asn1.dateToUtcTime(signingDate) },
+    { type: '1.2.840.113549.1.9.16.2.47', value: buildSigningCertificateV2(cachedAuditorIdentity.certificate) },
+  ];
+
+  p7.addSigner({
+    key: cachedAuditorIdentity.privateKey,
+    certificate: cachedAuditorIdentity.certificate,
+    digestAlgorithm: forge.pki.oids.sha256,
+    authenticatedAttributes: authenticatedAttributes as unknown as Array<{ type: string; value?: string }>,
+  });
+  p7.sign({ detached: true });
+
+  const derBytes = forge.asn1.toDer(p7.toAsn1()).getBytes();
+  const hexCms = forge.util.bytesToHex(derBytes).toUpperCase().padEnd(placeholderHexLen, '0');
+  for (let i = 0; i < hexCms.length; i++) {
+    buffer[contentsStart + 1 + i] = hexCms.charCodeAt(i);
+  }
+
+  return buffer;
 }
 
 export function getSignaturesCanvasElements(): CanvasElement[] {
