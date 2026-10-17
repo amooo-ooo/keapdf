@@ -10,6 +10,8 @@ import { PDFDocument } from 'pdf-lib';
 import { PdfiumEngine } from '../core/pdfium-engine';
 import { mergeDocumentsAndImages } from './pdf/operations/document-ops';
 import { documentConverter } from './conversion/document-converter';
+import { linkCopiedPageAcroForms } from './pdf/operations/acroform-transfer-ops';
+import { normalizePngBytesForEmbed } from './pdf/operations/annotation-extract-ops';
 
 export interface MergeInputItem {
   readonly name: string;
@@ -149,7 +151,11 @@ export async function reencodeImageViaCanvas(
 ): Promise<{ data: Uint8Array; width: number; height: number }> {
   const resolvedMime = mimeType || inferImageMimeType(fileName);
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
-  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: resolvedMime });
+  const safeArrayBuffer =
+    bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+      ? (bytes.buffer as ArrayBuffer)
+      : (bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+  const blob = new Blob([safeArrayBuffer], { type: resolvedMime });
   const objectUrl = URL.createObjectURL(blob);
 
   try {
@@ -224,8 +230,29 @@ export async function convertImageToEmbeddable(
   if (isPng) {
     const dims = extractPngDimensions(bytes);
     if (dims) {
+      // Normalise 16-bit greyscale PNGs (where @pdf-lib/upng corrupts odd-column tRNS alpha)
+      // and multi-frame APNGs (where pdf-lib throws on acTL chunks) into standard 8-bit RGBA PNGs.
+      const bitDepth = bytes.length >= 26 ? bytes[24] : 8;
+      const colorType = bytes.length >= 26 ? bytes[25] : 6;
+      let needsPngNormalisation = bitDepth === 16 && colorType === 0;
+      if (!needsPngNormalisation) {
+        for (let i = 33; i + 8 <= bytes.length; i++) {
+          if (
+            bytes[i + 4] === 0x61 &&
+            bytes[i + 5] === 0x63 &&
+            bytes[i + 6] === 0x54 &&
+            bytes[i + 7] === 0x4c
+          ) {
+            needsPngNormalisation = true;
+            break;
+          }
+        }
+      }
+      const normalizedData = needsPngNormalisation
+        ? (normalizePngBytesForEmbed(bytes) ?? bytes)
+        : bytes;
       return {
-        data: bytes,
+        data: normalizedData,
         format: 'png',
         width: dims.width,
         height: dims.height,
@@ -337,10 +364,13 @@ export async function mergeFilesViaPdfLib(
   items: Array<{ name: string; buffer: ArrayBuffer; mimeType?: string }>
 ): Promise<MergeFilesResult> {
   const targetDoc = await PDFDocument.create();
+  const registeredNames = new Set<string>();
 
-  for (const item of items) {
+  for (let itemIdx = 0; itemIdx < items.length; itemIdx++) {
+    const item = items[itemIdx];
     const isPdf = isPdfFile(item.buffer, item.name);
     const isImg = isImageFile(item.buffer, item.name);
+    const filePrefix = `file${itemIdx + 1}`;
 
     if (isPdf) {
       const srcDoc = await PDFDocument.load(item.buffer, { ignoreEncryption: true });
@@ -351,6 +381,7 @@ export async function mergeFilesViaPdfLib(
           for (const page of copiedPages) {
             targetDoc.addPage(page);
           }
+          linkCopiedPageAcroForms(targetDoc, copiedPages, filePrefix, registeredNames);
         } catch {
           // Bulk copy failure recovery: copy page by page to salvage all valid pages
           for (const idx of pageIndices) {
@@ -358,6 +389,7 @@ export async function mergeFilesViaPdfLib(
               const [singlePage] = await targetDoc.copyPages(srcDoc, [idx]);
               if (singlePage) {
                 targetDoc.addPage(singlePage);
+                linkCopiedPageAcroForms(targetDoc, [singlePage], filePrefix, registeredNames);
               }
             } catch {
               // Ignore individual corrupted page
@@ -377,7 +409,21 @@ export async function mergeFilesViaPdfLib(
           ? await targetDoc.embedJpg(safeData)
           : await targetDoc.embedPng(safeData);
       } catch {
-        if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+        const normalizedPng =
+          embeddable.format === 'png'
+            ? normalizePngBytesForEmbed(embeddable.data)
+            : null;
+        if (normalizedPng) {
+          embeddedImage = await targetDoc.embedPng(normalizedPng);
+          embeddable = {
+            ...embeddable,
+            data: normalizedPng,
+          };
+        } else if (
+          typeof window !== 'undefined' &&
+          typeof document !== 'undefined' &&
+          typeof Image !== 'undefined'
+        ) {
           const reencoded = await reencodeImageViaCanvas(item.buffer, item.name, item.mimeType);
           embeddedImage = await targetDoc.embedPng(reencoded.data);
           embeddable = {
@@ -532,8 +578,16 @@ export async function mergeFilesToPdfBuffer(
     }
   }
 
-  // Primary layer: PDFium WASM engine when initialized
-  if (activeEngine && activeEngine.isReady) {
+  const hasAcroForms = items.some((item) => {
+    if (!isPdfFile(item.buffer, item.name)) return false;
+    const bytes = item.buffer instanceof Uint8Array ? item.buffer : new Uint8Array(item.buffer);
+    const len = Math.min(bytes.byteLength, 1_000_000);
+    const text = new TextDecoder('latin1').decode(bytes.subarray(0, len));
+    return text.includes('/AcroForm') || text.includes('/Widget');
+  });
+
+  // Primary layer: PDFium WASM engine when initialised and no AcroForms present
+  if (!hasAcroForms && activeEngine && activeEngine.isReady) {
     try {
       const { data, pageCount } = await mergeDocumentsAndImages(activeEngine, items);
       const buffer = data.buffer.slice(
@@ -551,6 +605,6 @@ export async function mergeFilesToPdfBuffer(
     }
   }
 
-  // Fallback layer: Fortified pdf-lib with updateFieldAppearances disabled
+  // Fallback and form preservation layer: Fortified pdf-lib with full AcroForm linking
   return await mergeFilesViaPdfLib(items);
 }
