@@ -5,11 +5,12 @@
  * PDF magic byte validation, timeout abort handling, and CORS error formatting.
  */
 
-import { resolveDemoPreset } from './demo-documents/registry';
+import { resolveDemoPreset, resolveDemoPresets } from './demo-documents/registry';
 import type { DemoPresetId } from './demo-documents/types';
 
 export type DocumentLoadRequest =
   | { readonly kind: 'preset'; readonly presetId: DemoPresetId }
+  | { readonly kind: 'presets'; readonly presetIds: readonly DemoPresetId[] }
   | { readonly kind: 'url'; readonly url: string; readonly fileName: string };
 
 export interface UrlSecurityResult {
@@ -133,10 +134,23 @@ export function parseDocumentLoadRequest(urlOrSearchOrHash: string): DocumentLoa
         }
       }
 
-      // Check if it's a known preset
-      const preset = resolveDemoPreset(trimmed);
-      if (preset) {
-        return { kind: 'preset', presetId: preset.id };
+      // Check if it specifies comma-separated presets or a single preset
+      if (trimmed.includes(',')) {
+        const presets = resolveDemoPresets(trimmed);
+        if (presets.length > 1) {
+          return {
+            kind: 'presets',
+            presetIds: presets.map((p) => p.id),
+          };
+        }
+        if (presets.length === 1) {
+          return { kind: 'preset', presetId: presets[0].id };
+        }
+      } else {
+        const preset = resolveDemoPreset(trimmed);
+        if (preset) {
+          return { kind: 'preset', presetId: preset.id };
+        }
       }
     }
   }
@@ -172,19 +186,33 @@ export function parseDocumentLoadRequest(urlOrSearchOrHash: string): DocumentLoa
       const hashParams = new URLSearchParams(rawHash);
       const hashDemo = hashParams.get('demo');
       if (hashDemo) {
-        if (hashDemo.startsWith('http://') || hashDemo.startsWith('https://')) {
-          const security = validatePdfUrlSecurity(hashDemo);
+        const trimmedHash = hashDemo.trim();
+        if (trimmedHash.startsWith('http://') || trimmedHash.startsWith('https://')) {
+          const security = validatePdfUrlSecurity(trimmedHash);
           if (security.isValid) {
             return {
               kind: 'url',
-              url: hashDemo,
-              fileName: extractFileNameFromUrl(hashDemo),
+              url: trimmedHash,
+              fileName: extractFileNameFromUrl(trimmedHash),
             };
           }
         }
-        const preset = resolveDemoPreset(hashDemo);
-        if (preset) {
-          return { kind: 'preset', presetId: preset.id };
+        if (trimmedHash.includes(',')) {
+          const presets = resolveDemoPresets(trimmedHash);
+          if (presets.length > 1) {
+            return {
+              kind: 'presets',
+              presetIds: presets.map((p) => p.id),
+            };
+          }
+          if (presets.length === 1) {
+            return { kind: 'preset', presetId: presets[0].id };
+          }
+        } else {
+          const preset = resolveDemoPreset(trimmedHash);
+          if (preset) {
+            return { kind: 'preset', presetId: preset.id };
+          }
         }
       }
 
