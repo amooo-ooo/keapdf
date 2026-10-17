@@ -566,3 +566,564 @@ function detectSpatialTables(
   const tables: ExtractedTableBlock[] = [];
   const consumedSpanIds = new Set<string>();
 
+  let idx = 0;
+  while (idx < bands.length) {
+    const band = bands[idx];
+    if (band.cells.length < 2) {
+      idx++;
+      continue;
+    }
+
+    // Collect consecutive multi-column bands with reasonable vertical proximity
+    const candidateBands: HorizontalRowBand[] = [band];
+    let nextIdx = idx + 1;
+    while (nextIdx < bands.length) {
+      const prevBand = candidateBands[candidateBands.length - 1];
+      const currBand = bands[nextIdx];
+      const verticalGap = currBand.top - prevBand.bottom;
+      if (currBand.cells.length >= 2 && verticalGap <= 36) {
+        candidateBands.push(currBand);
+        nextIdx++;
+      } else {
+        break;
+      }
+    }
+
+    if (candidateBands.length >= 2) {
+      // Determine column anchor centres by clustering cell left edges
+      const colAnchors: number[] = [];
+      const colRightEdges: number[] = [];
+      const anchorTolerance = 28;
+
+      for (const b of candidateBands) {
+        for (const cell of b.cells) {
+          let matchedCol = -1;
+          for (let c = 0; c < colAnchors.length; c++) {
+            if (Math.abs(cell.left - colAnchors[c]) <= anchorTolerance) {
+              matchedCol = c;
+              colAnchors[c] = (colAnchors[c] + cell.left) / 2;
+              colRightEdges[c] = Math.max(colRightEdges[c], cell.right);
+              break;
+            }
+          }
+          if (matchedCol < 0) {
+            colAnchors.push(cell.left);
+            colRightEdges.push(cell.right);
+          }
+        }
+      }
+
+      // Sort column anchors left-to-right
+      const sortedIndices = colAnchors
+        .map((_, i) => i)
+        .sort((a, b) => colAnchors[a] - colAnchors[b]);
+      const sortedAnchors = sortedIndices.map((i) => colAnchors[i]);
+      const sortedRights = sortedIndices.map((i) => colRightEdges[i]);
+      const colCount = sortedAnchors.length;
+
+      if (colCount >= 2 && colCount <= 20) {
+        const tableRows: ExtractedTableRow[] = [];
+
+        for (let rIdx = 0; rIdx < candidateBands.length; rIdx++) {
+          const b = candidateBands[rIdx];
+          const isHeader = rIdx === 0;
+          const rowSlots: { texts: string[]; runs: StyledRun[] }[] = Array.from(
+            { length: colCount },
+            () => ({ texts: [], runs: [] })
+          );
+
+          for (const cell of b.cells) {
+            // Find closest column anchor
+            let bestCol = 0;
+            let bestDist = Infinity;
+            for (let c = 0; c < colCount; c++) {
+              const dist = Math.abs(cell.left - sortedAnchors[c]);
+              if (dist < bestDist) {
+                bestDist = dist;
+                bestCol = c;
+              }
+            }
+            if (rowSlots[bestCol].texts.length > 0) {
+              rowSlots[bestCol].runs.push({ text: ' ' });
+            }
+            rowSlots[bestCol].texts.push(cell.text);
+            rowSlots[bestCol].runs.push(...cell.runs);
+          }
+
+          const cells: ExtractedTableCell[] = rowSlots.map((slot) => {
+            const cellText = slot.texts.join(' ').trim();
+            const isNum = /^-?[$\u20ac\u00a3\u00a5]?[\d,]+(\.\d+)?%?$/.test(cellText) && cellText.length > 0;
+            return {
+              text: cellText,
+              runs: slot.runs.length > 0 ? coalesceStyledRuns(slot.runs) : [{ text: '' }],
+              align: isNum && !isHeader ? 'right' : 'left',
+              isHeader,
+            };
+          });
+
+          tableRows.push({ cells, isHeader });
+          for (const spanId of b.sourceSpanIds) {
+            consumedSpanIds.add(spanId);
+          }
+        }
+
+        const minLeft = Math.min(...sortedAnchors);
+        const maxRight = Math.max(...sortedRights, minLeft + 100);
+        const minTop = candidateBands[0].top;
+        const maxBottom = candidateBands[candidateBands.length - 1].bottom;
+        const colWidths = sortedAnchors.map((leftEdge, cIdx) => {
+          const nextEdge = cIdx < colCount - 1 ? sortedAnchors[cIdx + 1] : maxRight;
+          return Math.max(24, Math.round(nextEdge - leftEdge));
+        });
+
+        tables.push({
+          kind: 'table',
+          top: minTop,
+          left: minLeft,
+          width: Math.max(80, maxRight - minLeft),
+          height: Math.max(20, maxBottom - minTop),
+          columnWidths: colWidths,
+          rows: tableRows,
+        });
+
+        idx = nextIdx;
+        continue;
+      }
+    }
+
+    idx++;
+  }
+
+  return { tables, consumedSpanIds };
+}
+
+/**
+ * Computes the median font size across all spans on a page to calibrate heading thresholds.
+ */
+function computeBodyFontSize(spans: readonly EditableTextSpan[]): number {
+  if (spans.length === 0) return 10.5;
+  const sizes: number[] = [];
+  for (const s of spans) {
+    if (s.fontSize > 0) {
+      const weight = Math.max(1, Math.min(20, Math.round(s.text.length / 8)));
+      for (let i = 0; i < weight; i++) {
+        sizes.push(s.fontSize);
+      }
+    }
+  }
+  if (sizes.length === 0) return 10.5;
+  sizes.sort((a, b) => a - b);
+  return sizes[Math.floor(sizes.length * 0.45)];
+}
+
+/**
+ * Classifies a span's heading level (1..6) or undefined if it is body text.
+ */
+function classifyHeadingLevel(
+  span: EditableTextSpan,
+  bodyFontSize: number
+): 1 | 2 | 3 | 4 | 5 | 6 | undefined {
+  const text = span.text.trim();
+  if (text.length === 0 || text.length > 180) return undefined;
+  // Ignore running footer page counters like "Page 1 of 3"
+  if (/^(page|slide)\s+\d+\s+of\s+\d+$/i.test(text)) return undefined;
+
+  const ratio = span.fontSize / Math.max(8, bodyFontSize);
+  const isBold =
+    span.fontWeight === 'bold' ||
+    span.fontWeight === '700' ||
+    (span.rawFontFamily ?? '').toLowerCase().includes('bold');
+
+  if (ratio >= 1.75 || span.fontSize >= 20) return 1;
+  if (ratio >= 1.42 || span.fontSize >= 15.5) return 2;
+  if (ratio >= 1.2 || span.fontSize >= 13) return 3;
+  if (isBold && ratio >= 1.05 && (!span.lines || span.lines.length <= 2)) return 4;
+  return undefined;
+}
+
+/**
+ * Checks whether a line or span starts with a bullet or numbered list prefix.
+ */
+function parseListPrefix(
+  rawText: string,
+  hasBulletFlag?: boolean
+): { ordered: boolean; cleanText: string } | null {
+  const trimmed = rawText.trim();
+  if (!trimmed) return null;
+
+  const bulletMatch = trimmed.match(/^(?:[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25CF\u25CB]|[-*])\s+(.+)$/s);
+  if (bulletMatch) {
+    return { ordered: false, cleanText: bulletMatch[1].trim() };
+  }
+
+  const orderedMatch = trimmed.match(/^(?:\d+[.)]|\([a-zA-Z0-9]+\)|[a-zA-Z][.)])\s+(.+)$/s);
+  if (orderedMatch) {
+    return { ordered: true, cleanText: orderedMatch[1].trim() };
+  }
+
+  if (hasBulletFlag) {
+    return { ordered: false, cleanText: trimmed.replace(/^[\u2022\-*]\s*/, '') };
+  }
+
+  return null;
+}
+
+/**
+ * Infers horizontal alignment (left, centre, right) from span position on the page.
+ */
+function inferAlignment(
+  span: EditableTextSpan,
+  pageWidthPts: number
+): BlockAlignment {
+  if (span.textAlign === 'center' || span.textAlign === 'right') {
+    return span.textAlign;
+  }
+  const margin = 48;
+  const centerDiff = Math.abs(span.left + span.width / 2 - pageWidthPts / 2);
+  if (span.width < pageWidthPts * 0.7 && centerDiff <= 18 && span.left > margin + 24) {
+    return 'center';
+  }
+  return 'left';
+}
+
+/**
+ * Extracts structured content from a single PDF page and its canvas overlay elements.
+ */
+export function extractPageStructure(
+  doc: PdfDocument,
+  pageIndex: number,
+  canvasElements: readonly CanvasElement[] = []
+): ExtractedPageStructure {
+  const page = doc.getPage(pageIndex);
+  const { widthPts, heightPts } = page.getDimensions();
+  const nativeSpans = page.extractTextSpans();
+  const { images: nativeImages, shapes: nativeShapes } = page.extractObjects();
+
+  // Merge visible canvas text elements on this page
+  const pageCanvasTextSpans: EditableTextSpan[] = canvasElements
+    .filter(
+      (el): el is TextElement =>
+        el.pageIndex === pageIndex && el.kind === 'text' && el.visible !== false
+    )
+    .map(canvasTextElementToSpan);
+
+  const allSpans = [...nativeSpans, ...pageCanvasTextSpans].filter(
+    (s) => s.text && s.text.trim().length > 0
+  );
+
+  // Sort spans top-to-bottom, left-to-right
+  allSpans.sort((a, b) => {
+    if (Math.abs(a.top - b.top) <= Math.max(a.fontSize, b.fontSize) * 0.6) {
+      return a.left - b.left;
+    }
+    return a.top - b.top;
+  });
+
+  // Extract images from native PDF image spans and canvas image elements
+  const extractedImages: ExtractedImageItem[] = [];
+  const rawImageSources: EditableImageSpan[] = [
+    ...nativeImages,
+    ...canvasElements
+      .filter(
+        (el): el is ImageElement =>
+          el.pageIndex === pageIndex && el.kind === 'image' && el.visible !== false
+      )
+      .map(
+        (el, i): EditableImageSpan => ({
+          type: 'image',
+          id: el.id,
+          pageIndex,
+          left: el.x,
+          top: el.y,
+          width: el.width,
+          height: el.height,
+          rotation: el.rotation ?? 0,
+          flipX: el.flipX ?? false,
+          flipY: el.flipY ?? false,
+          src: el.src,
+          pdfObjectIndex: 10000 + i,
+        })
+      ),
+  ];
+
+  for (const imgSpan of rawImageSources) {
+    const decoded = decodeDataUrlToBytes(imgSpan.src);
+    if (!decoded || decoded.data.byteLength === 0) continue;
+    extractedImages.push({
+      id: imgSpan.id,
+      data: decoded.data,
+      mimeType: decoded.mimeType,
+      extension: decoded.extension,
+      left: imgSpan.left,
+      top: imgSpan.top,
+      width: Math.max(16, imgSpan.width),
+      height: Math.max(16, imgSpan.height),
+    });
+  }
+
+  // Detect spatial tables
+  const { tables, consumedSpanIds } = detectSpatialTables(allSpans, nativeShapes);
+
+  const bodyFontSize = computeBodyFontSize(allSpans);
+  const blocks: ExtractedPageBlock[] = [];
+  const positionedTextBoxes: PositionedTextBox[] = [];
+
+  // Build non-table semantic blocks
+  let activeList: {
+    ordered: boolean;
+    items: ExtractedListItem[];
+    top: number;
+    left: number;
+    right: number;
+    bottom: number;
+  } | null = null;
+
+  let activeCode: {
+    lines: string[];
+    top: number;
+    left: number;
+    right: number;
+    bottom: number;
+  } | null = null;
+
+  function flushActiveList(): void {
+    if (activeList && activeList.items.length > 0) {
+      blocks.push({
+        kind: 'list',
+        ordered: activeList.ordered,
+        items: activeList.items,
+        top: activeList.top,
+        left: activeList.left,
+        width: Math.max(40, activeList.right - activeList.left),
+        height: Math.max(14, activeList.bottom - activeList.top),
+      });
+      activeList = null;
+    }
+  }
+
+  function flushActiveCode(): void {
+    if (activeCode && activeCode.lines.length > 0) {
+      blocks.push({
+        kind: 'code',
+        code: activeCode.lines.join('\n'),
+        top: activeCode.top,
+        left: activeCode.left,
+        width: Math.max(80, activeCode.right - activeCode.left),
+        height: Math.max(16, activeCode.bottom - activeCode.top),
+      });
+      activeCode = null;
+    }
+  }
+
+  for (const span of allSpans) {
+    const trimmedText = span.text.trim();
+    if (!trimmedText) continue;
+
+    // Skip running page numbers at very bottom/top margins
+    if (
+      /^(page|slide)\s+\d+\s+of\s+\d+$/i.test(trimmedText) &&
+      (span.top > heightPts - 55 || span.top < 45)
+    ) {
+      continue;
+    }
+
+    const runs = extractRunsFromSpan(span);
+    const headingLevel = classifyHeadingLevel(span, bodyFontSize);
+    const listPrefix = parseListPrefix(trimmedText, span.hasBulletPrefix);
+    const align = inferAlignment(span, widthPts);
+
+    positionedTextBoxes.push({
+      id: span.id,
+      left: span.left,
+      top: span.top,
+      width: Math.max(24, span.width),
+      height: Math.max(12, span.height),
+      text: trimmedText,
+      runs,
+      fontSize: span.fontSize || bodyFontSize,
+      isHeading: headingLevel !== undefined,
+      headingLevel,
+      isList: listPrefix !== null,
+      align,
+    });
+
+    if (consumedSpanIds.has(span.id)) {
+      continue;
+    }
+
+    const isMono = isMonospaceFont(span.fontFamily, span.rawFontFamily);
+    if (isMono && !headingLevel && !listPrefix) {
+      flushActiveList();
+      const spanLines =
+        span.lines && span.lines.length > 0
+          ? span.lines.map((l) => l.text)
+          : trimmedText.split('\n');
+      if (activeCode && span.top - activeCode.bottom <= 24) {
+        activeCode.lines.push(...spanLines);
+        activeCode.right = Math.max(activeCode.right, span.left + span.width);
+        activeCode.bottom = Math.max(activeCode.bottom, span.top + span.height);
+      } else {
+        flushActiveCode();
+        activeCode = {
+          lines: [...spanLines],
+          top: span.top,
+          left: span.left,
+          right: span.left + span.width,
+          bottom: span.top + span.height,
+        };
+      }
+      continue;
+    }
+
+    flushActiveCode();
+
+    if (headingLevel !== undefined) {
+      flushActiveList();
+      blocks.push({
+        kind: 'heading',
+        level: headingLevel,
+        text: trimmedText,
+        runs,
+        align,
+        top: span.top,
+        left: span.left,
+        width: Math.max(40, span.width),
+        height: Math.max(14, span.height),
+        fontSize: span.fontSize || bodyFontSize,
+      });
+      continue;
+    }
+
+    if (listPrefix) {
+      const cleanRuns: StyledRun[] = [
+        {
+          text: listPrefix.cleanText,
+          style: runs[0]?.style,
+        },
+      ];
+      const indentLevel = Math.max(0, Math.min(4, Math.floor((span.left - 54) / 20)));
+      if (activeList && activeList.ordered === listPrefix.ordered) {
+        activeList.items.push({
+          text: listPrefix.cleanText,
+          runs: cleanRuns,
+          indentLevel,
+        });
+        activeList.right = Math.max(activeList.right, span.left + span.width);
+        activeList.bottom = Math.max(activeList.bottom, span.top + span.height);
+      } else {
+        flushActiveList();
+        activeList = {
+          ordered: listPrefix.ordered,
+          items: [
+            {
+              text: listPrefix.cleanText,
+              runs: cleanRuns,
+              indentLevel,
+            },
+          ],
+          top: span.top,
+          left: span.left,
+          right: span.left + span.width,
+          bottom: span.top + span.height,
+        };
+      }
+      continue;
+    }
+
+    flushActiveList();
+    blocks.push({
+      kind: 'paragraph',
+      text: trimmedText,
+      runs,
+      align,
+      top: span.top,
+      left: span.left,
+      width: Math.max(40, span.width),
+      height: Math.max(12, span.height),
+      fontSize: span.fontSize || bodyFontSize,
+    });
+  }
+
+  flushActiveList();
+  flushActiveCode();
+
+  // Add reconstructed tables and images into the page block stream sorted by vertical top coordinate
+  for (const tbl of tables) {
+    blocks.push(tbl);
+  }
+  for (const img of extractedImages) {
+    blocks.push({
+      kind: 'image',
+      image: img,
+      top: img.top,
+      left: img.left,
+      width: img.width,
+      height: img.height,
+    });
+  }
+
+  blocks.sort((a, b) => {
+    if (Math.abs(a.top - b.top) <= 6) {
+      return a.left - b.left;
+    }
+    return a.top - b.top;
+  });
+
+  return {
+    pageIndex,
+    widthPts,
+    heightPts,
+    blocks,
+    tables,
+    images: extractedImages,
+    positionedTextBoxes,
+  };
+}
+
+/**
+ * Extracts structured content across all pages of a PdfDocument.
+ */
+export function extractStructuredDocument(
+  doc: PdfDocument,
+  canvasElements: readonly CanvasElement[] = [],
+  fallbackTitle: string = 'Document'
+): ExtractedDocumentStructure {
+  const pageCount = doc.getPageCount();
+  const pages: ExtractedPageStructure[] = [];
+
+  for (let i = 0; i < pageCount; i++) {
+    pages.push(extractPageStructure(doc, i, canvasElements));
+  }
+
+  let title = fallbackTitle;
+  try {
+    const meta = doc.getMetadata();
+    if (meta.title && meta.title.trim().length > 0) {
+      title = meta.title.trim();
+    } else {
+      const firstHeading = pages[0]?.blocks.find(
+        (b): b is ExtractedHeadingBlock => b.kind === 'heading' && b.level === 1
+      );
+      if (firstHeading && firstHeading.text.trim().length > 0) {
+        title = firstHeading.text.trim();
+      }
+    }
+  } catch {
+    // note: fallback to provided title when metadata lookup is unavailable
+  }
+
+  return {
+    title,
+    pages,
+  };
+}
+
+/**
+ * Extracts structured content directly from an ExportContext.
+ */
+export function extractStructuredDocumentFromContext(
+  ctx: ExportContext
+): ExtractedDocumentStructure {
+  const baseName = ctx.editorStore.fileName.replace(/\.pdf$/i, '') || 'document';
+  return extractStructuredDocument(ctx.service.document, ctx.canvasElements, baseName);
+}
