@@ -13,6 +13,7 @@ export const compressPdfExport: ExportDefinition = {
   description: 'Reduce file size with lossless, balanced lossy, or flat-image rasterization',
   extension: '.pdf',
   mimeType: 'application/pdf',
+  category: 'pdf',
   async export(ctx: ExportContext): Promise<void> {
     if (!ctx.editorStore.isDocumentLoaded) return;
     ctx.editorStore.openCompressDialog('recommended');

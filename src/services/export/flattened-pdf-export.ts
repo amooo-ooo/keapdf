@@ -10,13 +10,15 @@ import { downloadBytes } from '../../utils/download-utils';
 
 export const flattenedPdfExport: ExportDefinition = {
   id: 'flattened-pdf',
-  label: 'Flatten & Save PDF',
+  label: 'Flattened PDF',
   description: 'Flattens all annotations and form fields into static page content',
   extension: '.pdf',
   mimeType: 'application/pdf',
+  category: 'pdf',
   async export(ctx: ExportContext): Promise<void> {
     if (!ctx.editorStore.isDocumentLoaded) return;
 
+    const savedFormValues = new Map(ctx.service.document.getModifiedFormFieldValues());
     const originalBytes = ctx.service.document.save();
     const originalBuffer = originalBytes.buffer.slice(
       originalBytes.byteOffset,
@@ -33,7 +35,7 @@ export const flattenedPdfExport: ExportDefinition = {
         intermediateBytes.byteOffset,
         intermediateBytes.byteOffset + intermediateBytes.byteLength
       ) as ArrayBuffer;
-      ctx.service.loadDocumentFromBuffer(intermediateBuffer);
+      ctx.service.reloadDocumentFromBuffer(intermediateBuffer);
 
       const pageCount = ctx.service.document.getPageCount();
       for (let i = 0; i < pageCount; i++) {
@@ -44,7 +46,10 @@ export const flattenedPdfExport: ExportDefinition = {
       const baseName = ctx.editorStore.fileName.replace(/\.pdf$/i, '') || 'document';
       downloadBytes(bytes, `${baseName}-flattened.pdf`, 'application/pdf');
     } finally {
-      ctx.service.loadDocumentFromBuffer(originalBuffer);
+      ctx.service.reloadDocumentFromBuffer(originalBuffer);
+      if (savedFormValues.size > 0) {
+        ctx.service.document.setAllFormFieldValues(savedFormValues);
+      }
       ctx.actions.refreshDocument();
     }
   },
