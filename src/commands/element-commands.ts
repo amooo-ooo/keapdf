@@ -190,6 +190,8 @@ export class ResizeElementCommand implements Command<'resize-element'> {
     readonly newLines?: TextElementLine[],
     readonly prevSegments?: TextSegment[],
     readonly newSegments?: TextSegment[],
+    readonly prevPoints?: Point[],
+    readonly newPoints?: Point[],
   ) {}
 
   execute(ctx: CommandContext): void {
@@ -204,6 +206,11 @@ export class ResizeElementCommand implements Command<'resize-element'> {
     if (this.newLines || this.newSegments) {
       ctx.canvasStore.updateElement(this.elementId, { lines: this.newLines, segments: this.newSegments });
     }
+    if (this.newPoints) {
+      ctx.canvasStore.updateElement(this.elementId, {
+        points: this.newPoints.map((p) => ({ x: p.x, y: p.y })),
+      } as Partial<CanvasElement>);
+    }
   }
 
   undo(ctx: CommandContext): void {
@@ -217,6 +224,11 @@ export class ResizeElementCommand implements Command<'resize-element'> {
     );
     if (this.prevLines || this.prevSegments) {
       ctx.canvasStore.updateElement(this.elementId, { lines: this.prevLines, segments: this.prevSegments });
+    }
+    if (this.prevPoints) {
+      ctx.canvasStore.updateElement(this.elementId, {
+        points: this.prevPoints.map((p) => ({ x: p.x, y: p.y })),
+      } as Partial<CanvasElement>);
     }
   }
 
@@ -236,6 +248,59 @@ export class ResizeElementCommand implements Command<'resize-element'> {
         this.newLines,
         previous.prevSegments,
         this.newSegments,
+        previous.prevPoints,
+        this.newPoints !== undefined ? this.newPoints : previous.newPoints,
+      );
+    }
+    return null;
+  }
+}
+
+/** Geometry snapshot for a linear element endpoint transformation. */
+export interface LineGeometrySnapshot {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  flipX?: boolean;
+  flipY?: boolean;
+}
+
+/**
+ * Command to adjust start or end terminal coordinates of a line or arrow.
+ */
+export class AdjustLineEndpointsCommand implements Command<'adjust-line-endpoints'> {
+  readonly type = 'adjust-line-endpoints' as const;
+
+  constructor(
+    readonly description: string,
+    readonly elementId: string,
+    readonly prevGeometry: LineGeometrySnapshot,
+    readonly newGeometry: LineGeometrySnapshot,
+    readonly timestamp: number = Date.now(),
+  ) {}
+
+  execute(ctx: CommandContext): void {
+    ctx.canvasStore.updateElement(this.elementId, this.newGeometry);
+  }
+
+  undo(ctx: CommandContext): void {
+    ctx.canvasStore.updateElement(this.elementId, this.prevGeometry);
+  }
+
+  merge(previous: Command): Command | null {
+    if (
+      previous instanceof AdjustLineEndpointsCommand &&
+      previous.elementId === this.elementId &&
+      Math.abs(this.timestamp - previous.timestamp) < COALESCE_WINDOW_MS
+    ) {
+      return new AdjustLineEndpointsCommand(
+        this.description,
+        this.elementId,
+        previous.prevGeometry,
+        this.newGeometry,
+        previous.timestamp,
       );
     }
     return null;
@@ -326,5 +391,29 @@ export class UpdateElementPropertyCommand implements Command<'update-element-pro
       );
     }
     return null;
+  }
+}
+
+/**
+ * Command to reorder a canvas element in the page stacking hierarchy.
+ */
+export class ReorderElementCommand implements Command<'reorder-element'> {
+  readonly type = 'reorder-element' as const;
+
+  constructor(
+    readonly description: string,
+    readonly elementId: string,
+    readonly prevElementsOrder: string[],
+    readonly newElementsOrder: string[],
+    readonly prevZIndices?: Record<string, number | undefined>,
+    readonly newZIndices?: Record<string, number | undefined>,
+  ) {}
+
+  execute(ctx: CommandContext): void {
+    ctx.canvasStore.reorderElementsByIds(this.newElementsOrder, this.newZIndices);
+  }
+
+  undo(ctx: CommandContext): void {
+    ctx.canvasStore.reorderElementsByIds(this.prevElementsOrder, this.prevZIndices);
   }
 }
