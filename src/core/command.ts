@@ -129,4 +129,36 @@ export class CompoundCommand implements Command<'compound'> {
       }
     }
   }
+
+  /**
+   * Attempts to coalesce this compound command with an immediately preceding
+   * compound command when all constituent sub-commands support merging.
+   *
+   * @param previous The previous command on top of the history stack.
+   * @return The merged compound command if coalescence succeeded, or null.
+   */
+  merge(previous: Command): Command | null {
+    if (
+      previous instanceof CompoundCommand &&
+      previous.description === this.description &&
+      previous.commands.length === this.commands.length &&
+      this.commands.length > 0
+    ) {
+      const mergedSubCommands: Command[] = [];
+      for (let i = 0; i < this.commands.length; i++) {
+        const sub = this.commands[i];
+        const prevSub = previous.commands[i];
+        if (typeof sub.merge !== 'function') {
+          return null;
+        }
+        const merged = sub.merge(prevSub);
+        if (!merged) {
+          return null;
+        }
+        mergedSubCommands.push(merged);
+      }
+      return new CompoundCommand(this.description, mergedSubCommands);
+    }
+    return null;
+  }
 }
