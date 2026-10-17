@@ -8,6 +8,8 @@ export interface ZipFileEntry {
   readonly data: Uint8Array;
 }
 
+export type ZipEntryMap = Record<string, Uint8Array>;
+
 /**
  * Precomputed CRC-32 table for fast single-operation byte lookups.
  */

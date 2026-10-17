@@ -48,12 +48,16 @@ export interface DocumentConversionOptions {
   readonly fontSize?: number;
   readonly fontFamily?: 'helvetica' | 'times' | 'courier';
   readonly includePageNumbers?: boolean;
+  readonly includeHeader?: boolean;
+  readonly includeOutline?: boolean;
   readonly title?: string;
 
   // Spreadsheet options
   readonly includeGridlines?: boolean;
   readonly alternateRowShading?: boolean;
   readonly selectedSheets?: readonly string[];
+  readonly autoColumnWidths?: boolean;
+  readonly smartNumericAlignment?: boolean;
 
   // Slide options
   readonly slideTheme?: 'light' | 'dark' | 'corporate' | 'clean';
@@ -96,6 +100,8 @@ export interface TextStyle {
   readonly italic?: boolean;
   readonly underline?: boolean;
   readonly strike?: boolean;
+  readonly code?: boolean;
+  readonly math?: boolean;
   readonly fontSize?: number;
   readonly fontColor?: string;
   readonly fontFamily?: 'helvetica' | 'times' | 'courier';
@@ -104,6 +110,7 @@ export interface TextStyle {
 export interface StyledRun {
   readonly text: string;
   readonly style?: TextStyle;
+  readonly link?: string;
 }
 
 export type BlockAlignment = 'left' | 'center' | 'right' | 'justify';
@@ -119,15 +126,25 @@ export interface ParagraphBlock {
 
 export interface HeadingBlock {
   readonly type: 'heading';
-  readonly level: 1 | 2 | 3 | 4;
+  readonly level: 1 | 2 | 3 | 4 | 5 | 6;
   readonly text: string;
+  readonly runs?: readonly StyledRun[];
   readonly align?: BlockAlignment;
+  readonly id?: string;
+  readonly unlisted?: boolean;
+}
+
+export interface ListItem {
+  readonly runs: readonly StyledRun[];
+  readonly isTask?: boolean;
+  readonly isChecked?: boolean;
+  readonly indentLevel?: number;
 }
 
 export interface ListBlock {
   readonly type: 'list';
   readonly ordered: boolean;
-  readonly items: readonly (readonly StyledRun[])[];
+  readonly items: readonly (readonly StyledRun[] | ListItem)[];
   readonly indentLevel?: number;
 }
 
@@ -141,6 +158,29 @@ export interface CodeBlock {
 export interface QuoteBlock {
   readonly type: 'quote';
   readonly text: string;
+  readonly runs?: readonly StyledRun[];
+}
+
+export type AlertType = 'note' | 'tip' | 'important' | 'warning' | 'caution';
+
+export interface AlertBlock {
+  readonly type: 'alert';
+  readonly alertType: AlertType;
+  readonly title?: string;
+  readonly runs: readonly StyledRun[];
+}
+
+export interface DiagramBlock {
+  readonly type: 'diagram';
+  readonly diagramType: 'mermaid';
+  readonly code: string;
+  readonly title?: string;
+}
+
+export interface MathBlock {
+  readonly type: 'math';
+  readonly expression: string;
+  readonly displayMode?: boolean;
 }
 
 export interface DividerBlock {
@@ -188,6 +228,9 @@ export type DocumentBlock =
   | ListBlock
   | CodeBlock
   | QuoteBlock
+  | AlertBlock
+  | DiagramBlock
+  | MathBlock
   | DividerBlock
   | PageBreakBlock
   | TableBlock
