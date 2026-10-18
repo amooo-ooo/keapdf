@@ -796,12 +796,21 @@ export class EditorActions {
       this.historyStore.setActiveFileId(fileId);
     }
     if (!this.historyStore || !this.historyStore.canRedo) return false;
+    const futureCmds = this.historyStore.activeCommandState?.future;
+    const nextCmd = futureCmds && futureCmds.length > 0 ? futureCmds[futureCmds.length - 1] : null;
+    const isRotationCmd = nextCmd && (
+      nextCmd.type === 'rotate-page' ||
+      (nextCmd.type === 'compound' && 'commands' in nextCmd && Array.isArray((nextCmd as { commands: unknown[] }).commands) && (nextCmd as { commands: Array<{ type: string }> }).commands.some((c) => c.type === 'rotate-page'))
+    );
+    const restoreCenter = isRotationCmd ? (this.pageCenterPreserver?.(this.store.currentPageIndex) ?? null) : null;
+
     const ctx = this.getCommandContext();
     const success = await this.historyStore.redoCommand(
       ctx,
       fileId,
     );
     if (success) {
+      this.isWorkspaceBufferDirty = nextCmd?.type !== 'mutate-document';
       if (this.service.document && typeof this.service.document.syncCommandStacks === 'function' && this.historyStore.activeCommandState) {
         this.service.document.syncCommandStacks(
           this.historyStore.activeCommandState.past,
@@ -809,12 +818,16 @@ export class EditorActions {
         );
       }
       this.refreshDocument();
+      if (restoreCenter) {
+        await tick();
+        restoreCenter();
+      }
       return true;
     }
     return false;
   }
 
-  // -- Initialization --
+  // Initialisation
 
   async initializeEngine(): Promise<void> {
     try {
@@ -825,13 +838,83 @@ export class EditorActions {
     }
   }
 
-  async loadDemoDocument(presetIdOrUrl: string): Promise<void> {
+  /**
+   * Retrieves or compiles an ArrayBuffer for a compliance test document preset.
+   * Tries primary remote benchmark first, then fallback mirrors, before compiling locally.
+   */
+  private async getDemoPresetBuffer(preset: DemoDocumentPreset): Promise<ArrayBuffer> {
+    let buffer: ArrayBuffer | null = null;
+    const minSignatures = preset.id === 'pades-multi-signatures' ? 2 : (preset.category === 'security' ? 1 : 0);
+
+    const hasExpectedSignatures = (buf: ArrayBuffer): boolean => {
+      if (minSignatures === 0 || buf.byteLength < 100) return true;
+      const view = new Uint8Array(buf);
+      let rawStr = '';
+      for (let i = 0; i < view.length; i++) {
+        rawStr += String.fromCharCode(view[i]);
+      }
+      const matches = rawStr.match(/\/ByteRange\s*\[/g);
+      return Boolean(matches && matches.length >= minSignatures);
+    };
+
+    if (preset.primaryUrl && typeof fetch !== 'undefined') {
+      try {
+        this.store.loadingProgress = `Streaming ${preset.title} from ${preset.origin}...`;
+        const result = await fetchPdfFromUrl(preset.primaryUrl, 15000);
+        if (hasExpectedSignatures(result.buffer)) {
+          buffer = result.buffer;
+        }
+      } catch (primaryErr) {
+        console.warn(`Primary benchmark fetch failed for "${preset.id}", trying fallback mirrors:`, primaryErr);
+      }
+
+      if (!buffer && preset.remoteFallbackUrls && preset.remoteFallbackUrls.length > 0) {
+        for (const fallbackUrl of preset.remoteFallbackUrls) {
+          try {
+            this.store.loadingProgress = `Fetching fallback mirror for ${preset.title}...`;
+            const result = await fetchPdfFromUrl(fallbackUrl, 10000);
+            if (hasExpectedSignatures(result.buffer)) {
+              buffer = result.buffer;
+              break;
+            }
+          } catch {
+            // Continue to next mirror or procedural generator
+          }
+        }
+      }
+    }
+
+    if (!buffer) {
+      this.store.loadingProgress = `Compiling fallback document for ${preset.title}...`;
+      const bytes = await preset.generateBuffer();
+      buffer = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer;
+    }
+
+    return buffer;
+  }
+
+  /**
+   * Loads a compliance test document or remote PDF into the editor.
+   * Supports comma-separated preset identifiers to add multiple compliance files into the workspace.
+   */
+  async loadDemoDocument(presetIdOrUrl: string, addToWorkspace?: boolean): Promise<void> {
     const trimmed = (presetIdOrUrl || '').trim();
     if (!trimmed) return;
 
     if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-      await this.loadDocumentFromUrl(trimmed);
+      await this.loadDocumentFromUrl(trimmed, addToWorkspace);
       return;
+    }
+
+    if (trimmed.includes(',')) {
+      const parts = trimmed.split(',').map((p) => p.trim()).filter((p) => p.length > 0);
+      if (parts.length > 1) {
+        await this.loadDemoDocuments(parts, { addToWorkspace });
+        return;
+      }
     }
 
     const { resolveDemoPreset } = await import('../services/demo-documents/registry');
@@ -846,66 +929,113 @@ export class EditorActions {
     this.store.loadError = null;
 
     try {
-      let buffer: ArrayBuffer | null = null;
-      let usedRemoteBenchmark = false;
-
-      // 1. Attempt streaming real-world benchmark PDF from CORS-enabled URL
-      if (preset.primaryUrl && typeof fetch !== 'undefined') {
-        try {
-          this.store.loadingProgress = `Streaming ${preset.title} from ${preset.origin}...`;
-          const result = await fetchPdfFromUrl(preset.primaryUrl, 15000);
-          buffer = result.buffer;
-          usedRemoteBenchmark = true;
-        } catch (primaryErr) {
-          console.warn(`Primary benchmark fetch failed for "${preset.id}", trying fallback mirrors:`, primaryErr);
-
-          if (preset.remoteFallbackUrls && preset.remoteFallbackUrls.length > 0) {
-            for (const fallbackUrl of preset.remoteFallbackUrls) {
-              try {
-                this.store.loadingProgress = `Fetching fallback mirror for ${preset.title}...`;
-                const result = await fetchPdfFromUrl(fallbackUrl, 10000);
-                buffer = result.buffer;
-                usedRemoteBenchmark = true;
-                break;
-              } catch {
-                // Continue to next mirror or procedural generator
-              }
-            }
-          }
-        }
-      }
-
-      // 2. Resilient fallback: compile procedural compliance document
-      if (!buffer) {
-        this.store.loadingProgress = `Compiling fallback document for ${preset.title}...`;
-        const bytes = await preset.generateBuffer();
-        buffer = bytes.buffer.slice(
-          bytes.byteOffset,
-          bytes.byteOffset + bytes.byteLength,
-        ) as ArrayBuffer;
-      }
-
-      await this.loadDocumentFromBuffer(buffer, preset.fileName);
-
-      // Attach companion canvas elements for procedural fallback
-      const shouldAttachCanvasElements = !usedRemoteBenchmark;
-      const canvasElements = (shouldAttachCanvasElements && preset.getCanvasElements)
-        ? await preset.getCanvasElements()
-        : [];
-
-      if (this.canvasStore && canvasElements.length > 0) {
-        this.canvasStore.elements = safeClone(canvasElements);
-        const activeFile = this.service.getFile(this.store.activeWorkspaceFileId ?? '');
-        if (activeFile) {
-          activeFile.canvasElements = safeClone(canvasElements);
-        }
-      }
-
+      const buffer = await this.getDemoPresetBuffer(preset);
+      await this.loadDocumentFromBuffer(buffer, preset.fileName, addToWorkspace);
       syncUrlParameter(preset.id);
     } catch (err) {
       console.error(`Failed to load compliance document "${preset.id}":`, err);
       this.store.loadError = err instanceof Error ? err.message : `Failed to load ${preset.title}.`;
     } finally {
+      this.store.isLoadingDocument = false;
+      this.store.loadingProgress = null;
+    }
+  }
+
+  /**
+   * Loads multiple compliance test documents into the workspace.
+   * Resolves preset identifiers and aliases, streams or compiles each document buffer,
+   * adds them into workspace storage, and activates the first document in the editor.
+   */
+  async loadDemoDocuments(
+    presetIdsOrUrls: readonly string[],
+    options?: {
+      readonly addToWorkspace?: boolean;
+      readonly activePresetId?: string;
+    },
+  ): Promise<void> {
+    if (!presetIdsOrUrls || presetIdsOrUrls.length === 0) return;
+
+    if (!this.store.isInitialized) {
+      await this.initializeEngine();
+      if (!this.store.isInitialized) return;
+    }
+
+    const { resolveDemoPreset, resolveDemoPresets } = await import('../services/demo-documents/registry');
+    const presets = resolveDemoPresets(presetIdsOrUrls);
+
+    if (presets.length === 0) {
+      this.store.loadError = `Unknown compliance test document identifiers: "${presetIdsOrUrls.join(', ')}".`;
+      return;
+    }
+
+    if (presets.length === 1) {
+      await this.loadDemoDocument(presets[0].id, options?.addToWorkspace);
+      return;
+    }
+
+    if (this.featureFlags && !this.featureFlags.isEnabled('workspace.compliance.multi-demo')) {
+      await this.loadDemoDocument(presets[0].id, options?.addToWorkspace);
+      return;
+    }
+
+    this.store.isLoadingDocument = true;
+    this.store.loadError = null;
+
+    const initialAddToWorkspace = options?.addToWorkspace ?? this.isAddingToWorkspace;
+    if (!initialAddToWorkspace) {
+      this.clearWorkspaceState();
+    }
+
+    const originalIsAdding = this.isAddingToWorkspace;
+    const loadedFileIds: string[] = [];
+
+    try {
+      this.isAddingToWorkspace = true;
+
+      for (let i = 0; i < presets.length; i++) {
+        const preset = presets[i];
+        this.store.loadingProgress = `Loading compliance document (${i + 1}/${presets.length}): ${preset.title}...`;
+
+        try {
+          const buffer = await this.getDemoPresetBuffer(preset);
+          await this.loadDocumentFromBuffer(buffer, preset.fileName);
+          if (this.store.activeWorkspaceFileId) {
+            loadedFileIds.push(this.store.activeWorkspaceFileId);
+          }
+        } catch (itemErr) {
+          console.error(`Failed to load compliance document "${preset.id}" in batch:`, itemErr);
+        }
+      }
+
+      if (loadedFileIds.length === 0) {
+        this.store.loadError = 'Failed to load compliance test documents into workspace.';
+        return;
+      }
+
+      let targetFileId = loadedFileIds[0];
+      if (options?.activePresetId) {
+        const matchingPreset = resolveDemoPreset(options.activePresetId);
+        if (matchingPreset) {
+          const matchingFile = this.store.workspaceFiles.find(
+            (f) => f.fileName === matchingPreset.fileName,
+          );
+          if (matchingFile) {
+            targetFileId = matchingFile.id;
+          }
+        }
+      }
+
+      if (this.store.activeWorkspaceFileId !== targetFileId) {
+        await this.switchWorkspaceFile(targetFileId);
+      }
+
+      const activePresetQuery = presets.map((p) => p.id).join(',');
+      syncUrlParameter(activePresetQuery);
+    } catch (err) {
+      console.error('Failed to load compliance documents batch:', err);
+      this.store.loadError = err instanceof Error ? err.message : 'Failed to load compliance documents.';
+    } finally {
+      this.isAddingToWorkspace = originalIsAdding;
       this.store.isLoadingDocument = false;
       this.store.loadingProgress = null;
     }
@@ -966,6 +1096,9 @@ export class EditorActions {
     this.store.pageCount = 0;
     this.store.currentPageIndex = 0;
     this.store.isDocumentLoaded = false;
+    this.store.selectMode = 'select';
+    this.store.leftPanelCollapsed = true;
+    this.store.rightPanelCollapsed = true;
     this.clearSelection(false);
     useSelection().clear();
     if (this.canvasStore) {
@@ -980,10 +1113,19 @@ export class EditorActions {
     this.store.showOcrDialog = false;
   }
 
+  /**
+   * Loads a document buffer as the active document, converting non-PDF inputs first.
+   *
+   * @param buffer Document bytes.
+   * @param fileName Display file name.
+   * @param addToWorkspace Whether to keep existing workspace files open.
+   * @param password Password for encrypted buffers; a wrong or missing one opens the password prompt.
+   */
   async loadDocumentFromBuffer(
     buffer: ArrayBuffer,
     fileName: string,
     addToWorkspace?: boolean,
+    password: string = '',
   ): Promise<void> {
     if (!this.store.isInitialized) {
       await this.initializeEngine();
@@ -1020,10 +1162,16 @@ export class EditorActions {
     }
 
     try {
-      this.service.loadDocumentFromBuffer(finalBuffer);
+      if (password) {
+        this.service.loadDocumentFromBuffer(finalBuffer, password);
+      } else {
+        this.service.loadDocumentFromBuffer(finalBuffer);
+      }
       this.store.fileName = finalFileName;
       this.store.currentPageIndex = 0;
       this.store.isDocumentLoaded = true;
+      this.store.leftPanelCollapsed = false;
+      this.store.rightPanelCollapsed = false;
       this.clearSelection(false);
       useSelection().clear();
       this.store.pageTransforms = {};
@@ -1052,6 +1200,10 @@ export class EditorActions {
 
       const newFileId = crypto.randomUUID();
       setFileBuffer(newFileId, finalBuffer);
+      setFileCredential(newFileId, password);
+      this.isWorkspaceBufferDirty = false;
+      this.backgroundDeletedPageIndices.clear();
+      this.pendingDocumentCommits = [];
       this.service.addFile({
         id: newFileId,
         fileName: finalFileName,
@@ -1394,6 +1546,8 @@ export class EditorActions {
               inferImageMimeType(secondaryFile.fileName),
               targetIndex,
             );
+          } else if (typeof this.service.document.mergeAsync === 'function') {
+            await this.service.document.mergeAsync(fileBuf, targetIndex);
           } else {
             this.service.document.merge(fileBuf, targetIndex);
           }
@@ -1506,14 +1660,26 @@ export class EditorActions {
    */
   commitActiveEdits(): void {
     if (typeof document !== 'undefined' && document.activeElement) {
-      const el = document.activeElement as { blur?: () => void };
-      if (typeof el.blur === 'function') {
-        el.blur();
+      const activeEl = document.activeElement;
+      const isFormField = typeof activeEl.closest === 'function' && Boolean(
+        activeEl.closest('.pdf-form-layer') ||
+        activeEl.closest('.pdf-form-field-wrapper') ||
+        activeEl.closest('[data-pdf-form-layer="true"]')
+      );
+      if (!isFormField) {
+        const el = activeEl as { blur?: () => void };
+        if (typeof el.blur === 'function') {
+          el.blur();
+        }
       }
     }
 
     if (this.store.inlineEdit) {
       this.submitInlineEdit();
+    }
+
+    if (this.canvasStore && this.canvasStore.editingElementId) {
+      this.canvasStore.editingElementId = null;
     }
 
     if (typeof window !== 'undefined' && typeof window.getSelection === 'function') {
@@ -1528,6 +1694,12 @@ export class EditorActions {
   
   async saveActiveFileToWorkspace(): Promise<void> {
     if (this.store.activeWorkspaceFileId && this.store.isDocumentLoaded) {
+      if (this.pendingRotatedPages.size > 0 || this.pendingRotationCommands.length > 0) {
+        await this.commitPendingRotations();
+      }
+      if (this.pendingDocumentCommits.length > 0) {
+        this.commitPendingDocumentMutations();
+      }
       const currentActiveFile = this.service.getFile(this.store.activeWorkspaceFileId);
       if (currentActiveFile) {
         // Synchronously flush in-flight edits before capturing state
@@ -1546,11 +1718,17 @@ export class EditorActions {
           currentActiveFile.currentPageIndex = this.store.currentPageIndex;
           currentActiveFile.pageVersions = { ...this.store.pageVersions };
           currentActiveFile.scannedPages = Array.from(this.store.scannedPages);
+          currentActiveFile.pageCount = this.store.pageCount;
+          if (typeof this.service.document?.getModifiedFormFieldValues === 'function') {
+            currentActiveFile.formFieldValues = Object.fromEntries(
+              this.service.document.getModifiedFormFieldValues()
+            );
+          }
         } catch (err) {
           console.warn('Failed to snapshot interactive file state to workspace:', err);
         }
 
-        // Serialize active WASM document state in an isolated block
+        // Serialise active WASM document state in an isolated block
         try {
           const latestBuffer = this.service.document.save();
           const bufferArray = latestBuffer.buffer.slice(
@@ -1558,6 +1736,8 @@ export class EditorActions {
             latestBuffer.byteOffset + latestBuffer.byteLength
           ) as ArrayBuffer;
           setFileBuffer(currentActiveFile.id, bufferArray);
+          setFileCredential(currentActiveFile.id, this.getActiveSecurityCredential());
+          this.isWorkspaceBufferDirty = false;
           currentActiveFile.sizeBytes = bufferArray.byteLength;
         } catch (err) {
           console.warn('Failed to export WASM document buffer to workspace:', err);
@@ -1600,11 +1780,41 @@ export class EditorActions {
         }
       }
 
+      // Reset optimistic page transforms and order so new file does not inherit prior state
+      optimisticActionManager.clearChains();
+      this.pendingRotatedPages.clear();
+      this.pendingRotationCommands = [];
+      this.pendingDocumentCommits = [];
+      this.backgroundDeletedPageIndices.clear();
+      this.isWorkspaceBufferDirty = false;
+      this.store.optimisticPageOrder = null;
+      if (typeof this.store.optimisticDeletedPageIndices?.clear === 'function') {
+        this.store.optimisticDeletedPageIndices.clear();
+      }
+      if (this.store.optimisticRotations) {
+        this.store.optimisticRotations = {};
+      }
+      this.store.clearPendingRenderRotation?.();
+
       // Load document buffer into WASM engine
-      this.service.loadDocumentFromBuffer(fileBuffer);
+      const credential = getFileCredential(id);
+      if (credential) {
+        this.service.loadDocumentFromBuffer(fileBuffer, credential);
+      } else {
+        this.service.loadDocumentFromBuffer(fileBuffer);
+      }
+      if (file.formFieldValues && typeof this.service.document?.setAllFormFieldValues === 'function') {
+        this.service.document.setAllFormFieldValues(file.formFieldValues);
+      }
       this.store.fileName = file.fileName;
       this.store.isDocumentLoaded = true;
-      this.store.pageCount = this.service.document.getPageCount();
+      this.store.leftPanelCollapsed = false;
+      this.store.rightPanelCollapsed = false;
+      const count = typeof this.service.document?.getPageCount === 'function'
+        ? this.service.document.getPageCount()
+        : (file.pageCount ?? 1);
+      this.store.pageCount = count;
+      file.pageCount = count;
       this.store.activeWorkspaceFileId = id;
       this.store.currentPageIndex = Math.min(
         file.currentPageIndex ?? 0,
@@ -1653,9 +1863,9 @@ export class EditorActions {
     }
   }
 
-  // -- Document refresh --
+  // Document refresh
 
-  refreshDocument(): void {
+  refreshDocument(options?: { incrementRenderVersion?: boolean }): void {
     if (!this.store.isDocumentLoaded || !this.service?.document || typeof this.service.document.getPageCount !== 'function') return;
     this.store.pageCount = this.service.document.getPageCount();
     this.store.currentPageIndex = Math.min(
@@ -1675,13 +1885,23 @@ export class EditorActions {
       }
     }
 
-    this.store.incrementRenderVersion();
+    if (options?.incrementRenderVersion !== false) {
+      this.store.incrementRenderVersion();
+    }
   }
 
   // -- Navigation --
 
   registerScrollCallback(cb: ScrollCallback): void {
     this.scrollCallback = cb;
+  }
+
+  registerPageCenterPreserver(preserver: PageCenterPreserver): void {
+    this.pageCenterPreserver = preserver;
+  }
+
+  registerZoomChangeCallback(cb: ZoomChangeCallback | null): void {
+    this.zoomChangeCallback = cb;
   }
 
   goToPage(index: number, options?: ScrollTargetOptions): void {
@@ -1695,8 +1915,22 @@ export class EditorActions {
   }
 
   /**
+   * Navigates to a 1-based visual page number, clamping to valid document bounds.
+   *
+   * @param pageNumber The 1-based visual page number to navigate to.
+   * @param options Optional scroll target configuration.
+   */
+  goToPageNumber(pageNumber: number, options?: ScrollTargetOptions): void {
+    if (!this.store.isDocumentLoaded || this.store.pageCount <= 0) return;
+    if (!Number.isFinite(pageNumber)) return;
+    const clampedPage = Math.max(1, Math.min(this.store.pageCount, Math.trunc(pageNumber)));
+    const targetIndex = this.store.getEffectivePageIndex(clampedPage - 1);
+    this.goToPage(targetIndex, options);
+  }
+
+  /**
    * Navigates to an outline bookmark and selects/focuses the corresponding text on that page.
-   * Matches both canvas text elements and PDF text spans using exact, whitespace-normalized,
+   * Matches both canvas text elements and PDF text spans using exact, whitespace-normalised,
    * case-insensitive, and substring comparisons, disambiguated by destY when available.
    *
    * @param item The outline item to navigate to and select.
@@ -1739,10 +1973,10 @@ export class EditorActions {
 
     const candidates: OutlineMatchCandidate[] = [];
 
-    // 1. Check canvas text elements on target page
+    // Check canvas text elements on target page
     if (this.canvasStore) {
-      const canvasTextEls = this.canvasStore.elements.filter(
-        (el): el is TextElement => el.kind === 'text' && el.pageIndex === pageIndex
+      const canvasTextEls = this.canvasStore.getElementsByPage(pageIndex).filter(
+        (el): el is TextElement => el.kind === 'text'
       );
       for (const el of canvasTextEls) {
         const text = (el.text || '').trim();
@@ -1773,9 +2007,9 @@ export class EditorActions {
       }
     }
 
-    // 2. Check PDF text spans on target page
+    // Check PDF text spans on target page
     try {
-      const pageSpans = this.service.document.getPage(pageIndex).extractTextSpans();
+      const pageSpans = this.getPageTextSpansFast(pageIndex);
       for (const span of pageSpans) {
         const text = (span.text || '').trim();
         if (!text) continue;
@@ -1817,7 +2051,7 @@ export class EditorActions {
 
     if (bestMatch) {
       if (bestMatch.type === 'canvas' && bestMatch.canvasElement) {
-        this.clearSelection(true);
+        this.clearSelection(true, false);
         this.canvasStore?.selectElement(bestMatch.canvasElement.id);
         this.scrollCallback?.(pageIndex, { targetTop: bestMatch.canvasElement.y, behavior: 'smooth' });
 
@@ -1909,10 +2143,30 @@ export class EditorActions {
     this.store.clearSelection();
   }
 
+  /**
+   * Sets the selection mode across cluster, view mode text select, and precise word select.
+   *
+   * @param mode The selection mode identifier.
+   */
+  setSelectMode(mode: SelectMode): void {
+    this.store.selectMode = mode;
+    this.clearSelection(true);
+    if (this.canvasStore) {
+      this.canvasStore.selectElement(null);
+    }
+    if (this.store.viewMode === 'viewing' && mode !== 'text') {
+      this.store.setViewMode('editing');
+    }
+    if (this.store.activeTool !== 'select') {
+      this.setTool('select');
+    }
+  }
+
   // -- Zoom --
 
   setZoom(zoom: number, isContinuous: boolean = false): void {
     const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom));
+    const prevZoom = this.store.zoom;
     this.store.zoom = clamped;
 
     if (isContinuous) {
@@ -1930,6 +2184,9 @@ export class EditorActions {
         this.zoomDebounceTimer = null;
       }
       this.store.isZooming = false;
+      if (this.zoomChangeCallback && prevZoom !== clamped) {
+        this.zoomChangeCallback(prevZoom, clamped, false);
+      }
     }
   }
 
@@ -1953,17 +2210,39 @@ export class EditorActions {
       clearTimeout(this.zoomDebounceTimer);
       this.zoomDebounceTimer = null;
     }
+    this.zoomChangeCallback = null;
   }
 
   // -- Text & Object editing --
+
+  /**
+   * Resolves text spans for a page using the in-memory span cache when available
+   * before falling back to synchronous PDFium WASM extraction.
+   *
+   * @param pageIndex Zero-based page index.
+   * @return Extracted or cached text spans for the page.
+   */
+  private getPageTextSpansFast(pageIndex: number): EditableTextSpan[] {
+    const fastEnabled = this.featureFlags
+      ? this.featureFlags.isEnabled('performance.fast-element-interaction')
+      : true;
+    if (fastEnabled && typeof this.service.document.getCachedPageSpans === 'function') {
+      const cached = this.service.document.getCachedPageSpans(pageIndex);
+      if (cached && Array.isArray(cached.textSpans)) {
+        return cached.textSpans;
+      }
+    }
+    return this.service.document.getPage(pageIndex).extractTextSpans();
+  }
 
   /**
    * Clears any active span or object selection.
    * Optionally commits active inline edits before clearing.
    *
    * @param commitActiveEdit Whether to submit active inline edits before clearing.
+   * @param clearCanvasSelection Whether to also clear active canvas element selection.
    */
-  clearSelection(commitActiveEdit: boolean = true): void {
+  clearSelection(commitActiveEdit: boolean = true, clearCanvasSelection: boolean = true): void {
     if (commitActiveEdit) {
       this.commitActiveEdits();
     } else {
@@ -1974,15 +2253,100 @@ export class EditorActions {
         }
       }
       if (typeof document !== 'undefined' && document.activeElement) {
-        const el = document.activeElement as { blur?: () => void };
-        if (typeof el.blur === 'function') {
-          el.blur();
+        const activeEl = document.activeElement;
+        const isFormField = typeof activeEl.closest === 'function' && Boolean(
+          activeEl.closest('.pdf-form-layer') ||
+          activeEl.closest('.pdf-form-field-wrapper') ||
+          activeEl.closest('[data-pdf-form-layer="true"]')
+        );
+        if (!isFormField) {
+          const el = activeEl as { blur?: () => void };
+          if (typeof el.blur === 'function') {
+            el.blur();
+          }
         }
       }
     }
     this.store.clearSelection();
-    if (this.canvasStore) {
+    if (clearCanvasSelection && this.canvasStore) {
       this.canvasStore.selectElement(null);
+    }
+  }
+
+  /**
+   * Selects all items within the active or specified workspace section.
+   * Resolves target section from the provided argument, active DOM element,
+   * selection store active section, or last selected item prefix, falling back
+   * to document pages.
+   */
+  selectAllInWorkspaceSection(targetSection?: WorkspaceSection): void {
+    if (this.featureFlags && !this.featureFlags.isEnabled('workspace.select-all')) {
+      return;
+    }
+
+    const selection = useSelection();
+    let resolvedSection = targetSection;
+
+    if (!resolvedSection) {
+      if (typeof document !== 'undefined' && document.activeElement) {
+        const sectionEl = document.activeElement.closest('[data-workspace-section]');
+        const sectionAttr = sectionEl?.getAttribute('data-workspace-section') as WorkspaceSection | null;
+        if (sectionAttr) {
+          resolvedSection = sectionAttr;
+        }
+      }
+    }
+
+    if (!resolvedSection) {
+      resolvedSection = selection.activeSection ?? undefined;
+    }
+
+    if (!resolvedSection && selection.lastSelectedId) {
+      if (selection.lastSelectedId.startsWith('file_')) {
+        resolvedSection = 'files';
+      } else if (selection.lastSelectedId.startsWith('page_')) {
+        resolvedSection = 'pages';
+      } else if (selection.lastSelectedId.startsWith('outline_')) {
+        resolvedSection = 'outline';
+      }
+    }
+
+    if (!resolvedSection) {
+      resolvedSection = 'pages';
+    }
+
+    if (
+      resolvedSection === 'files' &&
+      (!this.store.workspaceFiles.length || (this.featureFlags && !this.featureFlags.isEnabled('workspace.files')))
+    ) {
+      resolvedSection = 'pages';
+    }
+
+    if (resolvedSection === 'outline' && this.featureFlags && !this.featureFlags.isEnabled('outline')) {
+      resolvedSection = 'pages';
+    }
+
+    if (resolvedSection === 'files') {
+      if (this.store.workspaceFiles.length === 0) return;
+      selection.selectAll(this.store.workspaceFiles.map((f) => `file_${f.id}`));
+    } else if (resolvedSection === 'outline') {
+      if (!this.store.isDocumentLoaded) return;
+      try {
+        const nodes = this.service.document.getOutline();
+        const flat = flattenOutlineTree(nodes);
+        if (flat.length === 0) return;
+        selection.selectAll(flat.map((it, idx) => `outline_${it.title}_${idx}`));
+      } catch {
+        selection.selectAll([]);
+      }
+    } else {
+      if (!this.store.isDocumentLoaded || this.store.pageCount === 0) return;
+      const order = this.store.effectivePageOrder;
+      selection.selectAll(
+        order
+          .filter((idx) => !this.store.isPageOptimisticallyDeleted(idx))
+          .map((idx) => `page_${idx}`)
+      );
     }
   }
 
@@ -2011,8 +2375,9 @@ export class EditorActions {
    * from the refreshed page data to guarantee up-to-date metrics and IDs.
    *
    * @param span The span to select.
+   * @param isMulti Whether to toggle or append to multi-selection.
    */
-  selectSpan(span: EditableSpan): void {
+  selectSpan(span: EditableSpan, isMulti: boolean = false): void {
     if (this.store.isReadOnly || this.store.canSelectElements === false) {
       return;
     }
@@ -2020,8 +2385,22 @@ export class EditorActions {
       this.submitInlineEdit();
     }
     if (span.type === 'text' && !(span as EditableTextSpan).isOcr && this.store.isDocumentLoaded) {
+      if ((span as EditableTextSpan).isWordSpan || this.store.selectMode === 'precise') {
+        const textSpan = span as EditableTextSpan;
+        const fontCandidate = textSpan.rawFontFamily || textSpan.fontFamily;
+        if (fontCandidate) {
+          const match = findClosestGoogleFont(fontCandidate);
+          if (match && match.confidence >= 0.65) {
+            textSpan.matchedFontFamily = match.font;
+            loadGoogleFont(match.font);
+          }
+        }
+        this.applySpanSelection(textSpan, isMulti);
+        this.store.inlineEdit = null;
+        return;
+      }
       try {
-        const pageSpans = this.service.document.getPage(span.pageIndex).extractTextSpans();
+        const pageSpans = this.getPageTextSpansFast(span.pageIndex);
         let freshSpan = pageSpans.find((s) => s.id === span.id);
         if (!freshSpan) {
           let minDistance = Infinity;
@@ -2035,18 +2414,26 @@ export class EditorActions {
         }
         const resolved = freshSpan || span;
         if (resolved.type === 'text') {
-          const fontCandidate = (resolved as EditableTextSpan).rawFontFamily || (resolved as EditableTextSpan).fontFamily;
+          const srcTextSpan = span as EditableTextSpan;
+          const resTextSpan = resolved as EditableTextSpan;
+          if (srcTextSpan.textAlign && !resTextSpan.textAlign) {
+            resTextSpan.textAlign = srcTextSpan.textAlign;
+          }
+          if (srcTextSpan.originalLeft !== undefined && resTextSpan.originalLeft === undefined) {
+            resTextSpan.originalLeft = srcTextSpan.originalLeft;
+          }
+          const fontCandidate = resTextSpan.rawFontFamily || resTextSpan.fontFamily;
           if (fontCandidate) {
             const match = findClosestGoogleFont(fontCandidate);
             if (match && match.confidence >= 0.65) {
-              (resolved as EditableTextSpan).matchedFontFamily = match.font;
+              resTextSpan.matchedFontFamily = match.font;
               loadGoogleFont(match.font);
             }
           }
         }
-        this.store.selectedSpan = resolved;
+        this.applySpanSelection(resolved, isMulti);
       } catch {
-        this.store.selectedSpan = span;
+        this.applySpanSelection(span, isMulti);
       }
     } else {
       if (span.type === 'text') {
@@ -2059,6 +2446,22 @@ export class EditorActions {
           }
         }
       }
+      this.applySpanSelection(span, isMulti);
+    }
+    this.store.inlineEdit = null;
+  }
+
+  /**
+   * Applies span selection to the editor store, supporting single-select or multi-select toggling.
+   */
+  private applySpanSelection(span: EditableSpan, isMulti: boolean): void {
+    if (isMulti) {
+      if (this.store.isSpanSelected(span.id)) {
+        this.store.selectedSpans = this.store.selectedSpans.filter((s) => s.id !== span.id);
+      } else {
+        this.store.selectedSpans = [...this.store.selectedSpans, span];
+      }
+    } else {
       this.store.selectedSpan = span;
     }
     this.store.inlineEdit = null;
