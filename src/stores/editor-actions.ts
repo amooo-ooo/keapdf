@@ -3433,6 +3433,20 @@ export class EditorActions {
    * Returns an undo command if a canvas element was deleted, or null if handled by PDF mutation.
    */
   async eraseCandidate(candidate: ErasableCandidate): Promise<Command | null> {
+    const isAnnotationCategory =
+      candidate.category === 'highlight' ||
+      candidate.category === 'drawing' ||
+      candidate.category === 'note' ||
+      candidate.category === 'redaction';
+
+    if (this.store.canDeleteElements === false) {
+      if (!this.store.canAnnotate || !isAnnotationCategory) {
+        return null;
+      }
+    } else if (this.store.isReadOnly && !this.store.canAnnotate) {
+      return null;
+    }
+
     const targetElementId = candidate.canvasElementId || candidate.canvasElement?.id;
     if (candidate.source === 'canvas' && targetElementId && this.canvasStore) {
       const el = this.canvasStore.getElementById(targetElementId);
@@ -3447,10 +3461,18 @@ export class EditorActions {
     }
 
     if (candidate.source === 'pdf-annotation' && typeof candidate.pdfAnnotIndex === 'number') {
+      if (candidate.pdfSpanId) {
+        this.store.hiddenSpanIds.add(candidate.pdfSpanId);
+      }
       if (this.service?.document) {
         const page = this.service.document.getPage(candidate.pageIndex);
-        page.removeAnnotation(candidate.pdfAnnotIndex);
-        page.generateContent();
+        page.removeAnnotation(candidate.pdfAnnotIndex, {
+          left: candidate.bounds.x,
+          top: candidate.bounds.y,
+          width: candidate.bounds.width,
+          height: candidate.bounds.height,
+        });
+        page.generateContent?.();
         this.service.document.invalidatePage(candidate.pageIndex);
         this.store.incrementPageVersion(candidate.pageIndex);
         this.refreshDocument();
@@ -3459,10 +3481,13 @@ export class EditorActions {
     }
 
     if (candidate.source === 'pdf-shape' && typeof candidate.pdfObjectIndex === 'number') {
+      if (candidate.pdfSpanId) {
+        this.store.hiddenSpanIds.add(candidate.pdfSpanId);
+      }
       if (this.service?.document) {
         const page = this.service.document.getPage(candidate.pageIndex);
         page.removeObject(candidate.pdfObjectIndex);
-        page.generateContent();
+        page.generateContent?.();
         this.service.document.invalidatePage(candidate.pageIndex);
         this.store.incrementPageVersion(candidate.pageIndex);
         this.refreshDocument();
@@ -3527,18 +3552,21 @@ export class EditorActions {
         setFileBuffer(fileId, newBuffer);
         const newElements = this.canvasStore ? safeClone(this.canvasStore.elements) : [];
 
-        this.pushCommand(
-          new MutateDocumentCommand(
-            'Erase Annotations',
-            fileId,
-            prevBuffer,
-            newBuffer,
-            pageIndex,
-            pageIndex,
-            prevElements,
-            newElements
-          )
+        const mutateCmd = new MutateDocumentCommand(
+          'Erase Annotations',
+          fileId,
+          prevBuffer,
+          newBuffer,
+          pageIndex,
+          pageIndex,
+          prevElements,
+          newElements
         );
+        if (prevElements === undefined && canvasCommands.length > 0) {
+          this.pushCommand(new CompoundCommand('Erase Annotations', [...canvasCommands, mutateCmd]));
+        } else {
+          this.pushCommand(mutateCmd);
+        }
         return;
       } catch (err) {
         console.error('Failed to commit PDF eraser stroke:', err);
@@ -3571,6 +3599,9 @@ export class EditorActions {
     canvasStore: CanvasStore
   ): Promise<void> {
     if (!this.store.isDocumentLoaded || rects.length === 0) return;
+    if (!this.canvasStore && canvasStore) {
+      this.canvasStore = canvasStore;
+    }
 
     if (isSyntheticCanvasCharIndex(startCharIndex) || isSyntheticCanvasCharIndex(endCharIndex)) {
       // Redaction targeting a canvas layer TextElement
@@ -3579,14 +3610,22 @@ export class EditorActions {
       const targetElement = startResolved?.element || endResolved?.element;
 
       if (targetElement) {
-        const startOffset = startResolved ? startResolved.charOffset : 0;
-        const endOffset = endResolved ? endResolved.charOffset : targetElement.text.length - 1;
+        const validStartOffset =
+          startResolved && startResolved.element.id === targetElement.id
+            ? startResolved.charOffset
+            : null;
+        const validEndOffset =
+          endResolved && endResolved.element.id === targetElement.id
+            ? endResolved.charOffset
+            : null;
+        const startOffset = validStartOffset ?? validEndOffset ?? 0;
+        const endOffset = validEndOffset ?? validStartOffset ?? 0;
         const minOffset = Math.min(startOffset, endOffset);
         const maxOffset = Math.max(startOffset, endOffset);
 
         const chars = Array.from(targetElement.text);
         const updatedText = chars
-          .map((ch, idx) => (idx >= minOffset && idx <= maxOffset ? ' ' : ch))
+          .map((ch, idx) => (idx >= minOffset && idx <= maxOffset && ch !== '\n' && ch !== '\r' ? ' ' : ch))
           .join('');
 
         const oldProps: Partial<TextElement> = { text: targetElement.text };
@@ -3629,6 +3668,46 @@ export class EditorActions {
             }
           }
           newProps.lines = updatedLines;
+        }
+
+        if (targetElement.segments && targetElement.segments.length > 0) {
+          oldProps.segments = safeClone(targetElement.segments);
+          const updatedSegments: TextSegment[] = safeClone(targetElement.segments);
+          let segOffset = 0;
+          for (const seg of updatedSegments) {
+            const segChars = Array.from(seg.text);
+            seg.text = segChars
+              .map((ch, sIdx) => {
+                const currentGlobal = segOffset + sIdx;
+                return currentGlobal >= minOffset && currentGlobal <= maxOffset ? ' ' : ch;
+              })
+              .join('');
+            segOffset += segChars.length;
+          }
+          newProps.segments = updatedSegments;
+        }
+
+        if (targetElement.originalSpan) {
+          oldProps.originalSpan = safeClone(targetElement.originalSpan);
+          const scrubbedSpan = safeClone(targetElement.originalSpan);
+          const spanChars = Array.from(scrubbedSpan.text || '');
+          scrubbedSpan.text = spanChars
+            .map((ch, idx) => (idx >= minOffset && idx <= maxOffset && ch !== '\n' && ch !== '\r' ? ' ' : ch))
+            .join('');
+          newProps.originalSpan = scrubbedSpan;
+
+          if (
+            typeof targetElement.originalSpan.charStartIndex === 'number' &&
+            targetElement.originalSpan.charStartIndex >= 0 &&
+            typeof this.service?.document?.redactTextRange === 'function'
+          ) {
+            try {
+              const baseCharIdx = targetElement.originalSpan.charStartIndex;
+              this.service.document.redactTextRange(pageIndex, baseCharIdx + minOffset, baseCharIdx + maxOffset);
+            } catch {
+              // Best-effort native PDF stream scrub for promoted span
+            }
+          }
         }
 
         const addedCommands: Command[] = [
@@ -3679,6 +3758,7 @@ export class EditorActions {
         this.service.document.redactTextRange(pageIndex, startCharIndex, endCharIndex);
 
         for (const rect of rects) {
+          if (rect.width <= 0 || rect.height <= 0) continue;
           canvasStore.addElement({
             id: canvasStore.generateId(),
             kind: 'shape',
@@ -3717,13 +3797,17 @@ export class EditorActions {
    */
   async redactArea(pageIndex: number, rects: HighlightRect[], canvasStore: CanvasStore): Promise<void> {
     if (!this.store.isDocumentLoaded || rects.length === 0) return;
+    if (!this.canvasStore && canvasStore) {
+      this.canvasStore = canvasStore;
+    }
 
     await this.executeDocumentMutation('Redact Area', pageIndex, () => {
       this.service.document.deleteTextInRects(pageIndex, rects);
 
-      // Purge or remove canvas elements on this page that are fully covered by any redaction rect
-      const pageElements = canvasStore.getElementsByPage(pageIndex);
+      // Purge or scrub canvas elements on this page that are covered by any redaction rect
+      const pageElements = [...canvasStore.getElementsByPage(pageIndex)];
       for (const el of pageElements) {
+        if (el.locked) continue;
         if (el.kind === 'shape' && el.fill === '#000000' && el.strokeWidth === 0) {
           continue; // preserve existing blackout rectangles
         }
@@ -3740,6 +3824,15 @@ export class EditorActions {
             elBottom <= rectBottom + 2;
 
           if (isFullyCovered) {
+            if (el.kind === 'text' && (el as TextElement).originalSpan && typeof this.service.document.deleteTextInRects === 'function') {
+              const span = (el as TextElement).originalSpan!;
+              this.service.document.deleteTextInRects(pageIndex, [{
+                x: span.left,
+                y: span.top,
+                width: span.width,
+                height: span.height,
+              }]);
+            }
             canvasStore.removeElement(el.id);
             break;
           }
@@ -3747,6 +3840,7 @@ export class EditorActions {
       }
 
       for (const rect of rects) {
+        if (rect.width <= 0 || rect.height <= 0) continue;
         canvasStore.addElement({
           id: canvasStore.generateId(),
           kind: 'shape',
@@ -3800,28 +3894,188 @@ export class EditorActions {
     return [defaultIndex];
   }
 
-  // -- Page operations --
+  // Page operations
 
-  rotatePage(index: number): void {
-    if (!this.store.isDocumentLoaded || this.store.isReadOnly) return;
-    const indices = this.getTargetPageIndices(index);
-    if (indices.length === 1) {
-      this.executeCommand(new RotatePageCommand('Rotate Page', indices[0], 90));
-    } else {
-      const commands = indices.map((idx) => new RotatePageCommand('Rotate Page', idx, 90));
-      this.executeCommand(new CompoundCommand('Rotate Pages', commands));
+  rotatePage(index: number | number[], degreesDelta: 90 | 180 | 270 = 90): Promise<void> {
+    const useOptimistic = !this.featureFlags || (
+      this.featureFlags.isEnabled('performance.optimistic-actions') &&
+      this.featureFlags.isEnabled('performance.optimistic-actions.rotation')
+    );
+    const useMutationQueue = useOptimistic && this.isMutationQueueEnabled();
+    if (!this.store.isDocumentLoaded || this.store.isReadOnly || (!useMutationQueue && this.store.isMutating)) {
+      return Promise.resolve();
     }
-    this.refreshDocument();
+    const indices = Array.isArray(index) ? index : this.getTargetPageIndices(index);
+    if (this.store.inlineEdit) {
+      this.submitInlineEdit();
+    }
+
+    const primaryIndex = indices.includes(this.store.currentPageIndex)
+      ? this.store.currentPageIndex
+      : (indices[0] ?? this.store.currentPageIndex);
+    const restoreCenter = this.pageCenterPreserver?.(primaryIndex) ?? null;
+
+    if (!useOptimistic) {
+      return (async () => {
+        if (indices.length === 1) {
+          await this.executeCommand(new RotatePageCommand('Rotate Page', indices[0], degreesDelta));
+        } else {
+          const commands = indices.map((idx, i) => new RotatePageCommand(
+            'Rotate Page',
+            idx,
+            degreesDelta,
+            i === indices.length - 1,
+            i === 0,
+          ));
+          await this.executeCommand(new CompoundCommand('Rotate Pages', commands));
+        }
+        if (indices.includes(0)) {
+          this.refreshDocument();
+        }
+        await tick();
+        restoreCenter?.();
+      })();
+    }
+
+    let reconciledInCommand = false;
+
+    return optimisticActionManager.enqueueRotation(
+      indices,
+      degreesDelta,
+      () => {
+        for (const idx of indices) {
+          this.store.addOptimisticRotation(idx, degreesDelta);
+        }
+        void tick().then(() => {
+          restoreCenter?.();
+        });
+      },
+      async () => {
+        if (useMutationQueue) {
+          for (const idx of indices) {
+            this.pendingRotatedPages.add(idx);
+          }
+          if (indices.length === 1) {
+            const cmd = new RotatePageCommand(
+              'Rotate Page',
+              indices[0],
+              degreesDelta,
+              false,
+              true,
+              false,
+            );
+            this.pendingRotationCommands.push(cmd);
+            await this.executeCommand(cmd);
+          } else {
+            const commands = indices.map((idx, i) => new RotatePageCommand(
+              'Rotate Page',
+              idx,
+              degreesDelta,
+              false,
+              i === 0,
+              false,
+            ));
+            this.pendingRotationCommands.push(...commands);
+            await this.executeCommand(new CompoundCommand('Rotate Pages', commands));
+          }
+          reconciledInCommand = true;
+          return;
+        }
+
+        if (indices.length === 1) {
+          await this.executeCommand(new RotatePageCommand('Rotate Page', indices[0], degreesDelta));
+        } else {
+          const commands = indices.map((idx, i) => new RotatePageCommand(
+            'Rotate Page',
+            idx,
+            degreesDelta,
+            i === indices.length - 1,
+            i === 0,
+          ));
+          await this.executeCommand(new CompoundCommand('Rotate Pages', commands));
+        }
+        reconciledInCommand = true;
+        if (indices.includes(0)) {
+          this.refreshDocument({ incrementRenderVersion: false });
+        }
+      },
+      () => {
+        if (!reconciledInCommand) {
+          for (const idx of indices) {
+            this.store.subtractOptimisticRotation(idx, degreesDelta);
+          }
+        }
+      },
+      () => {
+        if (!reconciledInCommand) {
+          for (const idx of indices) {
+            this.store.subtractOptimisticRotation(idx, degreesDelta);
+          }
+        }
+        if (
+          !optimisticActionManager.hasPendingMutations &&
+          (this.pendingRotatedPages.size > 0 || this.pendingRotationCommands.length > 0)
+        ) {
+          void this.commitPendingRotations();
+        }
+      },
+      useMutationQueue
+        ? () => this.commitPendingRotations()
+        : undefined,
+    );
   }
 
   async flattenPage(index: number): Promise<void> {
     if (!this.store.isDocumentLoaded) return;
     const indices = this.getTargetPageIndices(index);
-    await this.executeDocumentMutation('Flatten Page', this.store.currentPageIndex, () => {
-      for (const idx of indices) {
-        this.service.document.flattenPage(idx);
-      }
-    });
+    const useQueue = this.isMutationQueueEnabled();
+    const targetPage = indices.length === 1 ? indices[0] : this.store.currentPageIndex;
+    if (useQueue) {
+      await optimisticActionManager.enqueueMutation({
+        description: 'Flatten Page',
+        commitKey: 'document-mutation',
+        executeProgrammatic: async () => {
+          await this.executeDocumentMutation(
+            'Flatten Page',
+            targetPage,
+            () => {
+              for (const idx of indices) {
+                this.service.document.flattenPage(idx);
+              }
+            },
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            {
+              deferCommit: true,
+              onlyIncrementTargetPageVersion: indices.length === 1,
+            },
+          );
+        },
+        onQueueDrained: () => this.commitPendingDocumentMutations(),
+        suppressError: true,
+      });
+      return;
+    }
+    await this.executeDocumentMutation(
+      'Flatten Page',
+      targetPage,
+      () => {
+        for (const idx of indices) {
+          this.service.document.flattenPage(idx);
+        }
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { onlyIncrementTargetPageVersion: indices.length === 1 },
+    );
   }
 
   async rasterizePage(index: number): Promise<void> {
@@ -3849,6 +4103,7 @@ export class EditorActions {
 
   async startCropMode(pageIndex?: number, unit: CropUnit = 'pt', scope: CropScope = 'current'): Promise<void> {
     if (!this.store.isDocumentLoaded || this.store.isReadOnly || this.store.canMutateDocument === false) return;
+    this.commitActiveEdits();
     const targetIdx = pageIndex ?? this.store.currentPageIndex;
 
     const hasTransforms = Object.values(this.store.pageTransforms).some(
@@ -3936,29 +4191,35 @@ export class EditorActions {
 
     await this.executeDocumentMutation('Crop Page', pageIndex, async () => {
       const { cropPages } = await import('../services/pdf/operations/crop-ops');
-      const buffer = await this.service.document.saveAsync(this.store.pageTransforms);
-      const croppedBytes = await cropPages(buffer, {
-        pageIndices: targetIndices,
-        margins,
-      });
+      const croppedBytes = await this.service.document.rewrite(
+        (bytes) => cropPages(bytes, { pageIndices: targetIndices, margins }),
+        this.store.pageTransforms,
+      );
 
       const croppedBuffer = croppedBytes.buffer.slice(
         croppedBytes.byteOffset,
         croppedBytes.byteOffset + croppedBytes.byteLength,
       ) as ArrayBuffer;
 
-      this.service.loadDocumentFromBuffer(croppedBuffer);
+      this.reloadActiveDocument(croppedBuffer);
       this.store.pageTransforms = {};
 
       // Adjust canvas elements on cropped pages by subtracting top/left margins
       if (this.canvasStore && (margins.left !== 0 || margins.top !== 0)) {
         this.canvasStore.elements = this.canvasStore.elements.map((el) => {
           if (targetSet.has(el.pageIndex)) {
-            return {
+            const updated: CanvasElement = {
               ...el,
               x: el.x - margins.left,
               y: el.y - margins.top,
             };
+            if (el.kind === 'path' && Array.isArray((el as PathElement).points)) {
+              (updated as PathElement).points = (el as PathElement).points.map((pt) => ({
+                x: pt.x - margins.left,
+                y: pt.y - margins.top,
+              }));
+            }
+            return updated;
           }
           return el;
         });
@@ -4000,11 +4261,37 @@ export class EditorActions {
         try {
           const page = this.service.document.getPage(idx);
           if (page && 'getCropInfo' in page && typeof page.getCropInfo === 'function') {
-            const cropInfo = page.getCropInfo();
+            const cropInfo = page.getCropInfo() as PageCropInfo & {
+              mediaLeft?: number;
+              mediaBottom?: number;
+              mediaRight?: number;
+              mediaTop?: number;
+            };
             if (cropInfo && (cropInfo.hasCropBox || cropInfo.hasCrop)) {
-              const domCropLeft = cropInfo.domCropLeft ?? cropInfo.marginLeft ?? 0;
-              const domCropTop = cropInfo.domCropTop ?? cropInfo.marginTop ?? 0;
-              pageCropOffsets.set(idx, { left: domCropLeft, top: domCropTop });
+              let domCropLeft = cropInfo.domCropLeft;
+              let domCropTop = cropInfo.domCropTop;
+              if (domCropLeft === undefined || domCropTop === undefined) {
+                const mLeft = cropInfo.marginLeft ?? Math.max(0, (cropInfo.cropLeft ?? 0) - (cropInfo.mediaLeft ?? 0));
+                const mBottom = cropInfo.marginBottom ?? Math.max(0, (cropInfo.cropBottom ?? 0) - (cropInfo.mediaBottom ?? 0));
+                const mRight = cropInfo.marginRight ?? Math.max(0, (cropInfo.mediaRight ?? 0) - (cropInfo.cropRight ?? 0));
+                const mTop = cropInfo.marginTop ?? Math.max(0, (cropInfo.mediaTop ?? 0) - (cropInfo.cropTop ?? 0));
+                const rawRot = cropInfo.rotation ?? 0;
+                const rotIndex = rawRot >= 90 ? (Math.round(rawRot / 90) % 4 + 4) % 4 : ((rawRot % 4) + 4) % 4;
+                if (rotIndex === 1) {
+                  domCropLeft = domCropLeft ?? mBottom;
+                  domCropTop = domCropTop ?? mLeft;
+                } else if (rotIndex === 2) {
+                  domCropLeft = domCropLeft ?? mRight;
+                  domCropTop = domCropTop ?? mBottom;
+                } else if (rotIndex === 3) {
+                  domCropLeft = domCropLeft ?? mTop;
+                  domCropTop = domCropTop ?? mRight;
+                } else {
+                  domCropLeft = domCropLeft ?? mLeft;
+                  domCropTop = domCropTop ?? mTop;
+                }
+              }
+              pageCropOffsets.set(idx, { left: domCropLeft ?? 0, top: domCropTop ?? 0 });
             }
           }
         } catch {
@@ -4015,15 +4302,17 @@ export class EditorActions {
 
     await this.executeDocumentMutation('Reset Page Crop', pageIndex, async () => {
       const { resetCropPages } = await import('../services/pdf/operations/crop-ops');
-      const buffer = await this.service.document.saveAsync(this.store.pageTransforms);
-      const resetBytes = await resetCropPages(buffer, targetIndices);
+      const resetBytes = await this.service.document.rewrite(
+        (bytes) => resetCropPages(bytes, targetIndices),
+        this.store.pageTransforms,
+      );
 
       const resetBuffer = resetBytes.buffer.slice(
         resetBytes.byteOffset,
         resetBytes.byteOffset + resetBytes.byteLength,
       ) as ArrayBuffer;
 
-      this.service.loadDocumentFromBuffer(resetBuffer);
+      this.reloadActiveDocument(resetBuffer);
       this.store.pageTransforms = {};
 
       // Restore canvas element coordinates by adding back the previous crop margins
@@ -4031,11 +4320,18 @@ export class EditorActions {
         this.canvasStore.elements = this.canvasStore.elements.map((el) => {
           const offset = pageCropOffsets.get(el.pageIndex);
           if (offset && (offset.left !== 0 || offset.top !== 0)) {
-            return {
+            const updated: CanvasElement = {
               ...el,
               x: el.x + offset.left,
               y: el.y + offset.top,
             };
+            if (el.kind === 'path' && Array.isArray((el as PathElement).points)) {
+              (updated as PathElement).points = (el as PathElement).points.map((pt) => ({
+                x: pt.x + offset.left,
+                y: pt.y + offset.top,
+              }));
+            }
+            return updated;
           }
           return el;
         });
@@ -4089,8 +4385,10 @@ export class EditorActions {
 
     await this.executeDocumentMutation('Scale Page', pageIndex, async () => {
       const { scalePages, transformCanvasElementsForScale } = await import('../services/pdf/operations/scale-ops');
-      const buffer = await this.service.document.saveAsync(this.store.pageTransforms);
-      const scaledBytes = await scalePages(buffer, fullScaleOptions);
+      const scaledBytes = await this.service.document.rewrite(
+        (bytes) => scalePages(bytes, fullScaleOptions),
+        this.store.pageTransforms,
+      );
 
       const scaledBuffer = scaledBytes.buffer.slice(
         scaledBytes.byteOffset,
@@ -4104,7 +4402,7 @@ export class EditorActions {
         originalPageDims.set(idx, { width: dims.widthPts, height: dims.heightPts });
       }
 
-      this.service.loadDocumentFromBuffer(scaledBuffer);
+      this.reloadActiveDocument(scaledBuffer);
       this.store.pageTransforms = {};
 
       // Re-project canvas overlay elements to match scaled or margin-padded geometry
@@ -4249,9 +4547,29 @@ export class EditorActions {
     }
   }
 
-  async deletePage(index: number): Promise<void> {
-    if (!this.store.isDocumentLoaded || this.store.pageCount <= 1 || this.store.isReadOnly || this.store.canMutateDocument === false) return;
-    const indices = this.getTargetPageIndices(index);
+  async deletePage(index: number | number[]): Promise<void> {
+    const useOptimisticDeletion = !this.featureFlags || (
+      this.featureFlags.isEnabled('performance.optimistic-actions') &&
+      this.featureFlags.isEnabled('performance.optimistic-actions.deletion')
+    );
+    const useQueue = useOptimisticDeletion && this.isMutationQueueEnabled();
+    if (
+      !this.store.isDocumentLoaded ||
+      this.store.pageCount <= 1 ||
+      this.store.isReadOnly ||
+      this.store.canMutateDocument === false ||
+      (!useQueue && this.store.isMutating)
+    ) {
+      return;
+    }
+    const rawIndices = Array.isArray(index) ? index : this.getTargetPageIndices(index);
+    const indices = useQueue
+      ? rawIndices.filter((idx) => !this.store.isPageOptimisticallyDeleted(idx))
+      : rawIndices;
+    const remainingVisiblePages = this.store.pageCount - this.store.optimisticDeletedPageIndices.size;
+    if (indices.length === 0 || indices.length >= remainingVisiblePages) {
+      return;
+    }
     const deletedSet = new Set(indices);
     const indexMap = (oldIdx: number) => {
       if (deletedSet.has(oldIdx)) return -1;
