@@ -643,12 +643,12 @@ export class CanvasActions {
             originY: element.y,
             originWidth: element.width,
             originHeight: element.height,
+            originPoints: pathEl ? JSON.parse(JSON.stringify(pathEl.points)) : undefined,
             originFontSize: textEl ? textEl.fontSize : undefined,
             originLines: textEl?.lines ? JSON.parse(JSON.stringify(textEl.lines)) : undefined,
             originSegments: textEl?.segments ? JSON.parse(JSON.stringify(textEl.segments)) : undefined,
+            otherResizeOrigins: Object.keys(otherResizeOrigins).length > 0 ? otherResizeOrigins : undefined,
         };
-        
-        this.canvasStore.selectElement(elementId);
     }
 
     updateResize(
@@ -661,12 +661,17 @@ export class CanvasActions {
         options?: { disabledSnap?: boolean; screenThresholdPx?: number },
     ): void {
         const state = this.canvasStore.dragState;
-        if (!state || state.mode !== 'resize' || !state.handle) return;
+        if (!state) return;
+        if (state.mode === 'endpoint' || state.handle === 'start' || state.handle === 'end') {
+            this.updateEndpointAdjust(pointerX, pointerY, pageEl, zoom, shiftKey, pageTransform, options);
+            return;
+        }
+        if (state.mode !== 'resize' || !state.handle) return;
         
-        const element = this.canvasStore.elements.find(e => e.id === state.elementId);
+        const element = this.canvasStore.getElementById(state.elementId);
         if (!element) return;
 
-        const { x, y } = this.screenToPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
+        const { x, y } = this.resolveInteractionPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
         const rawDx = x - state.startX;
         const rawDy = y - state.startY;
 
@@ -796,6 +801,15 @@ export class CanvasActions {
             height: newHeight
         };
 
+        if (element.kind === 'path' && state.originPoints) {
+            const sx = state.originWidth > 0 ? newWidth / state.originWidth : 1;
+            const sy = state.originHeight > 0 ? newHeight / state.originHeight : 1;
+            (updates as Partial<PathElement>).points = state.originPoints.map((p) => ({
+                x: finalX + (p.x - state.originX) * sx,
+                y: finalY + (p.y - state.originY) * sy,
+            }));
+        }
+
         if (element.kind === 'text' && state.originFontSize !== undefined && isCorner) {
             const scale = Math.min(newWidth / state.originWidth, newHeight / state.originHeight);
             const newFontSize = Math.max(1, state.originFontSize * scale);
@@ -838,42 +852,394 @@ export class CanvasActions {
         }
 
         this.canvasStore.updateElement(state.elementId, updates);
+
+        if (state.otherResizeOrigins && Object.keys(state.otherResizeOrigins).length > 0) {
+            const scaleX = state.originWidth > 0 ? newWidth / state.originWidth : 1;
+            const scaleY = state.originHeight > 0 ? newHeight / state.originHeight : 1;
+            for (const [otherId, other] of Object.entries(state.otherResizeOrigins)) {
+                const otherEl = this.canvasStore.getElementById(otherId);
+                if (!otherEl) continue;
+                const otherW = Math.max(10, other.originWidth * scaleX);
+                const otherH = Math.max(10, other.originHeight * scaleY);
+                const otherUpdates: Partial<CanvasElement> = {
+                    width: otherW,
+                    height: otherH,
+                };
+                if (otherEl.kind === 'path' && other.originPoints) {
+                    const osx = other.originWidth > 0 ? otherW / other.originWidth : 1;
+                    const osy = other.originHeight > 0 ? otherH / other.originHeight : 1;
+                    (otherUpdates as Partial<PathElement>).points = other.originPoints.map((p) => ({
+                        x: other.originX + (p.x - other.originX) * osx,
+                        y: other.originY + (p.y - other.originY) * osy,
+                    }));
+                }
+                if (otherEl.kind === 'text' && other.originFontSize !== undefined && isCorner) {
+                    const otherScale = Math.min(scaleX, scaleY);
+                    const otherFontSize = Math.max(1, other.originFontSize * otherScale);
+                    const otherTextUpdates: Partial<TextElement> = {
+                        fontSize: otherFontSize,
+                    };
+                    if (other.originLines && other.originLines.length > 0) {
+                        otherTextUpdates.lines = other.originLines.map((line) => ({
+                            ...line,
+                            fontSize: line.fontSize ? Math.max(1, line.fontSize * otherScale) : otherFontSize,
+                            lineHeight: line.lineHeight !== undefined ? line.lineHeight * otherScale : undefined,
+                            top: line.top !== undefined ? line.top * otherScale : undefined,
+                            left: line.left !== undefined ? line.left * otherScale : undefined,
+                            width: line.width !== undefined ? line.width * otherScale : undefined,
+                            height: line.height !== undefined ? line.height * otherScale : undefined,
+                            segments: (line.segments ?? []).map((seg) => ({
+                                ...seg,
+                                fontSize: seg.fontSize ? Math.max(1, seg.fontSize * otherScale) : otherFontSize,
+                                left: seg.left !== undefined ? seg.left * otherScale : undefined,
+                                top: seg.top !== undefined ? seg.top * otherScale : undefined,
+                                width: seg.width !== undefined ? seg.width * otherScale : undefined,
+                                height: seg.height !== undefined ? seg.height * otherScale : undefined,
+                            })),
+                        }));
+                    }
+                    if (other.originSegments && other.originSegments.length > 0) {
+                        otherTextUpdates.segments = other.originSegments.map((seg) => ({
+                            ...seg,
+                            fontSize: seg.fontSize ? Math.max(1, seg.fontSize * otherScale) : otherFontSize,
+                            left: seg.left !== undefined ? seg.left * otherScale : undefined,
+                            top: seg.top !== undefined ? seg.top * otherScale : undefined,
+                            width: seg.width !== undefined ? seg.width * otherScale : undefined,
+                            height: seg.height !== undefined ? seg.height * otherScale : undefined,
+                        }));
+                    }
+                    Object.assign(otherUpdates, otherTextUpdates);
+                }
+                this.canvasStore.updateElement(otherId, otherUpdates);
+            }
+        }
     }
 
     endResize(): void {
         const state = this.canvasStore.dragState;
+        if (state && (state.mode === 'endpoint' || state.handle === 'start' || state.handle === 'end')) {
+            this.endEndpointAdjust();
+            return;
+        }
+
+        this.clearInteractionCache();
         if (state && state.mode === 'resize') {
-            const element = this.canvasStore.elements.find((e) => e.id === state.elementId);
+            const element = this.canvasStore.getElementById(state.elementId);
             const hasResized = element && (element.width !== state.originWidth || element.height !== state.originHeight);
+            this.canvasStore.clearSnapGuides();
             this.canvasStore.clearDragState();
             if (hasResized && element) {
+                this.dragJustEnded = true;
+                const now = Date.now();
                 const textEl = element.kind === 'text' ? (element as TextElement) : null;
+                const pathEl = element.kind === 'path' && 'points' in element ? (element as PathElement) : null;
+                const primaryCmd = new ResizeElementCommand(
+                    'Resize Element',
+                    state.elementId,
+                    {
+                        x: state.originX,
+                        y: state.originY,
+                        width: state.originWidth,
+                        height: state.originHeight,
+                        fontSize: state.originFontSize,
+                    },
+                    {
+                        x: element.x,
+                        y: element.y,
+                        width: element.width,
+                        height: element.height,
+                        fontSize: textEl?.fontSize,
+                    },
+                    now,
+                    state.originLines,
+                    textEl?.lines ? JSON.parse(JSON.stringify(textEl.lines)) : undefined,
+                    state.originSegments,
+                    textEl?.segments ? JSON.parse(JSON.stringify(textEl.segments)) : undefined,
+                    state.originPoints,
+                    pathEl?.points ? JSON.parse(JSON.stringify(pathEl.points)) : undefined,
+                );
+                if (state.otherResizeOrigins && Object.keys(state.otherResizeOrigins).length > 0) {
+                    const commands: import('../core/command').Command[] = [primaryCmd];
+                    for (const [otherId, other] of Object.entries(state.otherResizeOrigins)) {
+                        const otherEl = this.canvasStore.getElementById(otherId);
+                        if (!otherEl) continue;
+                        if (otherEl.width === other.originWidth && otherEl.height === other.originHeight) continue;
+                        const otherTextEl = otherEl.kind === 'text' ? (otherEl as TextElement) : null;
+                        const otherPathEl = otherEl.kind === 'path' && 'points' in otherEl ? (otherEl as PathElement) : null;
+                        commands.push(
+                            new ResizeElementCommand(
+                                'Resize Element',
+                                otherId,
+                                {
+                                    x: other.originX,
+                                    y: other.originY,
+                                    width: other.originWidth,
+                                    height: other.originHeight,
+                                    fontSize: other.originFontSize,
+                                },
+                                {
+                                    x: otherEl.x,
+                                    y: otherEl.y,
+                                    width: otherEl.width,
+                                    height: otherEl.height,
+                                    fontSize: otherTextEl?.fontSize,
+                                },
+                                now,
+                                other.originLines,
+                                otherTextEl?.lines ? JSON.parse(JSON.stringify(otherTextEl.lines)) : undefined,
+                                other.originSegments,
+                                otherTextEl?.segments ? JSON.parse(JSON.stringify(otherTextEl.segments)) : undefined,
+                                other.originPoints,
+                                otherPathEl?.points ? JSON.parse(JSON.stringify(otherPathEl.points)) : undefined,
+                            )
+                        );
+                    }
+                    if (commands.length === 1) {
+                        this.editorActions?.pushCommand(commands[0]);
+                    } else {
+                        this.editorActions?.pushCommand(new CompoundCommand('Resize Elements', commands));
+                    }
+                } else {
+                    this.editorActions?.pushCommand(primaryCmd);
+                }
+            }
+        }
+    }
+
+    /**
+     * Initialises interactive start or end terminal adjustment for a line or arrow.
+     *
+     * @param elementId Identifier of the target linear shape element.
+     * @param handle Start or end terminal handle being dragged.
+     * @param pointerX Client screen horizontal pointer coordinate.
+     * @param pointerY Client screen vertical pointer coordinate.
+     * @param pageEl Reference to the enclosing page container element.
+     * @param zoom Active viewport zoom level.
+     * @param pageTransform Optional page transformation matrix.
+     */
+    startEndpointAdjust(
+        elementId: string,
+        handle: LineEndpointHandle,
+        pointerX: number,
+        pointerY: number,
+        pageEl: HTMLElement,
+        zoom: number,
+        pageTransform?: PageTransform,
+    ): void {
+        if (this.editorActions?.store?.isReadOnly || this.editorActions?.store?.canResizeElements === false) return;
+        const element = this.canvasStore.getElementById(elementId);
+        if (!element || element.locked) return;
+
+        this.clearInteractionCache();
+        const { x, y } = this.resolveInteractionPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
+        const endpoints = getLineEndpoints(element);
+
+        this.canvasStore.dragState = {
+            elementId,
+            mode: 'endpoint',
+            handle,
+            endpointHandle: handle,
+            startX: x,
+            startY: y,
+            originX: element.x,
+            originY: element.y,
+            originWidth: element.width,
+            originHeight: element.height,
+            originRotation: element.rotation,
+            originFlipX: element.flipX,
+            originFlipY: element.flipY,
+            originStartPoint: endpoints.start,
+            originEndPoint: endpoints.end,
+        };
+
+        this.canvasStore.selectElement(elementId);
+    }
+
+    /**
+     * Updates linear element geometry and alignment guidelines during endpoint dragging.
+     *
+     * @param pointerX Client screen horizontal pointer coordinate.
+     * @param pointerY Client screen vertical pointer coordinate.
+     * @param pageEl Reference to the enclosing page container element.
+     * @param zoom Active viewport zoom level.
+     * @param shiftKey Whether the shift modifier key is pressed.
+     * @param pageTransform Optional page transformation matrix.
+     * @param options Snapping configuration overrides.
+     */
+    updateEndpointAdjust(
+        pointerX: number,
+        pointerY: number,
+        pageEl: HTMLElement,
+        zoom: number,
+        shiftKey: boolean = false,
+        pageTransform?: PageTransform,
+        options?: { disabledSnap?: boolean; screenThresholdPx?: number },
+    ): void {
+        const state = this.canvasStore.dragState;
+        if (!state || state.mode !== 'endpoint' || !state.originStartPoint || !state.originEndPoint) return;
+
+        const element = this.canvasStore.getElementById(state.elementId);
+        if (!element) return;
+
+        const { x, y } = this.resolveInteractionPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
+        const handle = state.endpointHandle ?? (state.handle as LineEndpointHandle);
+        const isStart = handle === 'start';
+
+        const movingPoint = { x, y };
+        const fixedPoint = isStart ? state.originEndPoint : state.originStartPoint;
+
+        const pageDims = this.getPageDimensions(element.pageIndex, pageEl, zoom);
+        const candidates = this.getSnapCandidates(element.pageIndex, element.id);
+
+        const snapResult = snapLineEndpoint({
+            movingPoint,
+            fixedPoint,
+            handle,
+            candidates,
+            pageDimensions: pageDims,
+            pageIndex: element.pageIndex,
+            zoom,
+            shiftKey,
+            disabledSnap: options?.disabledSnap,
+            screenThresholdPx: options?.screenThresholdPx,
+        });
+
+        const newStart = isStart ? snapResult.point : fixedPoint;
+        const newEnd = isStart ? fixedPoint : snapResult.point;
+
+        const newGeom = elementFromLineEndpoints(newStart, newEnd, state.originHeight);
+
+        this.canvasStore.updateElement(state.elementId, {
+            ...newGeom,
+            flipX: false,
+            flipY: false,
+        });
+        this.canvasStore.activeSnapGuides = snapResult.guides;
+    }
+
+    /**
+     * Concludes interactive endpoint adjustment, clearing guides and pushing command to history.
+     */
+    endEndpointAdjust(): void {
+        const state = this.canvasStore.dragState;
+        this.clearInteractionCache();
+        if (state && state.mode === 'endpoint') {
+            const element = this.canvasStore.getElementById(state.elementId);
+            this.canvasStore.clearSnapGuides();
+            this.canvasStore.clearDragState();
+
+            if (
+                element &&
+                (element.x !== state.originX ||
+                    element.y !== state.originY ||
+                    element.width !== state.originWidth ||
+                    element.rotation !== state.originRotation ||
+                    element.flipX !== state.originFlipX ||
+                    element.flipY !== state.originFlipY)
+            ) {
+                this.dragJustEnded = true;
                 this.editorActions?.pushCommand(
-                    new ResizeElementCommand(
-                        'Resize Element',
+                    new AdjustLineEndpointsCommand(
+                        'Adjust Line Endpoints',
                         state.elementId,
                         {
                             x: state.originX,
                             y: state.originY,
                             width: state.originWidth,
                             height: state.originHeight,
-                            fontSize: state.originFontSize,
+                            rotation: state.originRotation || 0,
+                            flipX: state.originFlipX,
+                            flipY: state.originFlipY,
                         },
                         {
                             x: element.x,
                             y: element.y,
                             width: element.width,
                             height: element.height,
-                            fontSize: textEl?.fontSize,
+                            rotation: element.rotation || 0,
+                            flipX: element.flipX,
+                            flipY: element.flipY,
                         },
-                        Date.now(),
-                        state.originLines,
-                        textEl?.lines ? JSON.parse(JSON.stringify(textEl.lines)) : undefined,
-                        state.originSegments,
-                        textEl?.segments ? JSON.parse(JSON.stringify(textEl.segments)) : undefined,
-                    )
+                    ),
                 );
             }
+        }
+    }
+
+    /**
+     * Resizes an element to explicit target dimensions and scales internal geometry such as path points.
+     *
+     * @param id Target canvas element ID.
+     * @param newWidth Target width in PDF points.
+     * @param newHeight Target height in PDF points.
+     */
+    resizeElementToDimensions(id: string, newWidth: number, newHeight: number): void {
+        if (this.editorActions?.store?.isReadOnly || this.editorActions?.store?.canResizeElements === false) return;
+        const element = this.canvasStore.getElementById(id);
+        if (!element || element.locked) return;
+
+        const targetW = Math.max(1, newWidth);
+        const targetH = Math.max(1, newHeight);
+        const updates: Record<string, unknown> = {};
+        if (targetW !== element.width) updates.width = targetW;
+        if (targetH !== element.height) updates.height = targetH;
+        if (Object.keys(updates).length === 0) return;
+
+        if (element.kind === 'path' && 'points' in element && Array.isArray(element.points)) {
+            const sx = element.width > 0 ? targetW / element.width : 1;
+            const sy = element.height > 0 ? targetH / element.height : 1;
+            updates.points = element.points.map((p) => ({
+                x: element.x + (p.x - element.x) * sx,
+                y: element.y + (p.y - element.y) * sy,
+            }));
+        }
+
+        this.updateElementProperties(id, updates);
+    }
+
+    /**
+     * Resizes all currently selected unlocked elements to explicit target width and/or height in a single command.
+     *
+     * @param newWidth Optional target width in PDF points.
+     * @param newHeight Optional target height in PDF points.
+     */
+    resizeSelectedElementsToDimensions(newWidth?: number, newHeight?: number): void {
+        if (this.editorActions?.store?.isReadOnly || this.editorActions?.store?.canResizeElements === false) return;
+        const multiTransformEnabled =
+            !this.editorActions?.featureFlags ||
+            (this.editorActions.featureFlags.isEnabled('select-tool.multiselect') &&
+                this.editorActions.featureFlags.isEnabled('select-tool.multiselect.transform') &&
+                this.editorActions.featureFlags.isEnabled('select-tool.multiselect.modify'));
+        const ids = multiTransformEnabled && this.canvasStore.selectedElementIds.length > 0
+            ? [...this.canvasStore.selectedElementIds]
+            : (this.canvasStore.selectedElementId ? [this.canvasStore.selectedElementId] : []);
+        if (ids.length === 0) return;
+
+        const entries: Array<{ id: string; updates: Record<string, unknown> }> = [];
+        for (const id of ids) {
+            const element = this.canvasStore.getElementById(id);
+            if (!element || element.locked) continue;
+
+            const targetW = newWidth !== undefined ? Math.max(1, newWidth) : element.width;
+            const targetH = newHeight !== undefined ? Math.max(1, newHeight) : element.height;
+            const updates: Record<string, unknown> = {};
+            if (targetW !== element.width) updates.width = targetW;
+            if (targetH !== element.height) updates.height = targetH;
+            if (Object.keys(updates).length === 0) continue;
+
+            if (element.kind === 'path' && 'points' in element && Array.isArray(element.points)) {
+                const sx = element.width > 0 ? targetW / element.width : 1;
+                const sy = element.height > 0 ? targetH / element.height : 1;
+                updates.points = element.points.map((p) => ({
+                    x: element.x + (p.x - element.x) * sx,
+                    y: element.y + (p.y - element.y) * sy,
+                }));
+            }
+            entries.push({ id, updates });
+        }
+
+        if (entries.length > 0) {
+            this.batchUpdateElementsProperties(entries);
         }
     }
 
