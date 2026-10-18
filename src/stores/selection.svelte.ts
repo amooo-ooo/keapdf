@@ -1,11 +1,40 @@
 import { SvelteSet } from 'svelte/reactivity';
 
+export type WorkspaceSection = 'files' | 'pages' | 'outline';
+
 export class SelectionStore {
   selectedIds = new SvelteSet<string>();
   lastSelectedId = $state<string | null>(null);
+  activeSection = $state<WorkspaceSection | null>(null);
 
   isSelected(id: string): boolean {
     return this.selectedIds.has(id);
+  }
+
+  setActiveSection(section: WorkspaceSection | null): void {
+    this.activeSection = section;
+  }
+
+  selectAll(ids: string[]): void {
+    this.selectedIds.clear();
+    for (const id of ids) {
+      this.selectedIds.add(id);
+    }
+    if (ids.length > 0) {
+      if (!this.lastSelectedId || !this.selectedIds.has(this.lastSelectedId)) {
+        this.lastSelectedId = ids[ids.length - 1];
+      }
+      const firstId = ids[0];
+      if (firstId.startsWith('file_')) {
+        this.activeSection = 'files';
+      } else if (firstId.startsWith('page_')) {
+        this.activeSection = 'pages';
+      } else if (firstId.startsWith('outline_')) {
+        this.activeSection = 'outline';
+      }
+    } else {
+      this.lastSelectedId = null;
+    }
   }
 
   select(
@@ -14,6 +43,14 @@ export class SelectionStore {
     shiftKey: boolean,
     getRange?: (startId: string, endId: string) => string[]
   ) {
+    if (id.startsWith('file_')) {
+      this.activeSection = 'files';
+    } else if (id.startsWith('page_')) {
+      this.activeSection = 'pages';
+    } else if (id.startsWith('outline_')) {
+      this.activeSection = 'outline';
+    }
+
     if (shiftKey && this.lastSelectedId && getRange) {
       const range = getRange(this.lastSelectedId, id);
       if (!ctrlKey) {
