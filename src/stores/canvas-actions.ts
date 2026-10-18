@@ -1244,10 +1244,31 @@ export class CanvasActions {
     }
 
     startRotate(elementId: string, pointerX: number, pointerY: number, pageEl: HTMLElement, zoom: number, pageTransform?: PageTransform): void {
-        const element = this.canvasStore.elements.find((e) => e.id === elementId);
+        if (this.editorActions?.store?.isReadOnly || this.editorActions?.store?.canRotateElements === false) return;
+        const element = this.canvasStore.getElementById(elementId);
         if (!element || element.locked) return;
 
-        const { x, y } = this.screenToPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
+        this.clearInteractionCache();
+        this.dragJustEnded = false;
+        const { x, y } = this.resolveInteractionPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
+        const multiTransformEnabled =
+            !this.editorActions?.featureFlags ||
+            (this.editorActions.featureFlags.isEnabled('select-tool.multiselect') &&
+                this.editorActions.featureFlags.isEnabled('select-tool.multiselect.transform'));
+        const isMulti = multiTransformEnabled && this.canvasStore.isSelected(elementId) && this.canvasStore.selectedElementIds.length > 1;
+        const otherRotateOrigins: NonNullable<DragState['otherRotateOrigins']> = {};
+        if (isMulti) {
+            for (const id of this.canvasStore.selectedElementIds) {
+                if (id === elementId) continue;
+                const other = this.canvasStore.getElementById(id);
+                if (!other || other.locked) continue;
+                otherRotateOrigins[other.id] = other.rotation || 0;
+            }
+            const without = this.canvasStore.selectedElementIds.filter((id) => id !== elementId);
+            this.canvasStore.selectElements([...without, elementId], false);
+        } else {
+            this.canvasStore.selectElement(elementId);
+        }
         this.canvasStore.dragState = {
             elementId,
             mode: 'rotate',
@@ -1259,18 +1280,18 @@ export class CanvasActions {
             originWidth: element.width,
             originHeight: element.height,
             originRotation: element.rotation,
+            otherRotateOrigins: Object.keys(otherRotateOrigins).length > 0 ? otherRotateOrigins : undefined,
         };
-        this.canvasStore.selectElement(elementId);
     }
 
     updateRotate(pointerX: number, pointerY: number, pageEl: HTMLElement, zoom: number, pageTransform?: PageTransform): void {
         const state = this.canvasStore.dragState;
         if (!state || state.mode !== 'rotate') return;
 
-        const element = this.canvasStore.elements.find((e) => e.id === state.elementId);
+        const element = this.canvasStore.getElementById(state.elementId);
         if (!element) return;
 
-        const { x, y } = this.screenToPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
+        const { x, y } = this.resolveInteractionPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
         const centerX = element.x + element.width / 2;
         const centerY = element.y + element.height / 2;
         const startAngle = Math.atan2(state.startY - centerY, state.startX - centerX) * (180 / Math.PI);
@@ -1288,27 +1309,65 @@ export class CanvasActions {
             }
         }
 
+        const roundedRotation = Math.round(newRotation);
+        const appliedDelta = roundedRotation - (state.originRotation || 0);
+
         this.canvasStore.updateElementProperties(element.id, {
-            rotation: Math.round(newRotation),
+            rotation: roundedRotation,
         });
+
+        if (state.otherRotateOrigins && Object.keys(state.otherRotateOrigins).length > 0) {
+            for (const [otherId, originRotation] of Object.entries(state.otherRotateOrigins)) {
+                let otherRotation = (originRotation + appliedDelta) % 360;
+                if (otherRotation < 0) otherRotation += 360;
+                this.canvasStore.updateElementProperties(otherId, {
+                    rotation: Math.round(otherRotation),
+                });
+            }
+        }
     }
 
     endRotate(): void {
         const state = this.canvasStore.dragState;
+        this.clearInteractionCache();
         if (!state || state.mode !== 'rotate') return;
 
-        const element = this.canvasStore.elements.find((e) => e.id === state.elementId);
+        const element = this.canvasStore.getElementById(state.elementId);
         this.canvasStore.clearDragState();
 
         if (element && element.rotation !== state.originRotation) {
-            this.editorActions?.pushCommand(
-                new RotateElementCommand(
-                    'Rotate Element',
-                    state.elementId,
-                    state.originRotation || 0,
-                    element.rotation,
-                )
+            this.dragJustEnded = true;
+            const now = Date.now();
+            const primaryCmd = new RotateElementCommand(
+                'Rotate Element',
+                state.elementId,
+                state.originRotation || 0,
+                element.rotation,
+                now,
             );
+            if (state.otherRotateOrigins && Object.keys(state.otherRotateOrigins).length > 0) {
+                const commands: import('../core/command').Command[] = [primaryCmd];
+                for (const [otherId, originRotation] of Object.entries(state.otherRotateOrigins)) {
+                    const otherEl = this.canvasStore.getElementById(otherId);
+                    if (!otherEl || otherEl.rotation === originRotation) continue;
+                    commands.push(
+                        new RotateElementCommand(
+                            'Rotate Element',
+                            otherId,
+                            originRotation,
+                            otherEl.rotation,
+                            now,
+                        )
+                    );
+                }
+                if (commands.length === 1) {
+                    this.editorActions?.pushCommand(commands[0]);
+                } else {
+                    this.editorActions?.pushCommand(new CompoundCommand('Rotate Elements', commands));
+                }
+            } else {
+                this.editorActions?.pushCommand(primaryCmd);
+            }
         }
     }
 
@@ -1321,6 +1380,7 @@ export class CanvasActions {
     }
 
   dropElement(payload: ElementDropPayload, pageIndex: number, x: number, y: number): void {
+    if (!this.elementRegistry) return;
     const id = this.canvasStore.generateId();
     const element = createElementFromPayload(this.elementRegistry, payload, pageIndex, x, y, id);
     this.canvasStore.addElement(element);
@@ -1332,6 +1392,8 @@ export class CanvasActions {
     deleteElement(id: string): void {
         const el = this.canvasStore.elements.find((e) => e.id === id);
         if (!el || el.locked) return;
+        const isNoteAnnotation = el.kind === 'note' && Boolean(this.editorActions?.store?.canAnnotate);
+        if (!isNoteAnnotation && (this.editorActions?.store?.isReadOnly || this.editorActions?.store?.canDeleteElements === false)) return;
         const kind = el.kind ?? 'Element';
         const index = this.canvasStore.elements.findIndex((e) => e.id === id);
         const snapshot = safeClone(el) as CanvasElement;
@@ -1340,28 +1402,160 @@ export class CanvasActions {
     }
 
     deleteSelectedElement(): void {
-        const id = this.canvasStore.selectedElementId;
-        if (id) {
-            this.deleteElement(id);
+        if (this.editorActions?.store?.isReadOnly || this.editorActions?.store?.canDeleteElements === false) return;
+        const ids = this.canvasStore.selectedElementIds.length > 0
+            ? [...this.canvasStore.selectedElementIds]
+            : (this.canvasStore.selectedElementId ? [this.canvasStore.selectedElementId] : []);
+        if (ids.length === 0) return;
+
+        const deletableIds = ids.filter((id) => {
+            const el = this.canvasStore.getElementById(id);
+            return el && !el.locked && !('isLocked' in el && Boolean((el as unknown as { isLocked?: boolean }).isLocked));
+        });
+
+        if (deletableIds.length === 0) {
+            return;
+        }
+
+        if (deletableIds.length === 1) {
+            this.deleteElement(deletableIds[0]);
+            return;
+        }
+
+        const commands: import('../core/command').Command[] = [];
+        for (const id of deletableIds) {
+            const el = this.canvasStore.elements.find((e) => e.id === id);
+            if (!el || el.locked) continue;
+            const kind = el.kind ?? 'Element';
+            const index = this.canvasStore.elements.findIndex((e) => e.id === id);
+            const snapshot = safeClone(el) as CanvasElement;
+            this.canvasStore.removeElement(id);
+            commands.push(new RemoveElementCommand(`Delete ${kind}`, id, snapshot, index));
+        }
+
+        if (commands.length === 1) {
+            this.editorActions?.pushCommand(commands[0]);
+        } else if (commands.length > 1) {
+            this.editorActions?.pushCommand(new CompoundCommand('Delete Elements', commands));
         }
     }
 
     duplicateSelectedElement(): void {
-        const element = this.canvasStore.selectedElement;
-        if (!element) return;
+        if (this.editorActions?.store?.isReadOnly || this.editorActions?.store?.canDuplicateElements === false) return;
+        const ids = [...this.canvasStore.selectedElementIds];
+        if (ids.length <= 1) {
+            const element = this.canvasStore.selectedElement;
+            if (!element) return;
 
-        const newId = this.canvasStore.generateId();
-        const cloned = safeClone(element) as CanvasElement;
-        const newElement = {
-            ...cloned,
-            id: newId,
-            x: element.x + 20,
-            y: element.y + 20
-        } as CanvasElement;
+            const newId = this.canvasStore.generateId();
+            const cloned = safeClone(element) as CanvasElement;
+            const newElement = {
+                ...cloned,
+                id: newId,
+                x: element.x + 20,
+                y: element.y + 20
+            } as CanvasElement;
 
-        this.canvasStore.addElement(newElement);
-        this.canvasStore.selectElement(newId);
-        this.editorActions?.pushCommand(new AddElementCommand('Duplicate Element', newElement));
+            this.canvasStore.addElement(newElement);
+            this.canvasStore.selectElement(newId);
+            this.editorActions?.pushCommand(new AddElementCommand('Duplicate Element', newElement));
+            return;
+        }
+
+        const newIds: string[] = [];
+        const commands: import('../core/command').Command[] = [];
+        for (const id of ids) {
+            const element = this.canvasStore.elements.find((e) => e.id === id);
+            if (!element) continue;
+
+            const newId = this.canvasStore.generateId();
+            const cloned = safeClone(element) as CanvasElement;
+            const newElement = {
+                ...cloned,
+                id: newId,
+                x: element.x + 20,
+                y: element.y + 20
+            } as CanvasElement;
+
+            this.canvasStore.addElement(newElement);
+            newIds.push(newId);
+            commands.push(new AddElementCommand('Duplicate Element', newElement));
+        }
+        this.canvasStore.selectElements(newIds);
+        if (commands.length > 0) {
+            this.editorActions?.pushCommand(new CompoundCommand('Duplicate Elements', commands));
+        }
+    }
+
+    /**
+     * Reorders an element in the stacking order on its page and logs an undoable command.
+     */
+    reorderElement(id: string, direction: 'front' | 'back' | 'forward' | 'backward'): void {
+        if (this.editorActions?.store?.isReadOnly) return;
+        const el = this.canvasStore.elements.find((e) => e.id === id);
+        if (!el || el.locked) return;
+
+        const prevOrder = this.canvasStore.elements.map((e) => e.id);
+        const prevZIndices: Record<string, number | undefined> = {};
+        for (const item of this.canvasStore.elements) {
+            prevZIndices[item.id] = item.zIndex;
+        }
+        const changed = this.canvasStore.reorderElement(id, direction);
+        if (changed) {
+            const newOrder = this.canvasStore.elements.map((e) => e.id);
+            const newZIndices: Record<string, number | undefined> = {};
+            for (const item of this.canvasStore.elements) {
+                newZIndices[item.id] = item.zIndex;
+            }
+            const kind = el.kind ?? 'Element';
+            const actionLabel = direction === 'front'
+                ? 'Bring to Front'
+                : direction === 'back'
+                ? 'Send to Back'
+                : direction === 'forward'
+                ? 'Bring Forward'
+                : 'Send Backward';
+            this.editorActions?.pushCommand(
+                new ReorderElementCommand(`${actionLabel} ${kind}`, id, prevOrder, newOrder, prevZIndices, newZIndices)
+            );
+        }
+    }
+
+    bringToFront(id?: string): void {
+        const targetId = id ?? this.canvasStore.selectedElementId;
+        if (targetId) this.reorderElement(targetId, 'front');
+    }
+
+    bringForward(id?: string): void {
+        const targetId = id ?? this.canvasStore.selectedElementId;
+        if (targetId) this.reorderElement(targetId, 'forward');
+    }
+
+    sendBackward(id?: string): void {
+        const targetId = id ?? this.canvasStore.selectedElementId;
+        if (targetId) this.reorderElement(targetId, 'backward');
+    }
+
+    sendToBack(id?: string): void {
+        const targetId = id ?? this.canvasStore.selectedElementId;
+        if (targetId) this.reorderElement(targetId, 'back');
+    }
+
+    private isPropertyValueEqual(prevVal: unknown, nextVal: unknown): boolean {
+        if (Object.is(prevVal, nextVal)) return true;
+        if (
+            prevVal !== null &&
+            nextVal !== null &&
+            typeof prevVal === 'object' &&
+            typeof nextVal === 'object'
+        ) {
+            try {
+                return JSON.stringify(prevVal) === JSON.stringify(nextVal);
+            } catch {
+                return false;
+            }
+        }
+        return false;
     }
 
     updateElementProperties(id: string, updates: Record<string, unknown>): void {
@@ -1371,20 +1565,102 @@ export class CanvasActions {
             const cleanUpdates: Record<string, unknown> = {};
             for (const key of Object.keys(updates)) {
                 const rawPrev = (el as unknown as Record<string, unknown>)[key];
+                const rawNext = updates[key];
+                if (this.isPropertyValueEqual(rawPrev, rawNext)) {
+                    continue;
+                }
                 prevProps[key] = rawPrev !== undefined && typeof rawPrev === 'object' && rawPrev !== null
                     ? safeClone(rawPrev)
                     : rawPrev;
-                const rawNext = updates[key];
                 cleanUpdates[key] = rawNext !== undefined && typeof rawNext === 'object' && rawNext !== null
                     ? safeClone(rawNext)
                     : rawNext;
             }
-            this.canvasStore.updateElementProperties(id, updates);
+            if (Object.keys(cleanUpdates).length === 0) {
+                return;
+            }
+            this.canvasStore.updateElementProperties(id, cleanUpdates);
             this.editorActions?.recordDebouncedCommand(
                 new UpdateElementPropertyCommand('Update Element Property', id, prevProps, cleanUpdates),
                 300,
             );
         }
+    }
+
+    /**
+     * Atomically updates properties across one or more canvas elements in a single undoable command.
+     *
+     * @param entries List of element IDs and property update maps to apply together.
+     */
+    batchUpdateElementsProperties(entries: Array<{ id: string; updates: Record<string, unknown> }>): void {
+        const commands: import('../core/command').Command[] = [];
+        const now = Date.now();
+        for (const entry of entries) {
+            const el = this.canvasStore.elements.find((e) => e.id === entry.id);
+            if (!el) continue;
+            const prevProps: Record<string, unknown> = {};
+            const cleanUpdates: Record<string, unknown> = {};
+            for (const key of Object.keys(entry.updates)) {
+                const rawPrev = (el as unknown as Record<string, unknown>)[key];
+                const rawNext = entry.updates[key];
+                if (this.isPropertyValueEqual(rawPrev, rawNext)) {
+                    continue;
+                }
+                prevProps[key] = rawPrev !== undefined && typeof rawPrev === 'object' && rawPrev !== null
+                    ? safeClone(rawPrev)
+                    : rawPrev;
+                cleanUpdates[key] = rawNext !== undefined && typeof rawNext === 'object' && rawNext !== null
+                    ? safeClone(rawNext)
+                    : rawNext;
+            }
+            if (Object.keys(cleanUpdates).length === 0) continue;
+            this.canvasStore.updateElementProperties(entry.id, cleanUpdates);
+            commands.push(
+                new UpdateElementPropertyCommand('Update Element Property', entry.id, prevProps, cleanUpdates, now)
+            );
+        }
+        if (commands.length === 1) {
+            this.editorActions?.pushCommand(commands[0]);
+        } else if (commands.length > 1) {
+            this.editorActions?.pushCommand(new CompoundCommand('Update Elements Properties', commands));
+        }
+    }
+
+    /**
+     * Updates properties across all currently selected canvas elements (optionally filtered by kind)
+     * in a single undoable command when multiselect modification is enabled.
+     *
+     * @param updates Static property map or per-element updater function returning updates.
+     * @param options Filtering options for target element kind, locked status, or explicit IDs.
+     */
+    updateSelectedElementsProperties(
+        updates: Record<string, unknown> | ((el: CanvasElement) => Record<string, unknown> | null),
+        options?: { kind?: CanvasElementKind; includeLocked?: boolean; targetIds?: string[] },
+    ): void {
+        const multiModifyEnabled =
+            !this.editorActions?.featureFlags ||
+            (this.editorActions.featureFlags.isEnabled('select-tool.multiselect') &&
+                this.editorActions.featureFlags.isEnabled('select-tool.multiselect.modify'));
+        const rawIds = options?.targetIds && options.targetIds.length > 0
+            ? options.targetIds
+            : (multiModifyEnabled && this.canvasStore.selectedElementIds.length > 0
+                ? [...this.canvasStore.selectedElementIds]
+                : (this.canvasStore.selectedElementId ? [this.canvasStore.selectedElementId] : []));
+        if (rawIds.length === 0) return;
+
+        const entries: Array<{ id: string; updates: Record<string, unknown> }> = [];
+        for (const id of rawIds) {
+            const el = this.canvasStore.getElementById(id);
+            if (!el) continue;
+            if (!options?.includeLocked && el.locked) continue;
+            if (options?.kind && el.kind !== options.kind) continue;
+            const resolvedUpdates = typeof updates === 'function' ? updates(el) : updates;
+            if (!resolvedUpdates || Object.keys(resolvedUpdates).length === 0) continue;
+            entries.push({ id, updates: resolvedUpdates });
+        }
+
+        if (entries.length === 0) return;
+        this.batchUpdateElementsProperties(entries);
     }
 }
 
