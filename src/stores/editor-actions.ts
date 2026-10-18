@@ -6040,13 +6040,7 @@ export class EditorActions {
     const baseName = this.store.fileName.replace(/\.[^/.]+$/, '');
     const newFileName = `sanitized_${baseName}.pdf`;
 
-    const wasAdding = this.isAddingToWorkspace;
-    try {
-      this.isAddingToWorkspace = true;
-      await this.loadDocumentFromBuffer(bufferArray, newFileName);
-    } finally {
-      this.isAddingToWorkspace = wasAdding;
-    }
+    await this.addDerivedDocumentToWorkspace(bufferArray, newFileName);
     return summary;
   }
 
@@ -6113,13 +6107,7 @@ export class EditorActions {
     const baseName = this.store.fileName.replace(/\.[^/.]+$/, '');
     const newFileName = `compressed_${baseName}.pdf`;
 
-    const wasAdding = this.isAddingToWorkspace;
-    try {
-      this.isAddingToWorkspace = true;
-      await this.loadDocumentFromBuffer(bufferArray, newFileName);
-    } finally {
-      this.isAddingToWorkspace = wasAdding;
-    }
+    await this.addDerivedDocumentToWorkspace(bufferArray, newFileName);
     return summary;
   }
 
@@ -6130,6 +6118,7 @@ export class EditorActions {
    */
   detectScannedPages(): void {
     if (!this.store.isDocumentLoaded) return;
+    if (this.featureFlags && !this.featureFlags.isEnabled('ocr')) return;
     const pageCount = this.store.pageCount;
     const maxStartupScan = 15;
     void (async () => {
@@ -6171,13 +6160,16 @@ export class EditorActions {
    *
    * @param pageIndex Zero-based page index.
    * @param options Recognition options (language, autoEmbed searchable layer).
-   * @return Promise resolving to recognized OcrPageResult or null on error.
+   * @return Promise resolving to recognised OcrPageResult or null on error.
    */
   async runOcrOnPage(
     pageIndex: number,
     options?: { language?: string; autoEmbed?: boolean }
   ): Promise<OcrPageResult | null> {
     if (!this.store.isDocumentLoaded) return null;
+    if (this.featureFlags && (!this.featureFlags.isEnabled('ocr') || !this.featureFlags.isEnabled('ocr.recognize'))) {
+      return null;
+    }
     const pageCount = this.store.pageCount;
     if (pageIndex < 0 || pageIndex >= pageCount) return null;
 
@@ -6268,9 +6260,11 @@ export class EditorActions {
       this.refreshDocument();
     }
 
-    const currentBytes = await this.service.document.saveAsync(this.store.pageTransforms);
     const { applyImposition: runImposition } = await import('../services/pdf/operations/imposition-ops');
-    const imposedBytes = await runImposition(currentBytes, config);
+    const imposedBytes = await this.service.document.rewrite(
+      (bytes) => runImposition(bytes, config),
+      this.store.pageTransforms,
+    );
 
     const baseName = this.store.fileName.replace(/\.[^/.]+$/, '');
     let modeSuffix: string = config.type;
@@ -6293,17 +6287,11 @@ export class EditorActions {
     ) as ArrayBuffer;
 
     if (destination === 'workspace') {
-      const wasAdding = this.isAddingToWorkspace;
-      try {
-        this.isAddingToWorkspace = true;
-        await this.loadDocumentFromBuffer(imposedBuffer, newFileName);
-      } finally {
-        this.isAddingToWorkspace = wasAdding;
-      }
+      await this.addDerivedDocumentToWorkspace(imposedBuffer, newFileName);
     } else {
       await this.executeDocumentMutation('Apply Imposition', 0, () => {
         this.store.pageTransforms = {};
-        this.service.loadDocumentFromBuffer(imposedBuffer);
+        this.reloadActiveDocument(imposedBuffer);
         this.store.fileName = newFileName;
         this.store.currentPageIndex = 0;
         this.store.pageCount = this.service.document.getPageCount();
@@ -6346,7 +6334,7 @@ export class EditorActions {
 
   /**
    * Updates metadata fields and custom dictionary tags in the active document,
-   * synchronizes the non-reactive binary storage buffer, and triggers a UI update.
+   * synchronises the non-reactive binary storage buffer, and triggers a UI update.
    *
    * @param updates The metadata fields and custom key-value pairs to set.
    * @return A promise resolving when updates are applied and document reloaded.
@@ -6365,7 +6353,7 @@ export class EditorActions {
           setFileBuffer(this.store.activeWorkspaceFileId, buffer);
         }
 
-        this.service.loadDocumentFromBuffer(buffer);
+        this.reloadActiveDocument(buffer);
       });
     } catch (err) {
       console.error('Failed to update document metadata:', err);
@@ -6465,7 +6453,7 @@ export class EditorActions {
           setFileBuffer(this.store.activeWorkspaceFileId, buffer);
         }
 
-        this.service.loadDocumentFromBuffer(buffer);
+        this.reloadActiveDocument(buffer);
       });
     } catch (err) {
       console.error('Failed to add text to outline:', err);
@@ -6494,7 +6482,7 @@ export class EditorActions {
           setFileBuffer(this.store.activeWorkspaceFileId, buffer);
         }
 
-        this.service.loadDocumentFromBuffer(buffer);
+        this.reloadActiveDocument(buffer);
       });
     } catch (err) {
       console.error('Failed to reorder outline items:', err);
@@ -6520,7 +6508,7 @@ export class EditorActions {
           setFileBuffer(this.store.activeWorkspaceFileId, buffer);
         }
 
-        this.service.loadDocumentFromBuffer(buffer);
+        this.reloadActiveDocument(buffer);
       });
     } catch (err) {
       console.error('Failed to sort outline items:', err);
@@ -6549,7 +6537,7 @@ export class EditorActions {
           setFileBuffer(this.store.activeWorkspaceFileId, buffer);
         }
 
-        this.service.loadDocumentFromBuffer(buffer);
+        this.reloadActiveDocument(buffer);
       });
     } catch (err) {
       console.error('Failed to update outline item level:', err);
@@ -6597,11 +6585,84 @@ export class EditorActions {
           setFileBuffer(this.store.activeWorkspaceFileId, buffer);
         }
 
-        this.service.loadDocumentFromBuffer(buffer);
+        this.reloadActiveDocument(buffer);
       });
     } catch (err) {
       console.error('Failed to generate automatic outline:', err);
       throw err;
+    }
+  }
+
+  /**
+   * Semantically analyses the active document's typography across pages to extract
+   * dominant body text and hierarchical heading style profiles.
+   *
+   * @returns Inferred document typography profile, or null if no document is loaded.
+   */
+  getDocumentTypography(): DocumentTypographyProfile | null {
+    if (!this.store.isDocumentLoaded) return null;
+
+    const fastEnabled = this.featureFlags
+      ? this.featureFlags.isEnabled('performance.fast-element-interaction')
+      : true;
+
+    if (fastEnabled && typeof this.service.document.getCachedTypographyProfile === 'function') {
+      const cached = this.service.document.getCachedTypographyProfile();
+      if (cached) {
+        return cached;
+      }
+    }
+
+    const pageCount = this.store.pageCount;
+    const allSpans: EditableTextSpan[] = [];
+
+    for (let i = 0; i < pageCount; i++) {
+      try {
+        allSpans.push(...this.getPageTextSpansFast(i));
+      } catch {
+        // Skip inaccessible pages
+      }
+    }
+
+    const profile = analyzeDocumentTypography(allSpans);
+    if (fastEnabled && typeof this.service.document.setCachedTypographyProfile === 'function') {
+      this.service.document.setCachedTypographyProfile(profile);
+    }
+    return profile;
+  }
+
+  /**
+   * Retrieves all document fonts indexed via font masking and character scanning
+   * that meet the relative completeness threshold.
+   *
+   * @returns Array of relatively complete document fonts with mapped standard equivalents.
+   */
+  getRelativelyCompleteDocumentFonts(): Array<{
+    family: string;
+    displayName: string;
+    builtInStandardFont: StandardFontName;
+    charCount: number;
+  }> {
+    if (!this.store.isDocumentLoaded) return [];
+    try {
+      return this.service.document.fontCharsetIndex.getRelativelyCompleteDocumentFonts();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Evaluates whether a specific font in the active document has a relatively complete character set.
+   *
+   * @param fontName Raw or base font family name.
+   * @returns True if the font is relatively complete.
+   */
+  isFontRelativelyComplete(fontName: string): boolean {
+    if (!this.store.isDocumentLoaded || !fontName) return false;
+    try {
+      return this.service.document.fontCharsetIndex.isFontComplete(fontName);
+    } catch {
+      return false;
     }
   }
 
@@ -6627,7 +6688,7 @@ export class EditorActions {
           setFileBuffer(this.store.activeWorkspaceFileId, buffer);
         }
 
-        this.service.loadDocumentFromBuffer(buffer);
+        this.reloadActiveDocument(buffer);
       });
     } catch (err) {
       console.error('Failed to remove outline item:', err);
@@ -6665,12 +6726,22 @@ export class EditorActions {
    * @param signature The saved signature record containing dataUrl and aspect ratio.
    * @param targetPageIndex Optional zero-based target page index.
    * @param canvasStore Optional CanvasStore instance.
+   * @param preset Optional preset position on the page (defaults to 'center').
    */
   placeSignatureOnCanvas(
     signature: SavedSignature,
     targetPageIndex?: number,
-    canvasStore?: CanvasStore
+    canvasStore?: CanvasStore,
+    preset: Exclude<SignaturePlacementPreset, 'custom'> = 'center'
   ): void {
+    if (this.store.isReadOnly) {
+      this.store.setViewMode('editing');
+    }
+    this.store.activeTool = 'select';
+    if (this.store.selectMode === 'text') {
+      this.store.selectMode = 'select';
+    }
+
     const pageIdx = targetPageIndex !== undefined ? targetPageIndex : this.store.currentPageIndex;
     const aspect = signature.aspectRatio > 0 ? signature.aspectRatio : 3;
 
@@ -6678,18 +6749,26 @@ export class EditorActions {
     const defaultWidth = 160;
     const defaultHeight = Math.max(30, Math.round(defaultWidth / aspect));
 
-    let centerX = 200;
-    let centerY = 300;
+    let pageWidth = 612;
+    let pageHeight = 792;
 
     try {
       if (this.service.document) {
         const dims = this.service.document.getPage(pageIdx).getDimensions();
-        centerX = Math.max(20, (dims.widthPts - defaultWidth) / 2);
-        centerY = Math.max(20, (dims.heightPts - defaultHeight) / 2);
+        pageWidth = dims.widthPts;
+        pageHeight = dims.heightPts;
       }
     } catch {
       // Safe fallback
     }
+
+    const rect = resolveSignaturePresetRect(
+      preset,
+      pageWidth,
+      pageHeight,
+      defaultWidth,
+      defaultHeight
+    );
 
     const targetCanvasStore = canvasStore ?? this.canvasStore;
 
@@ -6700,10 +6779,10 @@ export class EditorActions {
           id: elementId,
           kind: 'image',
           pageIndex: pageIdx,
-          x: centerX,
-          y: centerY,
-          width: defaultWidth,
-          height: defaultHeight,
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
           rotation: 0,
           locked: false,
           visible: true,
@@ -6723,6 +6802,178 @@ export class EditorActions {
   }
 
   /**
+   * Starts interactive freeform digital signature placement on the PDF canvas.
+   *
+   * @param config Pending digital signature placement state and signing options.
+   */
+  startDigitalSignaturePlacement(config: PendingDigitalSignatureState): void {
+    if (this.store.isReadOnly) {
+      this.store.setViewMode('editing');
+    }
+    this.store.activeTool = 'select';
+    if (this.store.selectMode === 'text') {
+      this.store.selectMode = 'select';
+    }
+    this.store.clearSelection();
+    if (this.canvasStore) {
+      this.canvasStore.selectElement(null);
+    }
+    this.store.currentPageIndex = config.pageIndex;
+    this.store.pendingDigitalSignature = config;
+    this.store.showCertSignDialog = false;
+  }
+
+  /**
+   * Updates the active digital signature placement rectangle or display options on the canvas.
+   *
+   * @param updates Partial placement rectangle or display updates.
+   * @param preset Optional preset identifier when snapped to a preset.
+   */
+  updateDigitalSignaturePlacement(
+    updates: Partial<Pick<PendingDigitalSignatureState, 'x' | 'y' | 'width' | 'height' | 'showTextDetails' | 'pageIndex'>>,
+    preset: SignaturePlacementPreset = 'custom'
+  ): void {
+    const current = this.store.pendingDigitalSignature;
+    if (!current) return;
+
+    const nextPageIndex = updates.pageIndex ?? current.pageIndex;
+    let pageWidth = 612;
+    let pageHeight = 792;
+    try {
+      if (this.service.document && this.store.isDocumentLoaded) {
+        const dims = this.service.document.getPageDimensions(nextPageIndex);
+        pageWidth = dims.widthPts;
+        pageHeight = dims.heightPts;
+      }
+    } catch {
+      // Fallback to standard Letter dimensions
+    }
+
+    const clamped = clampSignatureRectToPage(
+      {
+        x: updates.x ?? current.x,
+        y: updates.y ?? current.y,
+        width: updates.width ?? current.width,
+        height: updates.height ?? current.height,
+      },
+      pageWidth,
+      pageHeight
+    );
+
+    this.store.pendingDigitalSignature = {
+      ...current,
+      pageIndex: nextPageIndex,
+      x: clamped.x,
+      y: clamped.y,
+      width: clamped.width,
+      height: clamped.height,
+      showTextDetails: updates.showTextDetails ?? current.showTextDetails,
+      preset,
+    };
+  }
+
+  /**
+   * Applies a standard signature placement preset to the active canvas digital signature placement.
+   *
+   * @param preset Named preset position on the target page.
+   */
+  applyDigitalSignaturePreset(preset: Exclude<SignaturePlacementPreset, 'custom'>): void {
+    const current = this.store.pendingDigitalSignature;
+    if (!current) return;
+
+    let pageWidth = 612;
+    let pageHeight = 792;
+    try {
+      if (this.service.document && this.store.isDocumentLoaded) {
+        const dims = this.service.document.getPageDimensions(current.pageIndex);
+        pageWidth = dims.widthPts;
+        pageHeight = dims.heightPts;
+      }
+    } catch {
+      // Fallback to standard Letter dimensions
+    }
+
+    const rect = resolveSignaturePresetRect(
+      preset,
+      pageWidth,
+      pageHeight,
+      current.width,
+      current.height
+    );
+
+    this.store.pendingDigitalSignature = {
+      ...current,
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      preset,
+    };
+  }
+
+  /**
+   * Confirms the interactive digital signature placement on the canvas and executes cryptographic signing.
+   *
+   * @param canvasStore Optional CanvasStore instance to bake pending elements before signing.
+   * @return A promise resolving to the signed PDF bytes, or null if no placement is active.
+   */
+  async confirmPendingDigitalSignature(canvasStore?: CanvasStore): Promise<Uint8Array | null> {
+    const pending = this.store.pendingDigitalSignature;
+    if (!pending) return null;
+
+    let pageHeight = 792;
+    try {
+      if (this.service.document && this.store.isDocumentLoaded) {
+        const dims = this.service.document.getPageDimensions(pending.pageIndex);
+        pageHeight = dims.heightPts;
+      }
+    } catch {
+      // Fallback to standard Letter height
+    }
+
+    const pdfRect = canvasSignatureRectToPdfRect(
+      {
+        x: pending.x,
+        y: pending.y,
+        width: pending.width,
+        height: pending.height,
+      },
+      pageHeight
+    );
+
+    this.store.isSigningDocument = true;
+    try {
+      const signedBytes = await this.signActiveDocument(
+        {
+          ...pending.signOptions,
+          visual: {
+            pageIndex: pending.pageIndex,
+            x: pdfRect.x,
+            y: pdfRect.y,
+            width: pdfRect.width,
+            height: pdfRect.height,
+            graphicDataUrl: pending.graphicDataUrl,
+            showTextDetails: pending.showTextDetails,
+          },
+        },
+        canvasStore ?? this.canvasStore
+      );
+      this.store.pendingDigitalSignature = null;
+      pending.onSigned?.();
+      return signedBytes;
+    } finally {
+      this.store.isSigningDocument = false;
+    }
+  }
+
+  /**
+   * Cancels the active interactive digital signature placement on the canvas.
+   */
+  cancelPendingDigitalSignature(): void {
+    this.store.pendingDigitalSignature = null;
+  }
+
+  /**
    * Digitally signs the active document conforming to PDF ISO 32000 Section 12.8,
    * applying any pending canvas elements first and reloading into the engine.
    *
@@ -6734,15 +6985,48 @@ export class EditorActions {
     options: SignPdfOptions,
     canvasStore?: CanvasStore
   ): Promise<Uint8Array> {
+    if (this.store.isReadOnly) {
+      this.store.setViewMode('editing');
+    }
+    this.store.activeTool = 'select';
+    if (this.store.selectMode === 'text') {
+      this.store.selectMode = 'select';
+    }
+
     if (canvasStore && canvasStore.elements.length > 0) {
       await this.applyCanvasComponentsToPdf(canvasStore.elements, () => {
         canvasStore.elements = [];
       });
     }
 
+    let resolvedOptions: SignPdfOptions = {
+      ...options,
+      subFilter: options.subFilter ?? 'ETSI.CAdES.detached',
+      embedDss: options.embedDss ?? true,
+      enableTimestamp: options.enableTimestamp ?? true,
+    };
+    if (resolvedOptions.visual && !resolvedOptions.visual.isCompositeAppearance) {
+      const composed = await composeSignatureAppearanceDataUrl({
+        graphicDataUrl: resolvedOptions.visual.graphicDataUrl,
+        signerName: resolvedOptions.signerName || resolvedOptions.identity.subject.commonName,
+        showTextDetails: Boolean(resolvedOptions.visual.showTextDetails),
+      });
+      if (composed.isComposite && composed.dataUrl) {
+        resolvedOptions = {
+          ...resolvedOptions,
+          visual: {
+            ...resolvedOptions.visual,
+            graphicDataUrl: composed.dataUrl,
+            isCompositeAppearance: true,
+          },
+        };
+      }
+    }
+
     let signedBytes!: Uint8Array;
     await this.executeDocumentMutation('Sign Document', this.store.currentPageIndex, async () => {
-      signedBytes = await this.service.signActiveDocument(options, this.store.pageTransforms);
+      signedBytes = await this.service.signActiveDocument(resolvedOptions, this.store.pageTransforms);
+      this.store.pageTransforms = {};
 
       if (this.store.activeWorkspaceFileId) {
         const buffer = signedBytes.buffer.slice(
@@ -6756,11 +7040,6 @@ export class EditorActions {
     return signedBytes;
   }
 
-  /**
-   * Inspects and validates all ISO 32000 digital signatures present in the active document.
-   *
-   * @return A promise resolving to an array of signature validation reports.
-   */
   /**
    * Inspects and validates all ISO 32000 digital signatures present in the active document.
    *
@@ -6783,6 +7062,8 @@ export class EditorActions {
       this.store.fileName = fileName;
       this.store.currentPageIndex = 0;
       this.store.isDocumentLoaded = true;
+      this.store.leftPanelCollapsed = false;
+      this.store.rightPanelCollapsed = false;
       this.clearSelection(false);
       useSelection().clear();
       this.store.pageTransforms = {};
@@ -6812,6 +7093,7 @@ export class EditorActions {
 
       const newFileId = crypto.randomUUID();
       setFileBuffer(newFileId, buffer);
+      setFileCredential(newFileId, password);
       this.service.addFile({
         id: newFileId,
         fileName,
@@ -6872,6 +7154,7 @@ export class EditorActions {
 
     const authPwd = ownerPassword || userPassword || '';
     setFileBuffer(fileId, newBuffer);
+    setFileCredential(fileId, authPwd);
     this.service.loadDocumentFromBuffer(newBuffer, authPwd);
     this.store.isOwnerUnlocked = this.service.document.isOwnerUnlocked();
     this.store.incrementRenderVersion();
@@ -6894,6 +7177,7 @@ export class EditorActions {
       ) as ArrayBuffer;
 
       setFileBuffer(fileId, newBuffer);
+      setFileCredential(fileId, '');
       this.service.loadDocumentFromBuffer(newBuffer);
       this.store.isOwnerUnlocked = true;
       this.store.incrementRenderVersion();
@@ -6926,16 +7210,18 @@ export class EditorActions {
       return { fieldsUnlockedCount: 0, annotationsUnlockedCount: 0 };
     }
 
-    const currentBytes = await this.service.document.saveAsync(this.store.pageTransforms);
-    const prevBuffer = currentBytes.buffer.slice(
-      currentBytes.byteOffset,
-      currentBytes.byteOffset + currentBytes.byteLength
+    const session = await this.service.document.saveForRewrite(this.store.pageTransforms);
+    const sealedPrevBytes = await session.seal(session.bytes);
+    const prevBuffer = sealedPrevBytes.buffer.slice(
+      sealedPrevBytes.byteOffset,
+      sealedPrevBytes.byteOffset + sealedPrevBytes.byteLength
     ) as ArrayBuffer;
 
-    const result = await this.service.unlockAcroFormFields(currentBytes);
-    const newBuffer = result.unlockedBytes.buffer.slice(
-      result.unlockedBytes.byteOffset,
-      result.unlockedBytes.byteOffset + result.unlockedBytes.byteLength
+    const result = await this.service.unlockAcroFormFields(session.bytes);
+    const unlockedBytes = await session.seal(result.unlockedBytes);
+    const newBuffer = unlockedBytes.buffer.slice(
+      unlockedBytes.byteOffset,
+      unlockedBytes.byteOffset + unlockedBytes.byteLength
     ) as ArrayBuffer;
 
     const cmd = new UnlockFormsCommand(
@@ -6969,6 +7255,55 @@ export class EditorActions {
     await this.applyPasswordSecurity(undefined, ownerPassword, mask);
     this.store.closePermissionsDialog();
   }
+
+  /**
+   * Updates an AcroForm field value in the active document state.
+   *
+   * @param pageIndex Zero-based page index.
+   * @param fieldName Target field identifier or name.
+   * @param value New value (string text or boolean checked state).
+   * @param isRadio Whether the field is a radio button requiring group deselection.
+   */
+  updateFormFieldValue(
+    pageIndex: number,
+    fieldName: string,
+    value: string | boolean,
+    isRadio?: boolean
+  ): void {
+    if (!this.service?.document) return;
+    this.service.document.setFormFieldValue(fieldName, value, pageIndex);
+
+    const activeFileId = this.store.activeWorkspaceFileId;
+    if (activeFileId && typeof this.service.document.getModifiedFormFieldValues === 'function') {
+      const activeFile = this.service.getFile(activeFileId);
+      if (activeFile) {
+        activeFile.formFieldValues = Object.fromEntries(
+          this.service.document.getModifiedFormFieldValues()
+        );
+      }
+    }
+
+    if (isRadio && this.canvasStore) {
+      for (const el of this.canvasStore.elements) {
+        if (el.kind === 'form-field' && el.pageIndex === pageIndex) {
+          const fEl = el as import('./canvas-types').FormFieldElement;
+          const group = fEl.sourceFieldName || fEl.label;
+          if (group === fieldName && fEl.id !== fieldName) {
+            fEl.value = 'false';
+          }
+        }
+      }
+    }
+
+    if (this.store.activeFormField) {
+      const activeName = this.store.activeFormField.fieldName || this.store.activeFormField.fieldId || this.store.activeFormField.name || this.store.activeFormField.id;
+      if (activeName === fieldName) {
+        this.store.activeFormField = { ...this.store.activeFormField, value };
+      }
+    }
+
+    this.store.incrementFormFieldVersion();
+  }
 }
 
 
@@ -6993,33 +7328,24 @@ function colorToCss(c?: ColorRgba): string {
 function isBoldTypography(rawFont?: string, weight?: string | number): boolean {
   if (typeof weight === 'number') return weight >= 600;
   if (weight === 'bold') return true;
-  const raw = (rawFont || '').toLowerCase();
-  return (
-    raw.includes('bold') ||
-    raw.includes('black') ||
-    raw.includes('heavy') ||
-    raw.includes('semibold') ||
-    raw.includes('demibold') ||
-    raw.includes('extrabold')
-  );
+  return isBoldFontName(rawFont || '');
 }
 
 /** Check if a font or style denotes italic typography. */
 function isItalicTypography(rawFont?: string, style?: string): boolean {
   if (style === 'italic' || style === 'oblique') return true;
-  const raw = (rawFont || '').toLowerCase();
-  return raw.includes('italic') || raw.includes('oblique');
+  return isItalicFontName(rawFont || '');
 }
 
 /**
  * Extracts structured multi-line and multi-segment typography from an EditableTextSpan,
- * preserving individual portion styles (bold, italic, font family, color, size).
+ * preserving individual portion styles (bold, italic, font family, colour, size).
  *
  * @param span The source native editable text span.
  * @param id The unique element ID for the created text element.
  * @return A fully populated TextElement.
  */
-export function buildTextElementFromSpan(span: EditableTextSpan, id: string): TextElement {
+export function buildTextElementFromSpan(span: EditableTextSpan, id: string | number = span.id): TextElement {
   const sourceLines =
     span.lines && span.lines.length > 0
       ? span.lines
@@ -7035,6 +7361,9 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
             fontSize: span.fontSize,
             baselineY: span.baselineY,
             lineHeight: span.lineHeight || span.fontSize * 1.25,
+            letterSpacing: span.letterSpacing,
+            wordSpacing: span.wordSpacing,
+            scaleX: span.scaleX,
             charStartIndex: span.charStartIndex,
             charCount: span.charCount,
             words: [],
@@ -7054,6 +7383,9 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
     const lineTopRel = Math.max(0, line.top - span.top);
     const lineLeftRel = Math.max(0, line.left - span.left);
     const lH = line.lineHeight || span.lineHeight || line.fontSize * 1.25;
+    const lineLetterSpacing = line.letterSpacing ?? span.letterSpacing;
+    const lineWordSpacing = line.wordSpacing ?? span.wordSpacing;
+    const lineScaleX = line.scaleX ?? span.scaleX;
 
     if (line.hasBulletPrefix && line.bulletWord) {
       const bWord = line.bulletWord;
@@ -7106,7 +7438,9 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
             const hasSpace =
               !endsWithWs &&
               !startsWithWs &&
-              (Boolean(w.hasPrecedingSpace) || gap >= Math.min(prev.fontSize, w.fontSize) * 0.12 || gap >= 0.5);
+              (w.hasPrecedingSpace !== undefined
+                ? Boolean(w.hasPrecedingSpace)
+                : gap >= Math.min(prev.fontSize, w.fontSize) * 0.18);
             if (hasSpace) {
               segText += ' ';
             }
@@ -7117,10 +7451,13 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
             const prevLeft = prevSeg.left ?? 0;
             const prevWidth = prevSeg.width ?? 0;
             const gap = w.left - (prevLeft + prevWidth);
+            const prevFs = prevSeg.fontSize || line.fontSize || span.fontSize;
             const hasSpace =
               !endsWithWs &&
               !startsWithWs &&
-              (Boolean(w.hasPrecedingSpace) || gap >= 0.5);
+              (w.hasPrecedingSpace !== undefined
+                ? Boolean(w.hasPrecedingSpace)
+                : gap >= Math.min(prevFs, w.fontSize) * 0.18);
             if (hasSpace) {
               segText += ' ';
             }
@@ -7134,11 +7471,15 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
         const isItalic = isItalicTypography(rawFont, firstW.fontStyle || line.fontStyle);
         const colStr = colorToCss(firstW.color || line.color || span.color);
         const fSize = firstW.fontSize || line.fontSize || span.fontSize;
+        const segUnderline = firstW.underline ?? line.underline ?? span.underline;
+        const segStrike = firstW.strikethrough ?? line.strikethrough ?? span.strikethrough;
+        const segBg = firstW.backgroundColor ?? line.backgroundColor ?? span.backgroundColor;
+        const segLetterSpacing = firstW.letterSpacing ?? lineLetterSpacing;
 
         const segLeftRel = Math.max(0, firstW.left - span.left);
         const segTopRel = Math.max(0, firstW.top - span.top);
-        const segW = Math.max(1, lastW.right - firstW.left);
-        const segH = Math.max(fSize * 1.1, lastW.bottom - firstW.top);
+        const segW = Math.max(1, (lastW.right ?? lastW.left + lastW.width) - firstW.left);
+        const segH = Math.max(fSize, (lastW.bottom ?? lastW.top + lastW.height) - firstW.top);
 
         const segment: TextSegment = {
           text: segText,
@@ -7147,9 +7488,14 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
           rawFontFamily: rawFont,
           fontWeight: isBold ? 'bold' : 'normal',
           fontStyle: isItalic ? 'italic' : 'normal',
+          ...(segLetterSpacing ? { letterSpacing: segLetterSpacing } : {}),
+          ...(lineWordSpacing !== undefined ? { wordSpacing: lineWordSpacing } : {}),
+          underline: segUnderline,
+          strikethrough: segStrike,
+          backgroundColor: segBg,
           color: colStr,
           charStartIndex: firstW.charStartIndex,
-          charCount: currentSegmentWords.reduce((sum, w) => sum + w.charCount, 0),
+          charCount: currentSegmentWords.reduce((sum, w) => sum + (w.charCount ?? w.text.length), 0),
           left: segLeftRel,
           top: segTopRel,
           width: segW,
@@ -7164,12 +7510,18 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
 
       for (const word of line.words) {
         const rawFont = word.rawFontFamily || line.rawFontFamily || span.rawFontFamily || '';
+        const detectedFont = word.fontFamily || line.fontFamily || span.fontFamily || '';
         const isBold = isBoldTypography(rawFont, word.fontWeight || line.fontWeight);
         const isItalic = isItalicTypography(rawFont, word.fontStyle || line.fontStyle);
         const col = colorToCss(word.color || line.color || span.color);
         const fSize = Math.round((word.fontSize || line.fontSize || span.fontSize) * 10) / 10;
+        const isU = Boolean(word.underline ?? line.underline ?? span.underline);
+        const isS = Boolean(word.strikethrough ?? line.strikethrough ?? span.strikethrough);
+        const bg = word.backgroundColor ?? line.backgroundColor ?? span.backgroundColor ?? '';
+        const ls = word.letterSpacing ?? lineLetterSpacing ?? '';
 
-        const styleKey = `${rawFont}__${isBold}__${isItalic}__${col}__${fSize}`;
+        const cleanRaw = cleanSubsetPrefix(rawFont);
+        const styleKey = `${detectedFont}__${cleanRaw}__${isBold}__${isItalic}__${col}__${fSize}__${isU}__${isS}__${bg}__${ls}`;
 
         if (currentSegmentWords.length > 0 && styleKey !== currentStyleKey) {
           flushSegment();
@@ -7195,6 +7547,11 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
         rawFontFamily: rawFont,
         fontWeight: isBold ? 'bold' : 'normal',
         fontStyle: isItalic ? 'italic' : 'normal',
+        ...(lineLetterSpacing ? { letterSpacing: lineLetterSpacing } : {}),
+        ...(lineWordSpacing !== undefined ? { wordSpacing: lineWordSpacing } : {}),
+        underline: line.underline ?? span.underline,
+        strikethrough: line.strikethrough ?? span.strikethrough,
+        backgroundColor: line.backgroundColor ?? span.backgroundColor,
         color: colStr,
         charStartIndex: line.charStartIndex,
         charCount: line.charCount,
@@ -7213,12 +7570,17 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
       text: line.text,
       segments: lineSegments,
       lineHeight: lH,
+      ...(lineLetterSpacing ? { letterSpacing: lineLetterSpacing } : {}),
+      ...(lineWordSpacing !== undefined ? { wordSpacing: lineWordSpacing } : {}),
+      ...(lineScaleX !== undefined ? { scaleX: lineScaleX } : {}),
       top: lineTopRel,
       left: lineLeftRel,
       width: line.width,
       height: line.height,
       fontSize: line.fontSize || span.fontSize,
       baselineY: line.baselineY,
+      underline: line.underline ?? span.underline,
+      strikethrough: line.strikethrough ?? span.strikethrough,
     });
   }
 
@@ -7226,21 +7588,29 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
   const dominantIsBold = isBoldTypography(dominantRawFont, span.fontWeight);
   const dominantIsItalic = isItalicTypography(dominantRawFont, span.fontStyle);
 
-  const advanceBuffer = Math.max(8, Math.round(span.fontSize * 0.5 * 10) / 10);
   const maxLineWidth = elementLines.reduce(
     (max, l) => Math.max(max, (l.left || 0) + (l.width || 0)),
     span.width
   );
-  const calculatedWidth = Math.ceil(Math.max(span.width, maxLineWidth) + advanceBuffer);
+  const calculatedWidth = Math.round(Math.max(span.width, maxLineWidth) * 100) / 100;
+  const calculatedHeight = Math.round(span.height * 100) / 100;
+  const resolvedElementLineHeight =
+    span.lineHeight || elementLines[0]?.lineHeight || span.fontSize * 1.25;
+  const resolvedElementLetterSpacing =
+    span.letterSpacing || elementLines[0]?.letterSpacing;
+  const resolvedElementWordSpacing =
+    span.wordSpacing ?? elementLines[0]?.wordSpacing;
+  const resolvedElementScaleX =
+    span.scaleX ?? elementLines[0]?.scaleX;
 
   return {
-    id,
+    id: String(id),
     kind: 'text',
     pageIndex: span.pageIndex,
     x: span.left,
     y: span.top,
     width: calculatedWidth,
-    height: Math.ceil(span.height + 2),
+    height: calculatedHeight,
     rotation: span.rotation || 0,
     locked: false,
     visible: true,
@@ -7251,10 +7621,16 @@ export function buildTextElementFromSpan(span: EditableTextSpan, id: string): Te
     fontFamily: span.fontFamily || 'Helvetica',
     rawFontFamily: span.rawFontFamily,
     color: colorToCss(span.color),
+    backgroundColor: span.backgroundColor,
     fontWeight: dominantIsBold ? 'bold' : 'normal',
     fontStyle: dominantIsItalic ? 'italic' : 'normal',
-    textAlign: 'left',
-    lineHeight: span.lineHeight || span.fontSize * 1.25,
+    underline: span.underline,
+    strikethrough: span.strikethrough,
+    textAlign: span.textAlign || 'left',
+    lineHeight: resolvedElementLineHeight,
+    ...(resolvedElementLetterSpacing ? { letterSpacing: resolvedElementLetterSpacing } : {}),
+    ...(resolvedElementWordSpacing !== undefined ? { wordSpacing: resolvedElementWordSpacing } : {}),
+    ...(resolvedElementScaleX !== undefined ? { scaleX: resolvedElementScaleX } : {}),
     lines: elementLines,
     segments: allSegments,
     originalSpan: span,
