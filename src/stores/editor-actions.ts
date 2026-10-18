@@ -2464,6 +2464,37 @@ export class EditorActions {
     } else {
       this.store.selectedSpan = span;
     }
+  }
+
+  /**
+   * Toggles selection state of an individual PDF overlay span.
+   *
+   * @param span Target editable span.
+   */
+  toggleSpanSelection(span: EditableSpan): void {
+    this.selectSpan(span, true);
+  }
+
+  /**
+   * Replaces or appends multiple spans to the active selection.
+   *
+   * @param spans Collection of editable spans to select.
+   * @param additive Whether to append to existing selection.
+   */
+  selectSpans(spans: EditableSpan[], additive: boolean = false): void {
+    if (this.store.isReadOnly || this.store.canSelectElements === false) {
+      return;
+    }
+    if (this.store.inlineEdit) {
+      this.submitInlineEdit();
+    }
+    if (additive) {
+      const existingIds = new Set(this.store.selectedSpans.map((s) => s.id));
+      const fresh = spans.filter((s) => !existingIds.has(s.id));
+      this.store.selectedSpans = [...this.store.selectedSpans, ...fresh];
+    } else {
+      this.store.selectedSpans = [...spans];
+    }
     this.store.inlineEdit = null;
   }
 
@@ -2487,7 +2518,7 @@ export class EditorActions {
     let targetSpan = span;
     if (this.store.isDocumentLoaded && !span.isOcr) {
       try {
-        const pageSpans = this.service.document.getPage(span.pageIndex).extractTextSpans();
+        const pageSpans = this.getPageTextSpansFast(span.pageIndex);
         let freshSpan = pageSpans.find((s) => s.id === span.id);
         if (!freshSpan) {
           let minDistance = Infinity;
@@ -2500,6 +2531,12 @@ export class EditorActions {
           }
         }
         if (freshSpan) {
+          if (span.textAlign && !freshSpan.textAlign) {
+            freshSpan.textAlign = span.textAlign;
+          }
+          if (span.originalLeft !== undefined && freshSpan.originalLeft === undefined) {
+            freshSpan.originalLeft = span.originalLeft;
+          }
           targetSpan = freshSpan;
         }
       } catch {}
@@ -2544,6 +2581,67 @@ export class EditorActions {
   }
 
   /**
+   * Determines whether any textual, typographical, or visual style modifications
+   * were introduced during an inline editing session relative to the original span.
+   */
+  private hasInlineEditModifications(
+    originalSpan: EditableTextSpan,
+    submittedText: string,
+    submittedLines?: TextLine[]
+  ): boolean {
+    if (submittedText !== originalSpan.text) {
+      return true;
+    }
+    if (!submittedLines || submittedLines.length === 0) {
+      return false;
+    }
+    const origLines = originalSpan.lines;
+    if (!origLines || origLines.length !== submittedLines.length) {
+      return true;
+    }
+    for (let lIdx = 0; lIdx < submittedLines.length; lIdx++) {
+      const sLine = submittedLines[lIdx];
+      const oLine = origLines[lIdx];
+      if (sLine.text !== oLine.text) return true;
+      if (sLine.fontSize !== undefined && Math.abs((sLine.fontSize || originalSpan.fontSize) - (oLine.fontSize || originalSpan.fontSize)) > 0.1) return true;
+      if (
+        sLine.lineHeight !== undefined &&
+        Math.abs(
+          (sLine.lineHeight || originalSpan.lineHeight || originalSpan.fontSize * 1.25) -
+            (oLine.lineHeight || originalSpan.lineHeight || originalSpan.fontSize * 1.25)
+        ) > 0.1
+      ) {
+        return true;
+      }
+      if ((sLine.letterSpacing || 'normal') !== (oLine.letterSpacing || originalSpan.letterSpacing || 'normal')) return true;
+      if (sLine.fontFamily && sLine.fontFamily !== (oLine.fontFamily || originalSpan.fontFamily)) return true;
+      if (sLine.fontWeight && sLine.fontWeight !== (oLine.fontWeight || originalSpan.fontWeight)) return true;
+      if (sLine.fontStyle && sLine.fontStyle !== (oLine.fontStyle || originalSpan.fontStyle)) return true;
+      if (Boolean(sLine.underline) !== Boolean(oLine.underline ?? originalSpan.underline)) return true;
+      if (Boolean(sLine.strikethrough) !== Boolean(oLine.strikethrough ?? originalSpan.strikethrough)) return true;
+      if ((sLine.backgroundColor || undefined) !== (oLine.backgroundColor || originalSpan.backgroundColor || undefined)) return true;
+      if (sLine.words && oLine.words) {
+        if (sLine.words.length !== oLine.words.length) return true;
+        for (let wIdx = 0; wIdx < sLine.words.length; wIdx++) {
+          const sWord = sLine.words[wIdx];
+          const oWord = oLine.words[wIdx];
+          if (sWord.text !== oWord.text) return true;
+          if (sWord.fontSize !== undefined && Math.abs((sWord.fontSize || oLine.fontSize || originalSpan.fontSize) - (oWord.fontSize || oLine.fontSize || originalSpan.fontSize)) > 0.1) return true;
+          if (sWord.fontFamily && sWord.fontFamily !== (oWord.fontFamily || oLine.fontFamily || originalSpan.fontFamily)) return true;
+          if (sWord.fontWeight && sWord.fontWeight !== (oWord.fontWeight || oLine.fontWeight || originalSpan.fontWeight)) return true;
+          if (sWord.fontStyle && sWord.fontStyle !== (oWord.fontStyle || oLine.fontStyle || originalSpan.fontStyle)) return true;
+          if ((sWord.letterSpacing || 'normal') !== (oWord.letterSpacing || oLine.letterSpacing || originalSpan.letterSpacing || 'normal')) return true;
+          if (Boolean(sWord.underline) !== Boolean(oWord.underline ?? oLine.underline ?? originalSpan.underline)) return true;
+          if (Boolean(sWord.strikethrough) !== Boolean(oWord.strikethrough ?? oLine.strikethrough ?? originalSpan.strikethrough)) return true;
+          if ((sWord.backgroundColor || undefined) !== (oWord.backgroundColor || oLine.backgroundColor || originalSpan.backgroundColor || undefined)) return true;
+          if (sWord.color && oWord.color && !isColorEqual(sWord.color, oWord.color)) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
    * Submits and commits the active inline text edit.
    * Clears inlineEdit state safely first to prevent recursive re-entry.
    *
@@ -2559,6 +2657,207 @@ export class EditorActions {
     const span = inlineEdit.span;
     const textValue = extractedData?.text ?? inlineEdit.textValue;
     const customLines = extractedData?.lines ?? inlineEdit.styledLines;
+
+    // When the user submits without making any edits, restore the original PDF text and deselect
+    const hasModifications = this.hasInlineEditModifications(span, textValue, customLines);
+    if (!hasModifications) {
+      if (!span.isOcr && this.store.isDocumentLoaded) {
+        try {
+          this.service.document.replaceTextSpan(
+            span.pageIndex,
+            span,
+            {
+              text: span.text,
+              fontSize: span.fontSize,
+              fontFamily: span.fontFamily,
+              color: span.color,
+              backgroundColor: span.backgroundColor,
+              underline: span.underline,
+              strikethrough: span.strikethrough,
+              lineHeight: span.lineHeight,
+              letterSpacing: span.letterSpacing,
+              fontWeight: span.fontWeight,
+              fontStyle: span.fontStyle,
+              lines: span.lines,
+              forceTextRestore: true,
+            }
+          );
+        } catch (err) {
+          console.error('Failed to restore text span on inline edit submit without changes:', err);
+        }
+      }
+      this.store.clearSelection();
+      this.store.selectedSpan = null;
+      if (this.canvasStore) {
+        this.canvasStore.selectElement(null);
+      }
+      setActiveEditorSelection(null);
+      this.store.incrementPageVersion(span.pageIndex);
+      this.refreshDocument();
+      return;
+    }
+
+    const effectiveLines = customLines || span.lines;
+    const hasExplicitUnderline = Boolean(
+      effectiveLines &&
+      effectiveLines.some((l) => l.underline !== undefined || (l.words && l.words.some((w) => w.underline !== undefined)))
+    );
+    const allLinesUnderline = Boolean(
+      effectiveLines &&
+      effectiveLines.length > 0 &&
+      effectiveLines.every((l) =>
+        l.underline || (l.words && l.words.length > 0 && l.words.every((w) => Boolean(w.underline)))
+      )
+    );
+    const anyWordUnderline = Boolean(
+      effectiveLines &&
+      effectiveLines.some((l) =>
+        l.underline || (l.words && l.words.some((w) => Boolean(w.underline)))
+      )
+    );
+    const resolvedUnderline = hasExplicitUnderline
+      ? (allLinesUnderline ? true : (anyWordUnderline ? undefined : false))
+      : span.underline;
+
+    const hasExplicitStrike = Boolean(
+      effectiveLines &&
+      effectiveLines.some((l) => l.strikethrough !== undefined || (l.words && l.words.some((w) => w.strikethrough !== undefined)))
+    );
+    const allLinesStrike = Boolean(
+      effectiveLines &&
+      effectiveLines.length > 0 &&
+      effectiveLines.every((l) =>
+        l.strikethrough || (l.words && l.words.length > 0 && l.words.every((w) => Boolean(w.strikethrough)))
+      )
+    );
+    const anyWordStrike = Boolean(
+      effectiveLines &&
+      effectiveLines.some((l) =>
+        l.strikethrough || (l.words && l.words.some((w) => Boolean(w.strikethrough)))
+      )
+    );
+    const resolvedStrike = hasExplicitStrike
+      ? (allLinesStrike ? true : (anyWordStrike ? undefined : false))
+      : span.strikethrough;
+
+    const firstWordBg = effectiveLines?.[0]?.words?.[0]?.backgroundColor ?? effectiveLines?.[0]?.backgroundColor;
+    const allLinesSameBg = Boolean(
+      firstWordBg &&
+      effectiveLines &&
+      effectiveLines.length > 0 &&
+      effectiveLines.every((l) =>
+        l.backgroundColor === firstWordBg ||
+        (l.words && l.words.length > 0 && l.words.every((w) => w.backgroundColor === firstWordBg))
+      )
+    );
+    const anyWordBg = Boolean(
+      effectiveLines &&
+      effectiveLines.some((l) =>
+        Boolean(l.backgroundColor) ||
+        Boolean(l.words && l.words.some((w) => Boolean(w.backgroundColor)))
+      )
+    );
+    const resolvedBg = effectiveLines && effectiveLines.length > 0
+      ? (allLinesSameBg ? firstWordBg : (anyWordBg ? span.backgroundColor : undefined))
+      : span.backgroundColor;
+
+    const firstCustomFont =
+      customLines?.[0]?.words?.[0]?.fontFamily || customLines?.[0]?.fontFamily;
+    const allCustomSameFont = Boolean(
+      firstCustomFont &&
+      customLines &&
+      customLines.length > 0 &&
+      customLines.every((l) =>
+        !l.words || l.words.length === 0
+          ? l.fontFamily === firstCustomFont
+          : l.words.every((w) => (w.fontFamily || l.fontFamily) === firstCustomFont)
+      )
+    );
+    const resolvedFontFamily =
+      (allCustomSameFont ? firstCustomFont : undefined) || span.fontFamily;
+    const resolvedLineHeight = customLines?.[0]?.lineHeight || span.lineHeight;
+    const firstWordLs = customLines?.[0]?.words?.[0]?.letterSpacing;
+    const allWordsSameLs = Boolean(
+      firstWordLs &&
+      customLines?.[0]?.words &&
+      customLines[0].words.every((w) => w.letterSpacing === firstWordLs)
+    );
+    const resolvedLetterSpacing =
+      customLines?.[0]?.letterSpacing ||
+      (allWordsSameLs ? firstWordLs : undefined) ||
+      span.letterSpacing;
+    const resolvedWordSpacing =
+      customLines?.[0]?.wordSpacing !== undefined
+        ? customLines[0].wordSpacing
+        : span.wordSpacing;
+
+    const firstCustomFontSize =
+      customLines?.[0]?.words?.[0]?.fontSize ?? customLines?.[0]?.fontSize;
+    const allCustomSameFontSize = Boolean(
+      firstCustomFontSize !== undefined &&
+      customLines &&
+      customLines.length > 0 &&
+      customLines.every((l) =>
+        !l.words || l.words.length === 0
+          ? Math.abs(l.fontSize - firstCustomFontSize) <= 0.2
+          : l.words.every((w) => Math.abs((w.fontSize ?? l.fontSize) - firstCustomFontSize) <= 0.2)
+      )
+    );
+    const resolvedFontSize =
+      allCustomSameFontSize && firstCustomFontSize !== undefined
+        ? firstCustomFontSize
+        : span.fontSize;
+
+    const firstCustomColor =
+      customLines?.[0]?.words?.[0]?.color ?? customLines?.[0]?.color;
+    const allCustomSameColor = Boolean(
+      firstCustomColor &&
+      customLines &&
+      customLines.length > 0 &&
+      customLines.every((l) =>
+        !l.words || l.words.length === 0
+          ? isColorEqual(l.color, firstCustomColor)
+          : l.words.every((w) => isColorEqual(w.color ?? l.color, firstCustomColor))
+      )
+    );
+    const resolvedColor =
+      customLines && customLines.length > 0
+        ? (allCustomSameColor && firstCustomColor ? firstCustomColor : span.color)
+        : span.color;
+
+    const firstCustomWeight = (customLines?.[0]?.words?.[0]?.fontWeight ??
+      customLines?.[0]?.fontWeight) as 'normal' | 'bold' | undefined;
+    const allCustomSameWeight = Boolean(
+      firstCustomWeight &&
+      customLines &&
+      customLines.length > 0 &&
+      customLines.every((l) =>
+        !l.words || l.words.length === 0
+          ? (l.fontWeight || 'normal') === firstCustomWeight
+          : l.words.every((w) => (w.fontWeight || l.fontWeight || 'normal') === firstCustomWeight)
+      )
+    );
+    const resolvedFontWeight =
+      customLines && customLines.length > 0
+        ? (allCustomSameWeight ? firstCustomWeight : undefined)
+        : span.fontWeight;
+
+    const firstCustomStyle = (customLines?.[0]?.words?.[0]?.fontStyle ??
+      customLines?.[0]?.fontStyle) as 'normal' | 'italic' | undefined;
+    const allCustomSameStyle = Boolean(
+      firstCustomStyle &&
+      customLines &&
+      customLines.length > 0 &&
+      customLines.every((l) =>
+        !l.words || l.words.length === 0
+          ? (l.fontStyle || 'normal') === firstCustomStyle
+          : l.words.every((w) => (w.fontStyle || l.fontStyle || 'normal') === firstCustomStyle)
+      )
+    );
+    const resolvedFontStyle =
+      customLines && customLines.length > 0
+        ? (allCustomSameStyle ? firstCustomStyle : undefined)
+        : span.fontStyle;
 
     if (span.isOcr) {
       const isMultiLine = Boolean(
@@ -2577,8 +2876,10 @@ export class EditorActions {
         underline: span.underline,
         strikethrough: span.strikethrough,
         lineHeight: span.lineHeight,
+        letterSpacing: span.letterSpacing,
         fontWeight: span.fontWeight,
         fontStyle: span.fontStyle,
+        textAlign: span.textAlign,
         left: span.left,
         top: span.top,
         lines: span.lines,
@@ -2588,16 +2889,19 @@ export class EditorActions {
       const newOptions: TextMutationOptions = {
         text: textValue,
         fontSize: span.fontSize,
-        fontFamily: span.fontFamily,
+        fontFamily: resolvedFontFamily,
         color: span.color,
-        backgroundColor: span.backgroundColor,
-        underline: span.underline,
-        strikethrough: span.strikethrough,
-        lineHeight: span.lineHeight,
+        backgroundColor: resolvedBg,
+        underline: resolvedUnderline !== undefined ? resolvedUnderline : span.underline,
+        strikethrough: resolvedStrike !== undefined ? resolvedStrike : span.strikethrough,
+        lineHeight: resolvedLineHeight,
+        letterSpacing: resolvedLetterSpacing,
         fontWeight: span.fontWeight,
         fontStyle: span.fontStyle,
-        lines: customLines || span.lines,
+        textAlign: span.textAlign,
+        lines: customLines || (textValue === span.text ? span.lines : undefined),
         reflowParagraph: isMultiLine,
+        forceTextRestore: true,
       };
 
       await this.executeCommand(
@@ -2631,8 +2935,10 @@ export class EditorActions {
         underline: span.underline,
         strikethrough: span.strikethrough,
         lineHeight: span.lineHeight,
+        letterSpacing: span.letterSpacing,
         fontWeight: span.fontWeight,
         fontStyle: span.fontStyle,
+        textAlign: span.textAlign,
         left: span.left,
         top: span.top,
         lines: span.lines,
@@ -2641,17 +2947,21 @@ export class EditorActions {
 
       const newOptions: TextMutationOptions = {
         text: textValue,
-        fontSize: hasMixedFontSize ? undefined : span.fontSize,
-        fontFamily: span.fontFamily,
-        color: span.color,
-        backgroundColor: span.backgroundColor,
-        underline: span.underline,
-        strikethrough: span.strikethrough,
-        lineHeight: span.lineHeight,
-        fontWeight: span.fontWeight,
-        fontStyle: span.fontStyle,
-        lines: customLines || span.lines,
+        fontSize: hasMixedFontSize ? undefined : resolvedFontSize,
+        fontFamily: resolvedFontFamily,
+        color: resolvedColor,
+        backgroundColor: resolvedBg,
+        underline: resolvedUnderline !== undefined ? resolvedUnderline : span.underline,
+        strikethrough: resolvedStrike !== undefined ? resolvedStrike : span.strikethrough,
+        lineHeight: resolvedLineHeight,
+        letterSpacing: resolvedLetterSpacing,
+        ...(resolvedWordSpacing !== undefined ? { wordSpacing: resolvedWordSpacing } : {}),
+        fontWeight: resolvedFontWeight,
+        fontStyle: resolvedFontStyle,
+        textAlign: span.textAlign,
+        lines: customLines || (textValue === span.text ? span.lines : undefined),
         reflowParagraph: isMultiLine,
+        forceTextRestore: true,
       };
 
       await this.executeCommand(
@@ -2692,9 +3002,15 @@ export class EditorActions {
               fontSize: span.fontSize,
               fontFamily: span.fontFamily,
               color: span.color,
+              backgroundColor: span.backgroundColor,
+              underline: span.underline,
+              strikethrough: span.strikethrough,
               lineHeight: span.lineHeight,
+              letterSpacing: span.letterSpacing,
               fontWeight: span.fontWeight,
               fontStyle: span.fontStyle,
+              lines: span.lines,
+              forceTextRestore: true,
             }
           );
           this.store.incrementPageVersion(span.pageIndex);
@@ -2710,6 +3026,11 @@ export class EditorActions {
     const spanToMutate = targetSpan || (this.store.selectedSpan?.type === 'text' ? this.store.selectedSpan as EditableTextSpan : undefined);
     if (!spanToMutate || spanToMutate.type !== 'text' || !this.store.isDocumentLoaded) return;
     const pageIndex = spanToMutate.pageIndex;
+    spanToMutate.originalLeft = spanToMutate.originalLeft ?? spanToMutate.left;
+    const previousTextAlign = spanToMutate.textAlign;
+    if (options.textAlign !== undefined) {
+      spanToMutate.textAlign = options.textAlign;
+    }
 
     const prevOptions: TextMutationOptions = {
       text: spanToMutate.text,
@@ -2723,7 +3044,7 @@ export class EditorActions {
       underline: spanToMutate.underline,
       strikethrough: spanToMutate.strikethrough,
       backgroundColor: spanToMutate.backgroundColor,
-      textAlign: spanToMutate.textAlign,
+      textAlign: previousTextAlign,
       left: spanToMutate.left,
       top: spanToMutate.top,
       lines: spanToMutate.lines,
@@ -2763,11 +3084,7 @@ export class EditorActions {
     this.refreshDocument();
   }
 
-  async deleteSelectedSpan(): Promise<void> {
-    if (this.store.isReadOnly || this.store.canEditContent === false) return;
-    const { selectedSpan } = this.store;
-    if (!selectedSpan || !this.store.isDocumentLoaded) return;
-    
+  private async deleteSingleSpan(selectedSpan: EditableSpan): Promise<void> {
     if (selectedSpan.type === 'text') {
       const textSpan = selectedSpan as EditableTextSpan;
       if (textSpan.isOcr) {
@@ -2795,54 +3112,320 @@ export class EditorActions {
         commands.push(new RemoveAcroFormFieldCommand('Remove Native Form Field', fieldName));
       }
       await this.executeCommand(new CompoundCommand('Delete Form Field', commands));
-      this.store.clearSelection();
-    } else if ('pdfObjectIndex' in selectedSpan && typeof selectedSpan.pdfObjectIndex === 'number') {
-      await this.executeDocumentMutation('Delete Object', selectedSpan.pageIndex, () => {
-        this.service.document.getPage(selectedSpan.pageIndex).removeObject(selectedSpan.pdfObjectIndex);
-        this.service.document.invalidatePage(selectedSpan.pageIndex);
-        this.store.clearSelection();
-        this.store.incrementPageVersion(selectedSpan.pageIndex);
-      });
+    } else if ('pdfAnnotIndex' in selectedSpan && typeof selectedSpan.pdfAnnotIndex === 'number' && selectedSpan.pdfAnnotIndex >= 0) {
+      const annotIndex = selectedSpan.pdfAnnotIndex;
+      const spanId = selectedSpan.id;
+      this.store.hiddenSpanIds.add(spanId);
+      await this.executeDocumentMutation(
+        'Delete Annotation',
+        selectedSpan.pageIndex,
+        () => {
+          const page = this.service.document.getPage(selectedSpan.pageIndex);
+          page.removeAnnotation(annotIndex, {
+            left: selectedSpan.left,
+            top: selectedSpan.top,
+            width: selectedSpan.width,
+            height: selectedSpan.height,
+          });
+          page.generateContent?.();
+          this.service.document.invalidatePage(selectedSpan.pageIndex);
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { onlyIncrementTargetPageVersion: true },
+      );
+    } else if ('pdfObjectIndex' in selectedSpan && typeof selectedSpan.pdfObjectIndex === 'number' && selectedSpan.pdfObjectIndex >= 0) {
+      const spanId = selectedSpan.id;
+      this.store.hiddenSpanIds.add(spanId);
+      await this.executeDocumentMutation(
+        'Delete Object',
+        selectedSpan.pageIndex,
+        () => {
+          const page = this.service.document.getPage(selectedSpan.pageIndex);
+          page.removeObject(selectedSpan.pdfObjectIndex);
+          page.generateContent?.();
+          this.service.document.invalidatePage(selectedSpan.pageIndex);
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { onlyIncrementTargetPageVersion: true },
+      );
     }
-    this.refreshDocument();
+  }
+
+  private coalesceRecentCommands(pastLenBefore: number, label: string): void {
+    const state = this.historyStore?.activeCommandState;
+    if (!state) return;
+    const addedCount = state.past.length - pastLenBefore;
+    if (addedCount > 1) {
+      const popped = state.past.splice(pastLenBefore, addedCount);
+      const compound = new CompoundCommand(label, popped);
+      state.past.push(compound);
+      if (this.service?.document && typeof this.service.document.syncCommandStacks === 'function') {
+        this.service.document.syncCommandStacks(state.past, state.future);
+      }
+    }
+  }
+
+  async deleteSelectedSpan(): Promise<void> {
+    if (this.store.isReadOnly || this.store.canEditContent === false || this.store.canDeleteElements === false) return;
+    if (!this.store.isDocumentLoaded) return;
+    const spans = [...this.store.selectedSpans];
+    if (spans.length === 0) {
+      if (this.store.selectedSpan) {
+        spans.push(this.store.selectedSpan);
+      } else {
+        return;
+      }
+    }
+
+    // Sort spans in descending index order per page so removing annotations or page objects
+    // never shifts lower indices before they are processed.
+    spans.sort((a, b) => {
+      if (b.pageIndex !== a.pageIndex) return b.pageIndex - a.pageIndex;
+      const annotA = 'pdfAnnotIndex' in a && typeof a.pdfAnnotIndex === 'number' ? a.pdfAnnotIndex : -1;
+      const annotB = 'pdfAnnotIndex' in b && typeof b.pdfAnnotIndex === 'number' ? b.pdfAnnotIndex : -1;
+      if (annotB !== annotA) return annotB - annotA;
+      const objA = 'pdfObjectIndex' in a && typeof a.pdfObjectIndex === 'number' ? a.pdfObjectIndex : -1;
+      const objB = 'pdfObjectIndex' in b && typeof b.pdfObjectIndex === 'number' ? b.pdfObjectIndex : -1;
+      if (objB !== objA) return objB - objA;
+      return b.top - a.top;
+    });
+
+    const pastLenBefore = this.historyStore?.activeCommandState?.past.length ?? 0;
+    for (const span of spans) {
+      await this.deleteSingleSpan(span);
+    }
+    this.coalesceRecentCommands(pastLenBefore, 'Delete Spans');
+    this.store.clearSelection();
+    this.refreshDocument({ incrementRenderVersion: false });
   }
 
   /**
-   * Deletes the currently selected canvas element if one is selected.
+   * Deletes the currently selected canvas element or all selected canvas elements.
    */
   deleteSelectedElement(): void {
-    if (this.store.isReadOnly) return;
+    if (this.store.isReadOnly || this.store.canDeleteElements === false) return;
     if (this._canvasActions) {
       this._canvasActions.deleteSelectedElement();
       return;
     }
-    const id = this.canvasStore?.selectedElementId;
-    if (id && this.canvasStore) {
-      const el = this.canvasStore.elements.find((item) => item.id === id);
-      if (el && !el.locked) {
-        const kind = el.kind ?? 'Element';
-        const index = this.canvasStore.elements.findIndex((item) => item.id === id);
-        const snapshot = safeClone(el);
-        this.canvasStore.removeElement(id);
-        this.pushCommand(new RemoveElementCommand(`Delete ${kind}`, id, snapshot, index));
+    const ids = this.canvasStore ? [...this.canvasStore.selectedElementIds] : [];
+    if (ids.length === 0 && this.canvasStore?.selectedElementId) {
+      ids.push(this.canvasStore.selectedElementId);
+    }
+    if (ids.length > 0 && this.canvasStore) {
+      const commands: Command[] = [];
+      for (const id of ids) {
+        const el = this.canvasStore.elements.find((item) => item.id === id);
+        if (el && !el.locked) {
+          const kind = el.kind ?? 'Element';
+          const index = this.canvasStore.elements.findIndex((item) => item.id === id);
+          const snapshot = safeClone(el);
+          this.canvasStore.removeElement(id);
+          commands.push(new RemoveElementCommand(`Delete ${kind}`, id, snapshot, index));
+        }
+      }
+      this.canvasStore.selectElement(null);
+      if (commands.length === 1) {
+        this.pushCommand(commands[0]);
+      } else if (commands.length > 1) {
+        this.pushCommand(new CompoundCommand('Delete Elements', commands));
       }
     }
   }
 
   /**
    * Deletes the currently active selection across canvas elements and PDF layer spans.
-   * Prioritises canvas layer elements, falling back to selected PDF spans.
+   * Prioritises canvas elements before falling back to native PDF spans.
    */
   async deleteSelected(): Promise<void> {
-    if (this.store.isReadOnly) return;
-    if (this.canvasStore?.selectedElementId) {
+    if (this.store.isReadOnly || this.store.canDeleteElements === false) return;
+    if (this.canvasStore && (this.canvasStore.selectedElementIds.length > 0 || this.canvasStore.selectedElementId)) {
       this.deleteSelectedElement();
       return;
     }
+
     if (this.store.hasSelection) {
       await this.deleteSelectedSpan();
       return;
     }
+  }
+
+  /**
+   * Reorders an individual canvas element in the page stacking hierarchy.
+   */
+  reorderCanvasElement(id: string, direction: 'front' | 'back' | 'forward' | 'backward'): void {
+    if (this.store.isReadOnly || !this.canvasStore) return;
+    if (this._canvasActions) {
+      this._canvasActions.reorderElement(id, direction);
+      return;
+    }
+    const el = this.canvasStore.elements.find((item) => item.id === id);
+    if (!el || el.locked) return;
+
+    const prevOrder = this.canvasStore.elements.map((e) => e.id);
+    const prevZIndices: Record<string, number | undefined> = {};
+    for (const item of this.canvasStore.elements) {
+      prevZIndices[item.id] = item.zIndex;
+    }
+    const changed = this.canvasStore.reorderElement(id, direction);
+    if (changed) {
+      const newOrder = this.canvasStore.elements.map((e) => e.id);
+      const newZIndices: Record<string, number | undefined> = {};
+      for (const item of this.canvasStore.elements) {
+        newZIndices[item.id] = item.zIndex;
+      }
+      const kind = el.kind ?? 'Element';
+      const actionLabel = direction === 'front'
+        ? 'Bring to Front'
+        : direction === 'back'
+        ? 'Send to Back'
+        : direction === 'forward'
+        ? 'Bring Forward'
+        : 'Send Backward';
+      this.pushCommand(
+        new ReorderElementCommand(`${actionLabel} ${kind}`, id, prevOrder, newOrder, prevZIndices, newZIndices)
+      );
+    }
+  }
+
+  /**
+   * Reorders the currently selected component across canvas elements and raw PDF spans.
+   * If raw PDF spans are selected, promotes them to canvas mode to allow interactive reordering.
+   */
+  async reorderSelected(direction: 'front' | 'back' | 'forward' | 'backward'): Promise<void> {
+    if (this.store.isReadOnly || !this.canvasStore) return;
+
+    const multiTransformEnabled =
+      !this.featureFlags ||
+      (this.featureFlags.isEnabled('select-tool.multiselect') &&
+        this.featureFlags.isEnabled('select-tool.multiselect.transform'));
+
+    if (
+      multiTransformEnabled &&
+      Array.isArray(this.store.selectedSpans) &&
+      this.store.selectedSpans.length > 0 &&
+      (this.store.selectedSpans.length > 1 ||
+        (Array.isArray(this.canvasStore.selectedElementIds) &&
+          this.canvasStore.selectedElementIds.length > 0)) &&
+      typeof this.extractSelectedSpansToCanvas === 'function'
+    ) {
+      await this.extractSelectedSpansToCanvas(this.store.selectedSpan ?? undefined, this.canvasStore);
+    }
+
+    if (
+      multiTransformEnabled &&
+      Array.isArray(this.canvasStore.selectedElementIds) &&
+      this.canvasStore.selectedElementIds.length > 1
+    ) {
+      const selectedSet = new Set(this.canvasStore.selectedElementIds);
+      const orderedIds = Array.isArray(this.canvasStore.elements)
+        ? this.canvasStore.elements.filter((el) => selectedSet.has(el.id)).map((el) => el.id)
+        : [...this.canvasStore.selectedElementIds];
+
+      if (direction === 'forward' || direction === 'back') {
+        orderedIds.reverse();
+      }
+
+      const pastLenBefore = this.historyStore?.activeCommandState?.past.length ?? 0;
+      for (const id of orderedIds) {
+        this.reorderCanvasElement(id, direction);
+      }
+      if (typeof this.coalesceRecentCommands === 'function') {
+        this.coalesceRecentCommands(pastLenBefore, 'Reorder Elements');
+      }
+      return;
+    }
+
+    if (this.canvasStore.selectedElementId) {
+      this.reorderCanvasElement(this.canvasStore.selectedElementId, direction);
+      return;
+    }
+
+    const span = this.store.selectedSpan;
+    if (span && (span.type === 'image' || span.type === 'shape' || span.type === 'text' || span.type === 'form-field')) {
+      const pastLenBefore = this.historyStore?.activeCommandState?.past.length ?? 0;
+      const targetId = await this.extractObjectToCanvas(span.type, span, this.canvasStore);
+      if (targetId) {
+        const hasElementsArray = Array.isArray(this.canvasStore.elements);
+        const preAlignOrder = hasElementsArray ? this.canvasStore.elements.map((e) => e.id) : null;
+        const preAlignZIndices: Record<string, number | undefined> = {};
+        if (hasElementsArray) {
+          for (const item of this.canvasStore.elements) {
+            preAlignZIndices[item.id] = item.zIndex;
+          }
+        }
+
+        // When promoting a raw PDF span to send it backward, align it at the bottom of the front band
+        // (immediately above the raw PDF layer) before stepping backward so it crosses behind the PDF layer.
+        if (direction === 'backward' && hasElementsArray) {
+          const promoted = this.canvasStore.elements.find((e) => e.id === targetId);
+          if (promoted) {
+            const pageElements = this.canvasStore.elements.filter((e) => e.pageIndex === promoted.pageIndex && e.id !== targetId);
+            const backElements = pageElements.filter((e) => typeof e.zIndex === 'number' && e.zIndex < 10);
+            const frontElements = pageElements.filter((e) => typeof e.zIndex !== 'number' || e.zIndex >= 10);
+            const reorderedOnPage = [...backElements, promoted, ...frontElements];
+            let cursor = 0;
+            this.canvasStore.elements = this.canvasStore.elements.map((el) =>
+              el.pageIndex === promoted.pageIndex ? reorderedOnPage[cursor++] : el
+            );
+          }
+        }
+
+        this.reorderCanvasElement(targetId, direction);
+
+        const activePast = this.historyStore?.activeCommandState?.past;
+        if (activePast && activePast.length > pastLenBefore) {
+          const lastIdx = activePast.length - 1;
+          const lastCmd = activePast[lastIdx];
+          if (lastCmd instanceof ReorderElementCommand && preAlignOrder) {
+            activePast[lastIdx] = new ReorderElementCommand(
+              lastCmd.description,
+              lastCmd.elementId,
+              preAlignOrder,
+              lastCmd.newElementsOrder,
+              preAlignZIndices,
+              lastCmd.newZIndices
+            );
+          }
+          if (typeof this.coalesceRecentCommands === 'function') {
+            const actionLabel = direction === 'front'
+              ? 'Bring to Front'
+              : direction === 'back'
+              ? 'Send to Back'
+              : direction === 'forward'
+              ? 'Bring Forward'
+              : 'Send Backward';
+            this.coalesceRecentCommands(pastLenBefore, `${actionLabel} ${span.type}`);
+          }
+        }
+      }
+    }
+  }
+
+  async bringSelectedToFront(): Promise<void> {
+    await this.reorderSelected('front');
+  }
+
+  async bringSelectedForward(): Promise<void> {
+    await this.reorderSelected('forward');
+  }
+
+  async sendSelectedBackward(): Promise<void> {
+    await this.reorderSelected('backward');
+  }
+
+  async sendSelectedToBack(): Promise<void> {
+    await this.reorderSelected('back');
   }
 
   /**
