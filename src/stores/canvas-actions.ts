@@ -4,9 +4,11 @@ import type { EditorActions } from './editor-actions';
 import {
   type CanvasElement,
   type CanvasElementKind,
+  type DragState,
   type ElementDropPayload,
   type FormFieldVariant,
   type HandlePosition,
+  type LineEndpointHandle,
   type PathElement,
   type Point,
   type ShapeVariant,
@@ -20,11 +22,21 @@ import {
   MoveElementCommand,
   ResizeElementCommand,
   RotateElementCommand,
+  AdjustLineEndpointsCommand,
   UpdateElementPropertyCommand,
+  ReorderElementCommand,
+  CompoundCommand,
 } from '../commands';
-import { screenToPageCoords } from '../utils/geometry';
+import {
+  capturePageMetrics,
+  screenToPageCoords,
+  screenToPageCoordsWithMetrics,
+  type CachedPageMetrics,
+} from '../utils/geometry';
 import { safeClone } from '../utils/clone-utils';
 import { computeDragSnap, computeResizeSnap, extractSnapCandidates } from '../utils/snapping-engine';
+import { getLineEndpoints, elementFromLineEndpoints } from '../utils/line-geometry';
+import { snapLineEndpoint } from '../utils/line-snapping';
 import type { SnapCandidate } from '../types/snapping-types';
 
 const CANVAS_ACTIONS_KEY = Symbol('canvas-actions');
@@ -39,7 +51,10 @@ interface CreateElementOptions {
   color?: string;
   fontSize?: number;
   fontWeight?: 'normal' | 'bold';
+  fontStyle?: 'normal' | 'italic';
   fontFamily?: string;
+  rawFontFamily?: string;
+  lineHeight?: number;
   width?: number;
   height?: number;
   backgroundColor?: string;
@@ -69,14 +84,97 @@ interface CreateElementOptions {
 }
 
 export class CanvasActions {
+  private cachedInteractionPageEl: HTMLElement | null = null;
+  private cachedInteractionZoom: number = 0;
+  private cachedInteractionMetrics: CachedPageMetrics | null = null;
+  private cachedSnapCandidatesByKey: Map<string, SnapCandidate[]> = new Map();
+  private dragJustEnded: boolean = false;
+  private promotingMixedSpansInDrag: boolean = false;
+
   constructor(
     private canvasStore: CanvasStore,
     public editorActions: EditorActions | undefined,
-    private elementRegistry: ElementRegistry,
+    private elementRegistry?: ElementRegistry,
   ) {}
+
+  /**
+   * Consumes and resets the post-interaction guard flag so synthetic click events
+   * immediately following a drag, resize, rotate, or endpoint adjustment do not
+   * collapse or clear active multi-selections.
+   *
+   * @return True if an interaction just ended and the click should be ignored.
+   */
+  public consumeDragEnd(): boolean {
+    if (this.dragJustEnded) {
+      this.dragJustEnded = false;
+      return true;
+    }
+    return false;
+  }
 
   setEditorActions(actions: EditorActions): void {
     this.editorActions = actions;
+  }
+
+  /**
+   * Clears cached page metrics and snap candidates for the active drag or resize session.
+   */
+  public clearInteractionCache(): void {
+    this.cachedInteractionPageEl = null;
+    this.cachedInteractionZoom = 0;
+    this.cachedInteractionMetrics = null;
+    this.cachedSnapCandidatesByKey.clear();
+  }
+
+  /**
+   * Adjusts cached page bounding rect offsets by a viewport scroll delta to avoid synchronous DOM reflows.
+   *
+   * @param deltaX Horizontal scroll delta in pixels.
+   * @param deltaY Vertical scroll delta in pixels.
+   */
+  public adjustCachedPageMetricsForScroll(deltaX: number, deltaY: number): void {
+    if (this.cachedInteractionMetrics && (deltaX !== 0 || deltaY !== 0)) {
+      this.cachedInteractionMetrics = {
+        ...this.cachedInteractionMetrics,
+        rect: {
+          ...this.cachedInteractionMetrics.rect,
+          left: this.cachedInteractionMetrics.rect.left - deltaX,
+          top: this.cachedInteractionMetrics.rect.top - deltaY,
+        },
+      };
+    }
+  }
+
+  private getOrMeasureInteractionMetrics(pageEl: HTMLElement, zoom: number): CachedPageMetrics {
+    const fastEnabled = this.editorActions?.featureFlags
+      ? this.editorActions.featureFlags.isEnabled('performance.fast-element-interaction')
+      : true;
+    if (
+      fastEnabled &&
+      this.cachedInteractionPageEl === pageEl &&
+      this.cachedInteractionZoom === zoom &&
+      this.cachedInteractionMetrics
+    ) {
+      return this.cachedInteractionMetrics;
+    }
+    const metrics = capturePageMetrics(pageEl);
+    if (fastEnabled) {
+      this.cachedInteractionPageEl = pageEl;
+      this.cachedInteractionZoom = zoom;
+      this.cachedInteractionMetrics = metrics;
+    }
+    return metrics;
+  }
+
+  private resolveInteractionPageCoords(
+    clientX: number,
+    clientY: number,
+    pageEl: HTMLElement,
+    zoom: number,
+    pageTransform?: PageTransform,
+  ): { x: number; y: number } {
+    const metrics = this.getOrMeasureInteractionMetrics(pageEl, zoom);
+    return screenToPageCoordsWithMetrics(clientX, clientY, metrics, zoom, pageTransform);
   }
 
   createElement(
@@ -86,7 +184,7 @@ export class CanvasActions {
     y: number,
     options?: CreateElementOptions,
   ): void {
-    if (!this.elementRegistry.has(kind)) {
+    if (!this.elementRegistry || !this.elementRegistry.has(kind)) {
       throw new Error(`Unsupported canvas element kind: ${kind}`);
     }
 
@@ -104,7 +202,10 @@ export class CanvasActions {
     if (options?.color != null) overrides.color = options.color;
     if (options?.fontSize != null) overrides.fontSize = options.fontSize;
     if (options?.fontWeight != null) overrides.fontWeight = options.fontWeight;
+    if (options?.fontStyle != null) overrides.fontStyle = options.fontStyle;
     if (options?.fontFamily != null) overrides.fontFamily = options.fontFamily;
+    if (options?.rawFontFamily != null) overrides.rawFontFamily = options.rawFontFamily;
+    if (options?.lineHeight != null) overrides.lineHeight = options.lineHeight;
     if (options?.label != null) overrides.label = options.label;
     if (options?.backgroundColor != null) overrides.backgroundColor = options.backgroundColor;
     if (options?.borderColor != null) overrides.borderColor = options.borderColor;
@@ -134,9 +235,13 @@ export class CanvasActions {
     const element = def.create(id, pageIndex, x, y, overrides) as CanvasElement;
 
     this.canvasStore.addElement(element);
-    this.canvasStore.selectElement(id);
+    if (this.editorActions?.store?.canSelectElements !== false) {
+      this.canvasStore.selectElement(id);
+    }
     this.editorActions?.pushCommand(new AddElementCommand(`Add ${kind}`, element));
-    this.editorActions?.setTool('select');
+    if (this.editorActions?.store?.canSelectElements !== false) {
+      this.editorActions?.setTool('select');
+    }
   }
 
   screenToPageCoords(clientX: number, clientY: number, pageEl: HTMLElement, zoom: number, pageTransform?: PageTransform): { x: number; y: number } {
@@ -144,14 +249,37 @@ export class CanvasActions {
   }
 
     startDrag(elementId: string, pointerX: number, pointerY: number, pageEl: HTMLElement, zoom: number, pageTransform?: PageTransform): void {
-        const element = this.canvasStore.elements.find((e) => e.id === elementId);
+        if (this.editorActions?.store?.isReadOnly || this.editorActions?.store?.canMoveElements === false) return;
+        const element = this.canvasStore.getElementById(elementId);
         if (!element || element.locked) return;
 
-        const { x, y } = this.screenToPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
+        this.dragJustEnded = false;
+        this.promotingMixedSpansInDrag = false;
+        this.clearInteractionCache();
+        const { x, y } = this.resolveInteractionPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
         const grabOffsetX = x - element.x;
         const grabOffsetY = y - element.y;
         const pathEl = element.kind === 'path' && 'points' in element ? (element as PathElement) : null;
-        
+
+        const otherElementOrigins: Record<string, { originX: number; originY: number; originPoints?: Point[] }> = {};
+        const otherElementPageOrigins: Record<string, number> = {};
+        if (this.canvasStore.isSelected(elementId)) {
+            for (const otherId of this.canvasStore.selectedElementIds) {
+                if (otherId === elementId) continue;
+                const otherEl = this.canvasStore.getElementById(otherId);
+                if (!otherEl || otherEl.locked) continue;
+                const otherPath = otherEl.kind === 'path' && 'points' in otherEl ? (otherEl as PathElement) : null;
+                otherElementOrigins[otherId] = {
+                    originX: otherEl.x,
+                    originY: otherEl.y,
+                    originPoints: otherPath ? JSON.parse(JSON.stringify(otherPath.points)) : undefined,
+                };
+                otherElementPageOrigins[otherId] = otherEl.pageIndex;
+            }
+        } else {
+            this.canvasStore.selectElement(elementId);
+        }
+
         this.canvasStore.dragState = {
             elementId,
             mode: 'move',
@@ -166,9 +294,9 @@ export class CanvasActions {
             grabOffsetX,
             grabOffsetY,
             originPoints: pathEl ? JSON.parse(JSON.stringify(pathEl.points)) : undefined,
+            otherElementOrigins: Object.keys(otherElementOrigins).length > 0 ? otherElementOrigins : undefined,
+            otherElementPageOrigins: Object.keys(otherElementPageOrigins).length > 0 ? otherElementPageOrigins : undefined,
         };
-        
-        this.canvasStore.selectElement(elementId);
     }
 
     private getPageDimensions(
@@ -179,6 +307,18 @@ export class CanvasActions {
         const fromDoc = this.editorActions?.service?.document?.getPageDimensions(pageIndex);
         if (fromDoc && fromDoc.widthPts > 0 && fromDoc.heightPts > 0) {
             return { width: fromDoc.widthPts, height: fromDoc.heightPts };
+        }
+        if (
+            pageEl &&
+            this.cachedInteractionPageEl === pageEl &&
+            this.cachedInteractionMetrics &&
+            this.cachedInteractionMetrics.halfW > 0 &&
+            this.cachedInteractionMetrics.halfH > 0
+        ) {
+            return {
+                width: (this.cachedInteractionMetrics.halfW * 2) / (zoom || 1),
+                height: (this.cachedInteractionMetrics.halfH * 2) / (zoom || 1),
+            };
         }
         if (pageEl && pageEl.offsetWidth > 0 && pageEl.offsetHeight > 0) {
             return {
@@ -196,15 +336,30 @@ export class CanvasActions {
      * @param excludeElementId Optional canvas element ID to exclude from candidates.
      */
     private getSnapCandidates(pageIndex: number, excludeElementId?: string): SnapCandidate[] {
+        const fastEnabled = this.editorActions?.featureFlags
+            ? this.editorActions.featureFlags.isEnabled('performance.fast-element-interaction')
+            : true;
+        const pageElements = this.canvasStore.getElementsByPage(pageIndex);
+        const cacheKey = `${pageIndex}:${excludeElementId ?? ''}:${pageElements.length}`;
+        if (fastEnabled && this.canvasStore.dragState) {
+            const cached = this.cachedSnapCandidatesByKey.get(cacheKey);
+            if (cached) {
+                return cached;
+            }
+        }
         const cachedSpans = this.editorActions?.service?.document?.getCachedPageSpans(pageIndex);
         const hiddenSpanIds = this.editorActions?.store?.hiddenSpanIds;
-        return extractSnapCandidates(
+        const candidates = extractSnapCandidates(
             pageIndex,
-            this.canvasStore.getElementsByPage(pageIndex),
+            pageElements,
             excludeElementId,
             cachedSpans,
             hiddenSpanIds,
         );
+        if (fastEnabled && this.canvasStore.dragState) {
+            this.cachedSnapCandidatesByKey.set(cacheKey, candidates);
+        }
+        return candidates;
     }
 
     updateDrag(
@@ -219,10 +374,10 @@ export class CanvasActions {
         const state = this.canvasStore.dragState;
         if (!state || state.mode !== 'move') return;
 
-        const element = this.canvasStore.elements.find((e) => e.id === state.elementId);
+        const element = this.canvasStore.getElementById(state.elementId);
         if (!element) return;
 
-        const { x, y } = this.screenToPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
+        const { x, y } = this.resolveInteractionPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
         const grabOffsetX = state.grabOffsetX ?? (state.startX - state.originX);
         const grabOffsetY = state.grabOffsetY ?? (state.startY - state.originY);
 
@@ -274,12 +429,92 @@ export class CanvasActions {
         }
 
         this.canvasStore.updateElement(state.elementId, updates);
+
+        const multiTransformEnabled =
+            !this.editorActions?.featureFlags ||
+            (this.editorActions.featureFlags.isEnabled('select-tool.multiselect') &&
+                this.editorActions.featureFlags.isEnabled('select-tool.multiselect.transform'));
+
+        if (
+            multiTransformEnabled &&
+            !this.promotingMixedSpansInDrag &&
+            this.editorActions &&
+            Array.isArray(this.editorActions.store?.selectedSpans) &&
+            this.editorActions.store.selectedSpans.length > 0 &&
+            typeof this.editorActions.extractSelectedSpansToCanvas === 'function' &&
+            (Math.abs(newX - state.originX) > 0.5 || Math.abs(newY - state.originY) > 0.5)
+        ) {
+            this.promotingMixedSpansInDrag = true;
+            const existingIds = new Set(this.canvasStore.selectedElementIds);
+            void this.editorActions
+                .extractSelectedSpansToCanvas(undefined, this.canvasStore)
+                .then(() => {
+                    this.promotingMixedSpansInDrag = false;
+                    const currentDrag = this.canvasStore.dragState;
+                    if (!currentDrag || currentDrag.mode !== 'move') return;
+                    const primaryEl = this.canvasStore.getElementById(currentDrag.elementId);
+                    const currentDx = primaryEl ? primaryEl.x - currentDrag.originX : 0;
+                    const currentDy = primaryEl ? primaryEl.y - currentDrag.originY : 0;
+                    if (!currentDrag.otherElementOrigins) currentDrag.otherElementOrigins = {};
+                    if (!currentDrag.otherElementPageOrigins) currentDrag.otherElementPageOrigins = {};
+                    const extractedElementIds = this.canvasStore.selectedElementIds.filter((id) => !existingIds.has(id));
+                    for (const extId of extractedElementIds) {
+                        if (extId === currentDrag.elementId || currentDrag.otherElementOrigins[extId]) continue;
+                        const extEl = this.canvasStore.getElementById(extId);
+                        if (!extEl || extEl.locked) continue;
+                        const extPath = extEl.kind === 'path' && 'points' in extEl ? (extEl as PathElement) : null;
+                        currentDrag.otherElementOrigins[extId] = {
+                            originX: extEl.x,
+                            originY: extEl.y,
+                            originPoints: extPath ? JSON.parse(JSON.stringify(extPath.points)) : undefined,
+                        };
+                        currentDrag.otherElementPageOrigins[extId] = extEl.pageIndex;
+                        this.canvasStore.updateElement(extId, {
+                            x: extEl.x + currentDx,
+                            y: extEl.y + currentDy,
+                        });
+                    }
+                    const withoutPrimary = this.canvasStore.selectedElementIds.filter((id) => id !== currentDrag.elementId);
+                    this.canvasStore.selectedElementIds = [...withoutPrimary, currentDrag.elementId];
+                })
+                .catch(() => {
+                    this.promotingMixedSpansInDrag = false;
+                });
+        }
+
+        if (state.otherElementOrigins) {
+            const dx = newX - state.originX;
+            const dy = newY - state.originY;
+            const primaryOriginPage = state.originPageIndex ?? element.pageIndex;
+            const didCrossPage = resolvedTargetPage !== primaryOriginPage;
+            for (const [otherId, origin] of Object.entries(state.otherElementOrigins)) {
+                const otherOriginPage = state.otherElementPageOrigins?.[otherId];
+                const otherUpdates: Partial<CanvasElement> = {
+                    x: origin.originX + dx,
+                    y: origin.originY + dy,
+                };
+                if (didCrossPage) {
+                    otherUpdates.pageIndex = resolvedTargetPage;
+                } else if (otherOriginPage !== undefined) {
+                    otherUpdates.pageIndex = otherOriginPage;
+                }
+                if (origin.originPoints) {
+                    (otherUpdates as Partial<PathElement>).points = origin.originPoints.map((p) => ({
+                        x: p.x + dx,
+                        y: p.y + dy,
+                    }));
+                }
+                this.canvasStore.updateElement(otherId, otherUpdates);
+            }
+        }
     }
 
     endDrag(): void {
         const state = this.canvasStore.dragState;
+        this.promotingMixedSpansInDrag = false;
+        this.clearInteractionCache();
         if (state && state.mode === 'move') {
-            const element = this.canvasStore.elements.find((e) => e.id === state.elementId);
+            const element = this.canvasStore.getElementById(state.elementId);
             const originPageIndex = state.originPageIndex ?? element?.pageIndex ?? 0;
             const hasMoved = element && (
                 element.x !== state.originX ||
@@ -296,35 +531,108 @@ export class CanvasActions {
             
             this.canvasStore.clearDragState();
             if (hasMoved && element) {
+                this.dragJustEnded = true;
+                const now = Date.now();
                 const pathEl = element.kind === 'path' && 'points' in element ? (element as PathElement) : null;
-                this.editorActions?.pushCommand(
-                    new MoveElementCommand(
-                        'Move Element',
-                        state.elementId,
-                        state.originX,
-                        state.originY,
-                        element.x,
-                        element.y,
-                        Date.now(),
-                        originPageIndex,
-                        element.pageIndex,
-                        state.originPoints,
-                        pathEl?.points ? JSON.parse(JSON.stringify(pathEl.points)) : undefined,
-                    )
+                const primaryCmd = new MoveElementCommand(
+                    'Move Element',
+                    state.elementId,
+                    state.originX,
+                    state.originY,
+                    element.x,
+                    element.y,
+                    now,
+                    originPageIndex,
+                    element.pageIndex,
+                    state.originPoints,
+                    pathEl?.points ? JSON.parse(JSON.stringify(pathEl.points)) : undefined,
                 );
+
+                if (state.otherElementOrigins && Object.keys(state.otherElementOrigins).length > 0) {
+                    const moveCommands: import('../core/command').Command[] = [primaryCmd];
+                    for (const [otherId, origin] of Object.entries(state.otherElementOrigins)) {
+                        const otherEl = this.canvasStore.getElementById(otherId);
+                        if (!otherEl) continue;
+                        const otherOriginPage = state.otherElementPageOrigins?.[otherId] ?? otherEl.pageIndex;
+                        const otherPath = otherEl.kind === 'path' && 'points' in otherEl ? (otherEl as PathElement) : null;
+                        moveCommands.push(
+                            new MoveElementCommand(
+                                'Move Element',
+                                otherId,
+                                origin.originX,
+                                origin.originY,
+                                otherEl.x,
+                                otherEl.y,
+                                now,
+                                otherOriginPage,
+                                otherEl.pageIndex,
+                                origin.originPoints,
+                                otherPath?.points ? JSON.parse(JSON.stringify(otherPath.points)) : undefined,
+                            )
+                        );
+                    }
+                    this.editorActions?.pushCommand(
+                        moveCommands.length === 1 ? primaryCmd : new CompoundCommand('Move Elements', moveCommands)
+                    );
+                } else {
+                    this.editorActions?.pushCommand(primaryCmd);
+                }
             }
         }
     }
 
-    startResize(elementId: string, handle: HandlePosition, pointerX: number, pointerY: number, pageEl: HTMLElement, zoom: number, pageTransform?: PageTransform): void {
-        const element = this.canvasStore.elements.find((e) => e.id === elementId);
+    startResize(elementId: string, handle: HandlePosition | LineEndpointHandle, pointerX: number, pointerY: number, pageEl: HTMLElement, zoom: number, pageTransform?: PageTransform): void {
+        if (handle === 'start' || handle === 'end') {
+            this.startEndpointAdjust(elementId, handle, pointerX, pointerY, pageEl, zoom, pageTransform);
+            return;
+        }
+
+        if (this.editorActions?.store?.isReadOnly || this.editorActions?.store?.canResizeElements === false) return;
+        const element = this.canvasStore.getElementById(elementId);
         if (!element || element.locked) return;
 
-        const { x, y } = this.screenToPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
+        this.dragJustEnded = false;
+        this.clearInteractionCache();
+        const { x, y } = this.resolveInteractionPageCoords(pointerX, pointerY, pageEl, zoom, pageTransform);
         
         const isText = element.kind === 'text';
         const textEl = isText ? (element as TextElement) : null;
-        
+        const pathEl = element.kind === 'path' && 'points' in element ? (element as PathElement) : null;
+
+        const multiTransformEnabled =
+            !this.editorActions?.featureFlags ||
+            (this.editorActions.featureFlags.isEnabled('select-tool.multiselect') &&
+                this.editorActions.featureFlags.isEnabled('select-tool.multiselect.transform'));
+
+        const otherResizeOrigins: NonNullable<import('./canvas-types').DragState['otherResizeOrigins']> = {};
+        if (
+            multiTransformEnabled &&
+            this.canvasStore.isSelected(elementId) &&
+            this.canvasStore.selectedElementIds.length > 1
+        ) {
+            for (const otherId of this.canvasStore.selectedElementIds) {
+                if (otherId === elementId) continue;
+                const otherEl = this.canvasStore.getElementById(otherId);
+                if (!otherEl || otherEl.locked) continue;
+                const otherText = otherEl.kind === 'text' ? (otherEl as TextElement) : null;
+                const otherPath = otherEl.kind === 'path' && 'points' in otherEl ? (otherEl as PathElement) : null;
+                otherResizeOrigins[otherId] = {
+                    originX: otherEl.x,
+                    originY: otherEl.y,
+                    originWidth: otherEl.width,
+                    originHeight: otherEl.height,
+                    originFontSize: otherText ? otherText.fontSize : undefined,
+                    originLines: otherText?.lines ? JSON.parse(JSON.stringify(otherText.lines)) : undefined,
+                    originSegments: otherText?.segments ? JSON.parse(JSON.stringify(otherText.segments)) : undefined,
+                    originPoints: otherPath ? JSON.parse(JSON.stringify(otherPath.points)) : undefined,
+                };
+            }
+            const orderedIds = [...this.canvasStore.selectedElementIds.filter((id) => id !== elementId), elementId];
+            this.canvasStore.selectElements(orderedIds, false);
+        } else {
+            this.canvasStore.selectElement(elementId);
+        }
+
         this.canvasStore.dragState = {
             elementId,
             mode: 'resize',
