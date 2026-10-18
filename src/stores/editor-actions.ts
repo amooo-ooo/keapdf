@@ -1,4 +1,4 @@
-import { getContext, setContext } from 'svelte';
+import { getContext, setContext, tick } from 'svelte';
 import { SvelteSet } from 'svelte/reactivity';
 
 import type { PdfEditorService } from '../services/pdf-editor';
@@ -21,28 +21,37 @@ import type {
   DocumentMetadata,
   DocumentMetadataUpdate,
   ColorRgba,
+  PageCropInfo,
 } from '../core/types';
 import type { EditorStore, AppTheme } from './editor.svelte';
-import { getFileBuffer, setFileBuffer } from './editor.svelte';
+import { getFileBuffer, setFileBuffer, getFileCredential, setFileCredential } from './editor.svelte';
 import type { CanvasStore } from './canvas.svelte';
 import type { HistoryStore } from './history.svelte';
-import type { EditorTool, CropUnit, CropScope, PageTransform } from './types';
+import type { EditorTool, SelectMode, CropUnit, CropScope, PageTransform, PendingDigitalSignatureState } from './types';
 import { isToolAllowedInMode, isMutationAllowedInMode, type DocumentViewMode } from '../core/document-mode';
 import type { CanvasElement, TextElement, TextSegment, TextElementLine, ShapeElement, FormFieldElement, PathElement } from './canvas-types';
 import type { CanvasActions } from './canvas-actions';
 import { downloadBytes } from '../utils/download-utils';
 import { safeClone } from '../utils/clone-utils';
-import { UNICODE_TRAILING_WS_REGEX, UNICODE_LEADING_WS_REGEX } from '../utils/text-range-utils';
-import { useSelection } from './selection.svelte';
+import { UNICODE_TRAILING_WS_REGEX, UNICODE_LEADING_WS_REGEX, setActiveEditorSelection } from '../utils/text-range-utils';
+import { useSelection, type WorkspaceSection } from './selection.svelte';
 import type { PageCropMargins } from '../services/pdf/operations/crop-ops';
 import type {
   ScalePageOptions,
   PageScaleScope,
 } from '../services/pdf/operations/scale-ops';
 import type { ImpositionConfig } from '../services/pdf/operations/types';
-import type { SavedSignature } from '../services/signature-storage';
+import { composeSignatureAppearanceDataUrl, type SavedSignature } from '../services/signature-storage';
 import type { SignPdfOptions, SignatureValidationResult } from '../services/pdf/operations/signature-ops';
+import {
+  resolveSignaturePresetRect,
+  clampSignatureRectToPage,
+  canvasSignatureRectToPdfRect,
+  type SignaturePlacementPreset,
+} from '../utils/signature-placement';
 import { isSyntheticCanvasCharIndex, resolveCanvasTextChar } from '../services/pdf/unified-text-provider';
+import { isColorEqual } from '../services/pdf/utils';
+import { resolveVerbatimPdfBytes } from '../services/pdf/verbatim-bytes';
 import type { ErasableCandidate } from '../services/eraser/eraser-engine';
 import type { Command, CommandContext } from '../core/command';
 import {
@@ -59,8 +68,11 @@ import {
   MutateDocumentCommand,
   RemoveAcroFormFieldCommand,
   UnlockFormsCommand,
+  ReorderElementCommand,
 } from '../commands';
 import { PasswordRequiredError } from '../core/pdfium-engine';
+import { optimisticActionManager } from '../core/optimistic-actions';
+import type { FeatureFlagStore } from '../core/feature-flags';
 import {
   computePermissionBitmask,
   type PdfPermissionFlags,
@@ -75,9 +87,20 @@ import {
   formatUrlLoadErrorMessage,
   syncUrlParameter,
 } from '../services/url-document-loader';
+import type { DemoDocumentPreset } from '../services/demo-documents/types';
 import { isImageFile, inferImageMimeType } from '../utils/file-type-utils';
+import type { ColorAdjustmentOptions } from '../services/pdf/operations/color-adjustment-ops';
+import type {
+  NumberingMode,
+  PageNumberingOptions,
+  PageNumberingResult,
+} from '../services/pdf/operations/page-numbering-ops';
 import type { DocumentConversionOptions } from '../services/conversion';
 import type { OutlineItemFlat } from '../services/pdf/operations/outline-ops';
+import { flattenOutlineTree } from '../services/pdf/operations/outline-tree';
+import { analyzeDocumentTypography, type DocumentTypographyProfile } from '../services/pdf/operations/document-typography';
+import type { StandardFontName } from '../core/types';
+import { cleanSubsetPrefix, isBoldFontName, isItalicFontName } from '../core/pdfium-helpers';
 
 const EDITOR_ACTIONS_KEY = Symbol('editor-actions');
 
@@ -87,7 +110,7 @@ export const ZOOM_MAX = 5.0;
 export const ZOOM_STEP = 1.2;
 
 /**
- * Target options for programmatic scrolling and element centering.
+ * Target options for programmatic scrolling and element centring.
  */
 export interface ScrollTargetOptions {
   destY?: number;
@@ -96,6 +119,22 @@ export interface ScrollTargetOptions {
 }
 
 export type ScrollCallback = (index: number, options?: ScrollTargetOptions) => void;
+
+/**
+ * Closure returned by a PageCenterPreserver to restore the page visual centre after layout changes.
+ */
+export type RestorePageCenterFn = () => void;
+
+/**
+ * Captures a page visual screen centre prior to rotation and returns a closure
+ * to restore the centre coordinates immediately after layout application.
+ */
+export type PageCenterPreserver = (pageIndex: number) => RestorePageCenterFn | null;
+
+/**
+ * Callback invoked when discrete zoom is triggered to preserve scroll calibration.
+ */
+export type ZoomChangeCallback = (prevZoom: number, newZoom: number, isContinuous: boolean) => void;
 
 /**
  * Safely clone a canvas element and update its page index and optional identifier,
@@ -139,11 +178,44 @@ export class EditorActions {
    * Called when programmatic page navigation requires a scroll.
    */
   private scrollCallback: ScrollCallback | null = null;
+
+  /**
+   * Page centre preserver callback registered by Canvas.svelte.
+   * Called when rotating a page to preserve its visual screen centre.
+   */
+  private pageCenterPreserver: PageCenterPreserver | null = null;
+
+  /**
+   * Zoom change callback registered by Canvas.svelte.
+   * Called when discrete zoom changes require scroll calibration.
+   */
+  private zoomChangeCallback: ZoomChangeCallback | null = null;
   
   private isAddingToWorkspace: boolean = false;
   private _canvasActions: CanvasActions | null = null;
   private _pluginManager: PluginManager | null = null;
   private zoomDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private extractInFlightBySpanId = new Map<string, Promise<string | undefined>>();
+  private pendingRotatedPages = new Set<number>();
+  private pendingRotationCommands: RotatePageCommand[] = [];
+  private pendingDocumentCommits: Array<{
+    description: string;
+    fileId: string;
+    prevBuffer: ArrayBuffer;
+    newBuffer: ArrayBuffer | null;
+    prevPageIndex: number;
+    targetPageIndex: number;
+    prevElements: CanvasElement[];
+    newElements: CanvasElement[];
+    prevTransforms: Record<number, PageTransform>;
+    newTransforms: Record<number, PageTransform>;
+    prevFormFieldValues?: Record<string, string | boolean>;
+    newFormFieldValues?: Record<string, string | boolean>;
+    skipPush?: boolean;
+    onlyIncrementTargetPageVersion?: boolean;
+  }> = [];
+  private backgroundDeletedPageIndices = new Set<number>();
+  private isWorkspaceBufferDirty = false;
 
   constructor(
     public readonly store: EditorStore,
@@ -152,7 +224,208 @@ export class EditorActions {
     public canvasStore?: CanvasStore,
     public toolRegistry?: ToolRegistry,
     public exportRegistry?: ExportRegistry,
-  ) {}
+    public featureFlags?: FeatureFlagStore,
+  ) {
+    if (typeof service?.setEncryptionPreservationResolver === 'function') {
+      service.setEncryptionPreservationResolver(
+        () => !this.featureFlags || this.featureFlags.isEnabled('security.preserve-encryption')
+      );
+    }
+  }
+
+  /**
+   * Returns the password that unlocked the active document.
+   *
+   * @return The recorded password, empty when none was required.
+   */
+  private getActiveSecurityCredential(): string {
+    const document = this.service.document;
+    return typeof document?.getSecurityCredential === 'function' ? document.getSecurityCredential() : '';
+  }
+
+  /**
+   * Reloads bytes derived from the active document (mutation results, rollbacks and
+   * temporary export snapshots), reusing its password so encrypted documents reopen.
+   *
+   * @param buffer Serialisation of the active document.
+   */
+  private reloadActiveDocument(buffer: ArrayBuffer): void {
+    this.isWorkspaceBufferDirty = true;
+    if (typeof this.service.reloadDocumentFromBuffer === 'function') {
+      this.service.reloadDocumentFromBuffer(buffer);
+    } else {
+      this.service.loadDocumentFromBuffer(buffer);
+    }
+  }
+
+  /**
+   * Opens a document derived from the active one (split, sanitised, compressed or imposed
+   * copies) as a new workspace file, carrying over the password of encrypted sources.
+   *
+   * @param buffer Derived document bytes.
+   * @param fileName Workspace file name of the copy.
+   */
+  private async addDerivedDocumentToWorkspace(buffer: ArrayBuffer, fileName: string): Promise<void> {
+    const credential = this.getActiveSecurityCredential();
+    const wasAdding = this.isAddingToWorkspace;
+    try {
+      this.isAddingToWorkspace = true;
+      await this.loadDocumentFromBuffer(buffer, fileName, undefined, credential);
+    } finally {
+      this.isAddingToWorkspace = wasAdding;
+    }
+  }
+
+  /**
+   * Evaluates whether the optimistic mutation queue is enabled via feature flags.
+   *
+   * @return True if optimistic actions and mutation queueing are enabled.
+   */
+  private isMutationQueueEnabled(): boolean {
+    return !this.featureFlags || (
+      this.featureFlags.isEnabled('performance.optimistic-actions') &&
+      this.featureFlags.isEnabled('performance.optimistic-actions.mutation-queue')
+    );
+  }
+
+  /**
+   * Captures a binary ArrayBuffer snapshot of the current WASM document state.
+   *
+   * @return Serialised PDF document buffer.
+   */
+  private captureDocumentBuffer(): ArrayBuffer {
+    const canUseRawBuffer =
+      typeof this.service.document.hasUnbakedModifications === 'function' &&
+      typeof this.service.document.getRawBuffer === 'function';
+    const raw =
+      canUseRawBuffer && !this.service.document.hasUnbakedModifications()
+        ? this.service.document.getRawBuffer()
+        : null;
+    if (raw && raw.byteLength > 0) {
+      return raw instanceof Uint8Array
+        ? (raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer)
+        : raw.slice(0);
+    }
+    const savedBytes = this.service.document.save();
+    return savedBytes.buffer.slice(
+      savedBytes.byteOffset,
+      savedBytes.byteOffset + savedBytes.byteLength,
+    ) as ArrayBuffer;
+  }
+
+  /**
+   * Commits background-executed page rotations after the backoff window settles,
+   * applying deferred element coordinate transforms, clearing pending render rotations,
+   * incrementing page versions once, and persisting the document buffer.
+   */
+  private async commitPendingRotations(): Promise<void> {
+    if (this.pendingRotatedPages.size === 0 && this.pendingRotationCommands.length === 0) {
+      return;
+    }
+    const rotatedIndices = Array.from(this.pendingRotatedPages);
+    this.pendingRotatedPages.clear();
+    const commands = this.pendingRotationCommands.splice(0, this.pendingRotationCommands.length);
+
+    const ctx = this.getCommandContext();
+    for (const cmd of commands) {
+      cmd.commitPendingElementRotation(ctx);
+      cmd.enableFullExecutionSync();
+    }
+
+    for (const idx of rotatedIndices) {
+      this.store.clearPendingRenderRotation(idx);
+      this.store.incrementPageVersion(idx);
+    }
+
+    await tick();
+
+    const fileId = this.store.activeWorkspaceFileId;
+    if (fileId && this.service?.document && typeof this.service.document.save === 'function') {
+      const savedBytes = this.service.document.save();
+      const newBuffer = savedBytes.buffer.slice(
+        savedBytes.byteOffset,
+        savedBytes.byteOffset + savedBytes.byteLength,
+      ) as ArrayBuffer;
+      setFileBuffer(fileId, newBuffer);
+      this.isWorkspaceBufferDirty = false;
+    }
+
+    if (rotatedIndices.includes(0)) {
+      this.refreshDocument({ incrementRenderVersion: false });
+    }
+  }
+
+  /**
+   * Commits background-executed document and page mutations after the backoff window settles,
+   * serialising the document buffer once, recording undo commands, reconciling optimistic
+   * visual states, and triggering a single coalesced render update.
+   */
+  private commitPendingDocumentMutations(): void {
+    if (this.pendingDocumentCommits.length === 0) {
+      return;
+    }
+    const commits = this.pendingDocumentCommits.splice(0, this.pendingDocumentCommits.length);
+    const lastCommit = commits[commits.length - 1];
+    const fileId = lastCommit.fileId;
+
+    const finalBuffer = this.captureDocumentBuffer();
+    if (lastCommit.newBuffer === null) {
+      lastCommit.newBuffer = finalBuffer;
+    }
+
+    for (const entry of commits) {
+      const resolvedNewBuffer = entry.newBuffer ?? finalBuffer;
+      const cmd = new MutateDocumentCommand(
+        entry.description,
+        entry.fileId,
+        entry.prevBuffer,
+        resolvedNewBuffer,
+        entry.prevPageIndex,
+        entry.targetPageIndex,
+        entry.prevElements,
+        entry.newElements,
+        entry.prevTransforms,
+        entry.newTransforms,
+        entry.prevFormFieldValues,
+        entry.newFormFieldValues,
+      );
+      if (!entry.skipPush) {
+        this.pushCommand(cmd);
+      }
+    }
+
+    setFileBuffer(fileId, finalBuffer);
+    this.isWorkspaceBufferDirty = false;
+    this.backgroundDeletedPageIndices.clear();
+
+    optimisticActionManager.flushDeferredReconciles();
+
+    this.store.pageCount = this.service.document.getPageCount();
+    this.store.currentPageIndex = Math.min(
+      lastCommit.targetPageIndex,
+      Math.max(0, this.store.pageCount - 1),
+    );
+    if (
+      this.store.selectedSpan &&
+      this.store.selectedSpan.pageIndex === lastCommit.targetPageIndex
+    ) {
+      this.clearSelection(true);
+    }
+
+    const allTargetPageOnly = commits.every((c) => Boolean(c.onlyIncrementTargetPageVersion));
+    if (allTargetPageOnly) {
+      const targetPages = new Set(commits.map((c) => c.targetPageIndex));
+      for (const pIdx of targetPages) {
+        this.store.incrementPageVersion(pIdx);
+      }
+      if (targetPages.has(0)) {
+        this.refreshDocument({ incrementRenderVersion: false });
+      }
+    } else {
+      this.store.incrementRenderVersion();
+      this.refreshDocument({ incrementRenderVersion: false });
+    }
+  }
 
   get canvasActions(): CanvasActions | null {
     return this._canvasActions;
@@ -164,6 +437,10 @@ export class EditorActions {
 
   setCanvasActions(canvasActions: CanvasActions): void {
     this._canvasActions = canvasActions;
+  }
+
+  setFeatureFlags(featureFlags: FeatureFlagStore): void {
+    this.featureFlags = featureFlags;
   }
 
   setPluginManager(pluginManager: PluginManager): void {
@@ -183,7 +460,7 @@ export class EditorActions {
    * Captures an immutable snapshot of current editor and canvas state.
    *
    * @param description Brief explanation of the action that produced the snapshot.
-   * @param forcePdfSave Whether to force serialization of the underlying PDFium document.
+   * @param forcePdfSave Whether to force serialisation of the underlying PDFium document.
    * @param explicitFileId Optional explicit workspace file ID to bind.
    * @param explicitFileName Optional explicit file name.
    * @param explicitBuffer Optional explicit document buffer.
@@ -223,7 +500,11 @@ export class EditorActions {
    * @param command The command to execute.
    */
   async executeCommand(command: Command): Promise<void> {
-    if (!this.historyStore) return;
+    this.isWorkspaceBufferDirty = command.type !== 'mutate-document';
+    if (!this.historyStore) {
+      await command.execute(this.getCommandContext());
+      return;
+    }
     await this.historyStore.executeCommand(
       command,
       this.getCommandContext(),
@@ -241,6 +522,7 @@ export class EditorActions {
    * @param delayMs Debounce delay in milliseconds. Defaults to 300ms.
    */
   recordDebouncedCommand(command: Command, delayMs: number = 300): void {
+    this.isWorkspaceBufferDirty = command.type !== 'mutate-document';
     if (!this.historyStore) return;
     this.historyStore.recordDebouncedCommand(
       command,
@@ -270,102 +552,169 @@ export class EditorActions {
     additionalElements?: CanvasElement[],
     additionalTransforms?: Record<number, PageTransform>,
     additionalScannedPages?: number[],
+    options?: {
+      deferCommit?: boolean;
+      onlyIncrementTargetPageVersion?: boolean;
+    },
   ): Promise<MutateDocumentCommand | undefined> {
     const fileId = this.store.activeWorkspaceFileId;
     if (!fileId || !this.store.isDocumentLoaded) return;
     if (this.store.isReadOnly && !isMutationAllowedInMode(this.store.viewMode, description)) return;
     if (this.store.canMutateDocument === false && !isMutationAllowedInMode(this.store.viewMode, description)) return;
 
-    const prevSaved = this.service.document.save();
-    const prevBuffer = prevSaved.buffer.slice(
-      prevSaved.byteOffset,
-      prevSaved.byteOffset + prevSaved.byteLength,
-    ) as ArrayBuffer;
-    const prevPageIndex = this.store.currentPageIndex;
-    const prevElements = this.canvasStore
-      ? safeClone(this.canvasStore.elements)
-      : (this.service.getFile(fileId)?.canvasElements ? safeClone(this.service.getFile(fileId)!.canvasElements!) : []);
-    const prevTransforms = { ...this.store.pageTransforms };
+    if (this.store.inlineEdit) {
+      await this.submitInlineEdit();
+    }
+
+    if (this.pendingRotatedPages.size > 0 || this.pendingRotationCommands.length > 0) {
+      await this.commitPendingRotations();
+    }
+
+    if (this.store.isMutating) {
+      console.warn(`Document mutation already in progress, suppressing concurrent request: ${description}`);
+      return undefined;
+    }
+    this.store.isMutating = true;
 
     try {
-      await mutateFn();
-    } catch (err) {
-      this.service.loadDocumentFromBuffer(prevBuffer);
-      throw err;
-    }
-
-    if (indexMap) {
-      this.remapPageIndices(indexMap, duplicateCopies);
-    }
-
-    if (additionalElements && additionalElements.length > 0) {
-      if (this.canvasStore) {
-        this.canvasStore.elements = [...this.canvasStore.elements, ...additionalElements];
+      let prevBuffer: ArrayBuffer;
+      if (this.pendingDocumentCommits.length > 0) {
+        const lastPending = this.pendingDocumentCommits[this.pendingDocumentCommits.length - 1];
+        if (lastPending.newBuffer === null) {
+          lastPending.newBuffer = this.captureDocumentBuffer();
+        }
+        prevBuffer = lastPending.newBuffer;
+      } else {
+        const cachedFileBuf = !this.isWorkspaceBufferDirty ? getFileBuffer(fileId) : undefined;
+        if (cachedFileBuf && cachedFileBuf.byteLength > 0) {
+          prevBuffer = cachedFileBuf.slice(0);
+        } else {
+          prevBuffer = this.captureDocumentBuffer();
+        }
       }
-      const activeFile = this.service.getFile(fileId);
-      if (activeFile) {
-        activeFile.canvasElements = this.canvasStore
-          ? safeClone(this.canvasStore.elements)
-          : [...(activeFile.canvasElements ?? []), ...additionalElements];
-      }
-    }
-    if (additionalTransforms && Object.keys(additionalTransforms).length > 0) {
-      this.store.pageTransforms = { ...this.store.pageTransforms, ...additionalTransforms };
-      const activeFile = this.service.getFile(fileId);
-      if (activeFile) {
-        activeFile.pageTransforms = safeClone(this.store.pageTransforms);
-      }
-    }
-    if (additionalScannedPages && additionalScannedPages.length > 0) {
-      if (!this.store.scannedPages) {
-        this.store.scannedPages = new Set<number>();
-      }
-      for (const page of additionalScannedPages) {
-        this.store.scannedPages.add(page);
-      }
-      const activeFile = this.service.getFile(fileId);
-      if (activeFile) {
-        activeFile.scannedPages = Array.from(this.store.scannedPages);
-      }
-    }
+      const prevPageIndex = this.store.currentPageIndex;
+      const prevElements = this.canvasStore
+        ? safeClone(this.canvasStore.elements)
+        : (this.service.getFile(fileId)?.canvasElements ? safeClone(this.service.getFile(fileId)!.canvasElements!) : []);
+      const prevTransforms = { ...this.store.pageTransforms };
+      const prevFormFieldValues = typeof this.service.document.getModifiedFormFieldValues === 'function'
+        ? Object.fromEntries(this.service.document.getModifiedFormFieldValues())
+        : undefined;
 
-    const savedBytes = this.service.document.save();
-    const newBuffer = savedBytes.buffer.slice(
-      savedBytes.byteOffset,
-      savedBytes.byteOffset + savedBytes.byteLength
-    ) as ArrayBuffer;
+      try {
+        await mutateFn();
+      } catch (err) {
+        this.reloadActiveDocument(prevBuffer);
+        if (prevFormFieldValues && typeof this.service.document.setAllFormFieldValues === 'function') {
+          this.service.document.setAllFormFieldValues(prevFormFieldValues);
+        }
+        throw err;
+      }
 
-    const newElements = this.canvasStore
-      ? safeClone(this.canvasStore.elements)
-      : (this.service.getFile(fileId)?.canvasElements ? safeClone(this.service.getFile(fileId)!.canvasElements!) : []);
-    const newTransforms = { ...this.store.pageTransforms };
+      if (indexMap) {
+        this.remapPageIndices(indexMap, duplicateCopies);
+      }
 
-    const cmd = new MutateDocumentCommand(
-      description,
-      fileId,
-      prevBuffer,
-      newBuffer,
-      prevPageIndex,
-      targetPageIndex,
-      prevElements,
-      newElements,
-      prevTransforms,
-      newTransforms,
-    );
+      if (additionalElements && additionalElements.length > 0) {
+        if (this.canvasStore) {
+          this.canvasStore.elements = [...this.canvasStore.elements, ...additionalElements];
+        }
+        const activeFile = this.service.getFile(fileId);
+        if (activeFile) {
+          activeFile.canvasElements = this.canvasStore
+            ? safeClone(this.canvasStore.elements)
+            : [...(activeFile.canvasElements ?? []), ...additionalElements];
+        }
+      }
+      if (additionalTransforms && Object.keys(additionalTransforms).length > 0) {
+        this.store.pageTransforms = { ...this.store.pageTransforms, ...additionalTransforms };
+        const activeFile = this.service.getFile(fileId);
+        if (activeFile) {
+          activeFile.pageTransforms = safeClone(this.store.pageTransforms);
+        }
+      }
+      if (additionalScannedPages && additionalScannedPages.length > 0) {
+        if (!this.store.scannedPages) {
+          this.store.scannedPages = new Set<number>();
+        }
+        for (const page of additionalScannedPages) {
+          this.store.scannedPages.add(page);
+        }
+        const activeFile = this.service.getFile(fileId);
+        if (activeFile) {
+          activeFile.scannedPages = Array.from(this.store.scannedPages);
+        }
+      }
 
-    if (!skipPush) {
-      this.pushCommand(cmd);
+      const newElements = this.canvasStore
+        ? safeClone(this.canvasStore.elements)
+        : (this.service.getFile(fileId)?.canvasElements ? safeClone(this.service.getFile(fileId)!.canvasElements!) : []);
+      const newTransforms = { ...this.store.pageTransforms };
+      const newFormFieldValues = typeof this.service.document.getModifiedFormFieldValues === 'function'
+        ? Object.fromEntries(this.service.document.getModifiedFormFieldValues())
+        : undefined;
+
+      if (options?.deferCommit) {
+        this.isWorkspaceBufferDirty = true;
+        this.pendingDocumentCommits.push({
+          description,
+          fileId,
+          prevBuffer,
+          newBuffer: null,
+          prevPageIndex,
+          targetPageIndex,
+          prevElements,
+          newElements,
+          prevTransforms,
+          newTransforms,
+          prevFormFieldValues,
+          newFormFieldValues,
+          skipPush,
+          onlyIncrementTargetPageVersion: options.onlyIncrementTargetPageVersion,
+        });
+        return undefined;
+      }
+
+      const newBuffer = this.captureDocumentBuffer();
+
+      const cmd = new MutateDocumentCommand(
+        description,
+        fileId,
+        prevBuffer,
+        newBuffer,
+        prevPageIndex,
+        targetPageIndex,
+        prevElements,
+        newElements,
+        prevTransforms,
+        newTransforms,
+        prevFormFieldValues,
+        newFormFieldValues,
+      );
+
+      if (!skipPush) {
+        this.pushCommand(cmd);
+      }
+      setFileBuffer(fileId, newBuffer);
+      this.isWorkspaceBufferDirty = false;
+      this.store.pageCount = this.service.document.getPageCount();
+      this.store.currentPageIndex = Math.min(targetPageIndex, Math.max(0, this.store.pageCount - 1));
+      if (options?.onlyIncrementTargetPageVersion) {
+        this.store.incrementPageVersion(targetPageIndex);
+      } else {
+        this.store.incrementRenderVersion();
+      }
+      if (this.store.selectedSpan && this.store.selectedSpan.pageIndex === targetPageIndex) {
+        this.clearSelection(true);
+      }
+      if (!options?.onlyIncrementTargetPageVersion || targetPageIndex === 0) {
+        this.refreshDocument({ incrementRenderVersion: false });
+      }
+      
+      return cmd;
+    } finally {
+      this.store.isMutating = false;
     }
-    setFileBuffer(fileId, newBuffer);
-    this.store.pageCount = this.service.document.getPageCount();
-    this.store.currentPageIndex = Math.min(targetPageIndex, Math.max(0, this.store.pageCount - 1));
-    this.store.incrementRenderVersion();
-    if (this.store.selectedSpan && this.store.selectedSpan.pageIndex === targetPageIndex) {
-      this.clearSelection(true);
-    }
-    this.refreshDocument();
-    
-    return cmd;
   }
 
   /**
@@ -374,17 +723,39 @@ export class EditorActions {
    * @return Promise resolving to true if undo succeeded, false otherwise.
    */
   async undo(): Promise<boolean> {
+    if (this.store.isMutating) return false;
+    if (this.store.inlineEdit) {
+      await this.submitInlineEdit();
+    }
+    if (this.canvasStore?.editingElementId) {
+      this.commitActiveEdits();
+    }
+    if (this.pendingRotatedPages.size > 0 || this.pendingRotationCommands.length > 0) {
+      await this.commitPendingRotations();
+    }
+    if (this.pendingDocumentCommits.length > 0) {
+      this.commitPendingDocumentMutations();
+    }
     const fileId = this.store.activeWorkspaceFileId ?? undefined;
     if (this.historyStore && fileId && this.historyStore.activeFileId !== fileId) {
       this.historyStore.setActiveFileId(fileId);
     }
     if (!this.historyStore || !this.historyStore.canUndo) return false;
+    const pastCmds = this.historyStore.activeCommandState?.past;
+    const nextCmd = pastCmds && pastCmds.length > 0 ? pastCmds[pastCmds.length - 1] : null;
+    const isRotationCmd = nextCmd && (
+      nextCmd.type === 'rotate-page' ||
+      (nextCmd.type === 'compound' && 'commands' in nextCmd && Array.isArray((nextCmd as { commands: unknown[] }).commands) && (nextCmd as { commands: Array<{ type: string }> }).commands.some((c) => c.type === 'rotate-page'))
+    );
+    const restoreCenter = isRotationCmd ? (this.pageCenterPreserver?.(this.store.currentPageIndex) ?? null) : null;
+
     const ctx = this.getCommandContext();
     const success = await this.historyStore.undoCommand(
       ctx,
       fileId,
     );
     if (success) {
+      this.isWorkspaceBufferDirty = nextCmd?.type !== 'mutate-document';
       if (this.service.document && typeof this.service.document.syncCommandStacks === 'function' && this.historyStore.activeCommandState) {
         this.service.document.syncCommandStacks(
           this.historyStore.activeCommandState.past,
@@ -392,6 +763,10 @@ export class EditorActions {
         );
       }
       this.refreshDocument();
+      if (restoreCenter) {
+        await tick();
+        restoreCenter();
+      }
       return true;
     }
     return false;
@@ -403,6 +778,19 @@ export class EditorActions {
    * @return Promise resolving to true if redo succeeded, false otherwise.
    */
   async redo(): Promise<boolean> {
+    if (this.store.isMutating) return false;
+    if (this.store.inlineEdit) {
+      await this.submitInlineEdit();
+    }
+    if (this.canvasStore?.editingElementId) {
+      this.commitActiveEdits();
+    }
+    if (this.pendingRotatedPages.size > 0 || this.pendingRotationCommands.length > 0) {
+      await this.commitPendingRotations();
+    }
+    if (this.pendingDocumentCommits.length > 0) {
+      this.commitPendingDocumentMutations();
+    }
     const fileId = this.store.activeWorkspaceFileId ?? undefined;
     if (this.historyStore && fileId && this.historyStore.activeFileId !== fileId) {
       this.historyStore.setActiveFileId(fileId);
