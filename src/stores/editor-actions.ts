@@ -5477,45 +5477,191 @@ export class EditorActions {
       if (options?.preserveSelection) {
         this.store.selectedSpans = this.store.selectedSpans.filter((s) => s.id !== span.id);
       } else {
-        this.service.document.getPage(span.pageIndex).removeObject((span as EditableImageSpan | EditableShapeSpan).pdfObjectIndex);
+        // Clear the span selection so the editable-overlay-layer's SelectionOverlay
+        // is removed. Without this, a stale overlay persists at the same position and
+        // its onResizeStart callback can re-trigger extraction on pointer events.
+        this.store.clearSelection();
       }
-    }, undefined, true);
 
-    if (type !== 'text' && type !== 'form-field') {
-      this.store.hiddenSpanIds.add(span.id);
-    }
+      if (options?.preserveSelection) {
+        canvasStore.selectElements([newId], true);
+      } else {
+        // Select the extracted canvas element synchronously. The caller
+        // (startResize / startDrag / startRotate) also selects this element,
+        // so this acts as an eager default for non-interaction extraction paths.
+        canvasStore.selectElement(newId);
+      }
 
-    // Clear the span selection so the editable-overlay-layer's SelectionOverlay
-    // is removed. Without this, a stale overlay persists at the same position and
-    // its onResizeStart callback can re-trigger extraction on pointer events.
-    this.store.clearSelection();
-    
-    this.store.incrementPageVersion(span.pageIndex);
-    this.refreshDocument();
-
-    // Select the extracted canvas element synchronously. The caller
-    // (startResize / startDrag / startRotate) also selects this element,
-    // so this acts as an eager default for non-interaction extraction paths.
-    canvasStore.selectElement(newId);
-
-    if (extractedElement && mutateCmd) {
-      const subCommands: Command[] = [
-        mutateCmd,
-        new HideSpanCommand('Hide Span', span.id),
-        new AddElementCommand('Add Extracted Element', extractedElement, true),
-      ];
-      if (type === 'form-field') {
-        const fieldName = (span as EditableFormFieldSpan).fieldName || (span as EditableFormFieldSpan).name || (span as EditableFormFieldSpan).fieldId;
-        if (fieldName) {
-          subCommands.unshift(new RemoveAcroFormFieldCommand('Remove Native Form Field', fieldName));
+      if (extractedElement) {
+        const subCommands: Command[] = [];
+        if (mutateCmd) {
+          subCommands.push(mutateCmd);
         }
+        subCommands.push(
+          new HideSpanCommand('Hide Span', span.id),
+          new AddElementCommand('Add Extracted Element', extractedElement, !options?.preserveSelection),
+        );
+        if (type === 'form-field') {
+          const fieldName = (span as EditableFormFieldSpan).fieldName || (span as EditableFormFieldSpan).name || (span as EditableFormFieldSpan).fieldId;
+          if (fieldName) {
+            subCommands.unshift(new RemoveAcroFormFieldCommand('Remove Native Form Field', fieldName));
+          }
+        }
+        this.pushCommand(
+          new CompoundCommand('Extract Object to Canvas', subCommands)
+        );
       }
-      this.pushCommand(
-        new CompoundCommand('Extract Object to Canvas', subCommands)
-      );
+
+      return newId;
+    })();
+
+    this.extractInFlightBySpanId.set(span.id, extractionPromise);
+    try {
+      return await extractionPromise;
+    } finally {
+      this.extractInFlightBySpanId.delete(span.id);
+    }
+  }
+
+  /**
+   * Promotes all currently selected native PDF spans (or a primary span together
+   * with any co-selected spans) into interactive canvas overlay elements while
+   * preserving existing canvas multi-selection and coalescing undo history.
+   *
+   * @param primarySpan Optional span that initiated the interaction.
+   * @param targetCanvasStore Optional canvas store instance override.
+   * @return Object containing the primary extracted element ID and all extracted IDs.
+   */
+  async extractSelectedSpansToCanvas(
+    primarySpan?: EditableSpan,
+    targetCanvasStore?: CanvasStore,
+  ): Promise<{ primaryElementId: string | undefined; extractedElementIds: string[] }> {
+    const cs = targetCanvasStore ?? this.canvasStore;
+    if (!cs) {
+      return { primaryElementId: undefined, extractedElementIds: [] };
     }
 
-    return newId;
+    const isExtractable = (
+      s: EditableSpan | null | undefined,
+    ): s is EditableImageSpan | EditableShapeSpan | EditableTextSpan | EditableFormFieldSpan =>
+      Boolean(s && (s.type === 'image' || s.type === 'shape' || s.type === 'text' || s.type === 'form-field'));
+
+    const multiEnabled =
+      !this.featureFlags ||
+      (this.featureFlags.isEnabled('select-tool.multiselect') &&
+        this.featureFlags.isEnabled('select-tool.multiselect.transform'));
+
+    const selectedSpansList = Array.isArray(this.store.selectedSpans)
+      ? this.store.selectedSpans.filter(isExtractable)
+      : [];
+
+    let spansToExtract: Array<EditableImageSpan | EditableShapeSpan | EditableTextSpan | EditableFormFieldSpan> = [];
+    let existingCanvasIds: string[] = [];
+
+    if (primarySpan && isExtractable(primarySpan)) {
+      const isPrimarySelected =
+        (typeof this.store.isSpanSelected === 'function' && this.store.isSpanSelected(primarySpan.id)) ||
+        this.store.selectedSpan?.id === primarySpan.id ||
+        selectedSpansList.some((s) => s.id === primarySpan.id);
+
+      if (isPrimarySelected && multiEnabled) {
+        spansToExtract = [...selectedSpansList];
+        if (!spansToExtract.some((s) => s.id === primarySpan.id)) {
+          spansToExtract.push(primarySpan);
+        }
+        existingCanvasIds = Array.isArray(cs.selectedElementIds) ? [...cs.selectedElementIds] : [];
+      } else {
+        spansToExtract = [primarySpan];
+        existingCanvasIds = [];
+      }
+    } else {
+      if (selectedSpansList.length > 0) {
+        spansToExtract = multiEnabled ? [...selectedSpansList] : [selectedSpansList[selectedSpansList.length - 1]];
+      } else if (isExtractable(this.store.selectedSpan)) {
+        spansToExtract = [this.store.selectedSpan];
+      }
+      existingCanvasIds =
+        multiEnabled && Array.isArray(cs.selectedElementIds) ? [...cs.selectedElementIds] : [];
+    }
+
+    if (spansToExtract.length === 0) {
+      return {
+        primaryElementId: cs.selectedElementId ?? undefined,
+        extractedElementIds: [],
+      };
+    }
+
+    if (spansToExtract.length === 1 && existingCanvasIds.length === 0) {
+      const single = spansToExtract[0];
+      const id = await this.extractObjectToCanvas(single.type, single, cs);
+      return {
+        primaryElementId: id,
+        extractedElementIds: id ? [id] : [],
+      };
+    }
+
+    // Sort extraction execution order in descending object/annotation index order per page
+    // so removing higher-indexed page objects never shifts lower indices before extraction.
+    const sortedForExtraction = [...spansToExtract].sort((a, b) => {
+      if (b.pageIndex !== a.pageIndex) return b.pageIndex - a.pageIndex;
+      const annotA = 'pdfAnnotIndex' in a && typeof a.pdfAnnotIndex === 'number' ? a.pdfAnnotIndex : -1;
+      const annotB = 'pdfAnnotIndex' in b && typeof b.pdfAnnotIndex === 'number' ? b.pdfAnnotIndex : -1;
+      if (annotB !== annotA) return annotB - annotA;
+      const objA = 'pdfObjectIndex' in a && typeof a.pdfObjectIndex === 'number' ? a.pdfObjectIndex : -1;
+      const objB = 'pdfObjectIndex' in b && typeof b.pdfObjectIndex === 'number' ? b.pdfObjectIndex : -1;
+      if (objB !== objA) return objB - objA;
+      return b.top - a.top;
+    });
+
+    const pastLenBefore = this.historyStore?.activeCommandState?.past.length ?? 0;
+    const spanIdToElementId = new Map<string, string>();
+
+    for (const spanItem of sortedForExtraction) {
+      const newId = await this.extractObjectToCanvas(spanItem.type, spanItem, cs, {
+        preserveSelection: true,
+      });
+      if (newId) {
+        spanIdToElementId.set(spanItem.id, newId);
+      }
+    }
+
+    const orderedExtractedIds: string[] = [];
+    for (const origSpan of spansToExtract) {
+      const extId = spanIdToElementId.get(origSpan.id);
+      if (extId) {
+        orderedExtractedIds.push(extId);
+      }
+    }
+
+    const primaryElementId =
+      (primarySpan ? spanIdToElementId.get(primarySpan.id) : undefined) ??
+      orderedExtractedIds[orderedExtractedIds.length - 1] ??
+      existingCanvasIds[existingCanvasIds.length - 1];
+
+    const combinedIds = Array.from(new Set([...existingCanvasIds, ...orderedExtractedIds]));
+    if (primaryElementId && combinedIds.includes(primaryElementId)) {
+      const withoutPrimary = combinedIds.filter((id) => id !== primaryElementId);
+      combinedIds.splice(0, combinedIds.length, ...withoutPrimary, primaryElementId);
+    }
+
+    if (typeof cs.selectElements === 'function') {
+      cs.selectElements(combinedIds, false);
+    } else if (primaryElementId) {
+      cs.selectElement(primaryElementId);
+    }
+
+    if (typeof this.store.clearSelection === 'function') {
+      this.store.clearSelection();
+    }
+
+    if (typeof this.coalesceRecentCommands === 'function') {
+      this.coalesceRecentCommands(pastLenBefore, 'Extract Objects to Canvas');
+    }
+
+    return {
+      primaryElementId,
+      extractedElementIds: orderedExtractedIds,
+    };
   }
 
   async exportPdf(canvasStore?: CanvasStore): Promise<void> {
@@ -5536,29 +5682,44 @@ export class EditorActions {
         }
       }
 
-      const originalBytes = this.service.document.save();
-      const originalBuffer = originalBytes.buffer.slice(
-        originalBytes.byteOffset,
-        originalBytes.byteOffset + originalBytes.byteLength
-      ) as ArrayBuffer;
+      const elements = (canvasStore ?? this.canvasStore)?.elements ?? [];
+      const hasCanvasElements = elements.length > 0;
+      const savedFormValues = typeof this.service.document.getModifiedFormFieldValues === 'function'
+        ? new Map(this.service.document.getModifiedFormFieldValues())
+        : new Map<string, string | boolean>();
+      const originalBytes = hasCanvasElements ? this.service.document.save() : null;
+      const originalBuffer = originalBytes
+        ? (originalBytes.buffer.slice(
+            originalBytes.byteOffset,
+            originalBytes.byteOffset + originalBytes.byteLength
+          ) as ArrayBuffer)
+        : null;
 
       try {
-        const elements = (canvasStore ?? this.canvasStore)?.elements ?? [];
-        if (elements.length > 0) {
+        if (hasCanvasElements) {
           await this.service.burnElementsToDocument(elements);
         }
-        const bytes = await this.service.document.saveAsync(this.store.pageTransforms);
+        // Unedited documents are emitted verbatim so existing digital signatures stay valid.
+        const verbatimBytes = hasCanvasElements
+          ? null
+          : resolveVerbatimPdfBytes(this.service.document, this.store.pageTransforms);
+        const bytes = verbatimBytes ?? (await this.service.document.saveAsync(this.store.pageTransforms));
         downloadBytes(bytes, `edited_${this.store.fileName}`, 'application/pdf');
       } finally {
-        this.service.loadDocumentFromBuffer(originalBuffer);
-        this.refreshDocument();
+        if (originalBuffer) {
+          this.reloadActiveDocument(originalBuffer);
+          if (savedFormValues.size > 0 && typeof this.service.document.setAllFormFieldValues === 'function') {
+            this.service.document.setAllFormFieldValues(savedFormValues);
+          }
+          this.refreshDocument();
+        }
       }
     } catch (err) {
       console.error('Failed to export PDF:', err);
     }
   }
 
-  // -- Organizer view toggle --
+  // Organiser view toggle
 
   toggleOrganizerView(): void {
     if (this.store.inlineEdit) {
@@ -5568,7 +5729,7 @@ export class EditorActions {
     this.store.clearSelection();
   }
 
-  // -- Document sanitization --
+  // Document sanitisation
 
   openSanitizeDialog(): void {
     if (!this.store.isDocumentLoaded) return;
@@ -5577,6 +5738,253 @@ export class EditorActions {
 
   closeSanitizeDialog(): void {
     this.store.showSanitizeDialog = false;
+  }
+
+  // note: colour and contrast adjustment actions
+
+  /**
+   * Open the adjust colours and contrast modal dialog.
+   */
+  openAdjustColorsDialog(): void {
+    if (!this.store.isDocumentLoaded) return;
+    this.store.openAdjustColorsDialog();
+  }
+
+  /**
+   * Close the adjust colours and contrast modal dialog.
+   */
+  closeAdjustColorsDialog(): void {
+    this.store.closeAdjustColorsDialog();
+  }
+
+  /**
+   * Apply colour and contrast adjustments to the active document in place.
+   *
+   * Executes as an atomic document mutation recording undo and redo history.
+   *
+   * @param options Colour adjustment configuration options.
+   * @return Promise resolving to modified bytes and list of affected page indices.
+   */
+  async adjustDocumentColors(
+    options: ColorAdjustmentOptions
+  ): Promise<{ bytes: Uint8Array; affectedPages: number[] }> {
+    if (!this.store.isDocumentLoaded || this.store.isReadOnly) {
+      throw new Error('Document is not loaded or is read-only');
+    }
+
+    const effectiveOptions: ColorAdjustmentOptions = {
+      ...options,
+      currentPageIndex: options.currentPageIndex ?? this.store.currentPageIndex,
+    };
+
+    const { adjustPdfColors } = await import(
+      '../services/pdf/operations/color-adjustment-ops'
+    );
+    const session = await this.service.document.saveForRewrite(
+      this.store.pageTransforms
+    );
+
+    let resultBytes: Uint8Array | null = null;
+    let affectedPages: number[] = [];
+
+    await this.executeDocumentMutation(
+      'Adjust Colours and Contrast',
+      this.store.currentPageIndex,
+      async () => {
+        const res = await adjustPdfColors(
+          session.bytes,
+          effectiveOptions,
+          async (pageIdx, scale) => {
+            const page = this.service.document.getPage(pageIdx);
+            return page.render(scale);
+          }
+        );
+        const sealedBytes = await session.seal(res.bytes);
+        resultBytes = sealedBytes;
+        affectedPages = res.affectedPages;
+
+        const newBuffer = sealedBytes.buffer.slice(
+          sealedBytes.byteOffset,
+          sealedBytes.byteOffset + sealedBytes.byteLength
+        ) as ArrayBuffer;
+
+        this.reloadActiveDocument(newBuffer);
+        this.store.pageTransforms = {};
+        this.clearSelection(true);
+      }
+    );
+
+    if (!resultBytes) {
+      throw new Error('Failed to adjust document colours');
+    }
+
+    return { bytes: resultBytes, affectedPages };
+  }
+
+  /**
+   * Apply colour and contrast adjustments and trigger an immediate browser download.
+   *
+   * @param options Colour adjustment configuration options.
+   * @return Promise resolving once download is initiated.
+   */
+  async adjustColorsAndDownload(
+    options: ColorAdjustmentOptions
+  ): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    const effectiveOptions: ColorAdjustmentOptions = {
+      ...options,
+      currentPageIndex: options.currentPageIndex ?? this.store.currentPageIndex,
+    };
+    const { adjustPdfColors } = await import(
+      '../services/pdf/operations/color-adjustment-ops'
+    );
+    const session = await this.service.document.saveForRewrite(
+      this.store.pageTransforms
+    );
+    const adjusted = await adjustPdfColors(
+      session.bytes,
+      effectiveOptions,
+      async (pageIdx, scale) => {
+        const page = this.service.document.getPage(pageIdx);
+        return page.render(scale);
+      }
+    );
+    const res = { ...adjusted, bytes: await session.seal(adjusted.bytes) };
+
+    const baseName = (this.store.fileName || 'document').replace(
+      /\.pdf$/i,
+      ''
+    );
+    downloadBytes(res.bytes, `${baseName}-adjusted.pdf`, 'application/pdf');
+  }
+
+  /**
+   * Apply colour and contrast adjustments and save the result as a new workspace document copy.
+   *
+   * @param options Colour adjustment configuration options.
+   * @return Promise resolving once document copy is added to workspace files.
+   */
+  async adjustColorsAsNewWorkspaceFile(
+    options: ColorAdjustmentOptions
+  ): Promise<void> {
+    if (!this.store.isDocumentLoaded) return;
+    const effectiveOptions: ColorAdjustmentOptions = {
+      ...options,
+      currentPageIndex: options.currentPageIndex ?? this.store.currentPageIndex,
+    };
+    const { adjustPdfColors } = await import(
+      '../services/pdf/operations/color-adjustment-ops'
+    );
+    const session = await this.service.document.saveForRewrite(
+      this.store.pageTransforms
+    );
+    const adjusted = await adjustPdfColors(
+      session.bytes,
+      effectiveOptions,
+      async (pageIdx, scale) => {
+        const page = this.service.document.getPage(pageIdx);
+        return page.render(scale);
+      }
+    );
+    const res = { ...adjusted, bytes: await session.seal(adjusted.bytes) };
+
+    const newBuffer = res.bytes.buffer.slice(
+      res.bytes.byteOffset,
+      res.bytes.byteOffset + res.bytes.byteLength
+    ) as ArrayBuffer;
+
+    const baseName = (this.store.fileName || 'document').replace(
+      /\.pdf$/i,
+      ''
+    );
+    const newFileName = `${baseName}-adjusted.pdf`;
+    const newFileId = crypto.randomUUID();
+
+    setFileBuffer(newFileId, newBuffer);
+    setFileCredential(newFileId, session.isEncrypted ? this.getActiveSecurityCredential() : '');
+    this.service.addFile({
+      id: newFileId,
+      fileName: newFileName,
+      sizeBytes: newBuffer.byteLength,
+      canvasElements: [],
+      pageTransforms: {},
+      hiddenSpanIds: [],
+      currentPageIndex: 0,
+      pageVersions: {},
+    });
+    this.historyStore?.initFile(newFileId);
+    await this.switchWorkspaceFile(newFileId);
+  }
+
+  // note: page numbering, bates numbering, and header/footer actions
+
+  /**
+   * Open the page numbering and Bates numbering modal dialog.
+   *
+   * @param mode Initial numbering tab mode ('page-numbers' | 'bates' | 'header-footer').
+   */
+  openPageNumberingDialog(mode: NumberingMode = 'page-numbers'): void {
+    if (!this.store.isDocumentLoaded) return;
+    this.store.openPageNumberingDialog(mode);
+  }
+
+  /**
+   * Close the page numbering and Bates numbering modal dialog.
+   */
+  closePageNumberingDialog(): void {
+    this.store.closePageNumberingDialog();
+  }
+
+  /**
+   * Apply page numbering, Bates numbering, or running header/footer text to the active document.
+   *
+   * Executes as an atomic document mutation recording undo and redo history.
+   *
+   * @param options Page numbering and Bates configuration options.
+   * @return Promise resolving to the stamping result summary.
+   */
+  async applyPageNumbering(
+    options: PageNumberingOptions
+  ): Promise<PageNumberingResult> {
+    if (!this.store.isDocumentLoaded || this.store.isReadOnly) {
+      throw new Error('Document is not loaded or is read-only');
+    }
+
+    const effectiveOptions: PageNumberingOptions = {
+      ...options,
+      currentPageIndex: options.currentPageIndex ?? this.store.currentPageIndex,
+    };
+
+    const description =
+      effectiveOptions.mode === 'bates'
+        ? 'Apply Bates Numbering'
+        : effectiveOptions.mode === 'header-footer'
+          ? 'Apply Header and Footer'
+          : 'Apply Page Numbers';
+
+    let result: PageNumberingResult = {
+      stampedPageCount: 0,
+      stampedPageIndices: [],
+      labels: [],
+    };
+
+    await this.executeDocumentMutation(
+      description,
+      this.store.currentPageIndex,
+      () => {
+        result = this.service.document.applyPageNumbering(effectiveOptions, {
+          fileName: this.store.fileName,
+        });
+
+        const nextVersions = { ...this.store.pageVersions };
+        for (const pageIdx of result.stampedPageIndices) {
+          nextVersions[pageIdx] = (nextVersions[pageIdx] || 0) + 1;
+        }
+        this.store.pageVersions = nextVersions;
+      }
+    );
+
+    return result;
   }
 
   async inspectDocumentForSanitization(): Promise<SanitizationInspection> {
