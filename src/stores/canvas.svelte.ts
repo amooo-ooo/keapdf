@@ -10,9 +10,22 @@ import type {
 const CANVAS_STORE_KEY = Symbol('canvas-store');
 const EMPTY_ELEMENTS: CanvasElement[] = Object.freeze([]) as unknown as CanvasElement[];
 
+/** Maximum z-index threshold below which canvas elements render behind the raw PDF layer. */
+export const RAW_PDF_LAYER_Z_THRESHOLD = 10;
+/** Base z-index for canvas elements in the back band (behind raw PDF content). */
+const BACK_BAND_BASE_Z_INDEX = 2;
+/** Maximum z-index in the back band so elements stay strictly below the PDF raster (z-10). */
+const BACK_BAND_MAX_Z_INDEX = 9;
+/** Base z-index for canvas elements in the front band (above raw PDF content). */
+const FRONT_BAND_BASE_Z_INDEX = 21;
+
+function isElementBehindPdf(el: CanvasElement): boolean {
+    return typeof el.zIndex === 'number' && el.zIndex < RAW_PDF_LAYER_Z_THRESHOLD;
+}
+
 export class CanvasStore {
     elements = $state<CanvasElement[]>([]);
-    selectedElementId = $state<string | null>(null);
+    selectedElementIds = $state<string[]>([]);
     dragState = $state<DragState | null>(null);
     hoveredElementId = $state<string | null>(null);
     editingElementId = $state<string | null>(null);
@@ -21,7 +34,49 @@ export class CanvasStore {
     activeDropPageIndex = $state<number | null>(null);
     activeSnapGuides = $state<SnapGuide[]>([]);
 
-    selectedElement = $derived(this.elements.find((e) => e.id === this.selectedElementId) ?? null);
+    private elementByIdMap = $derived.by(() => {
+        const map = new Map<string, CanvasElement>();
+        for (const el of this.elements) {
+            map.set(el.id, el);
+        }
+        return map;
+    });
+
+    private selectedElementIdSet = $derived.by(() => new Set<string>(this.selectedElementIds));
+
+    private selectedElementsCache = $derived.by(() => {
+        if (this.selectedElementIds.length === 0) {
+            return { list: EMPTY_ELEMENTS };
+        }
+        const list: CanvasElement[] = [];
+        for (const el of this.elements) {
+            if (this.selectedElementIdSet.has(el.id)) {
+                list.push(el);
+            }
+        }
+        return { list };
+    });
+
+    get selectedElementId(): string | null {
+        return this.selectedElementIds[this.selectedElementIds.length - 1] ?? null;
+    }
+
+    set selectedElementId(id: string | null) {
+        if (id === null) {
+            this.selectedElementIds = [];
+        } else {
+            this.selectedElementIds = [id];
+        }
+    }
+
+    get selectedElement(): CanvasElement | null {
+        const id = this.selectedElementId;
+        return id ? (this.elementByIdMap.get(id) ?? null) : null;
+    }
+
+    get selectedElements(): CanvasElement[] {
+        return this.selectedElementsCache.list;
+    }
 
     elementsByPage = $derived.by(() => {
         const map = new Map<number, CanvasElement[]>();
@@ -41,13 +96,13 @@ export class CanvasStore {
     }
 
     getElementById(id: string): CanvasElement | null {
-        return this.elements.find((e) => e.id === id) ?? null;
+        return this.elementByIdMap.get(id) ?? null;
     }
 
     updateElement(id: string, updates: Partial<CanvasElement>): void {
-        const index = this.elements.findIndex((e) => e.id === id);
-        if (index !== -1) {
-            Object.assign(this.elements[index], updates);
+        const el = this.elementByIdMap.get(id);
+        if (el) {
+            Object.assign(el, updates);
         }
     }
 
@@ -75,17 +130,15 @@ export class CanvasStore {
     }
 
     updateElementProperties(id: string, updates: Record<string, unknown>): void {
-        const index = this.elements.findIndex((e) => e.id === id);
-        if (index !== -1) {
-            Object.assign(this.elements[index], updates);
+        const el = this.elementByIdMap.get(id);
+        if (el) {
+            Object.assign(el, updates);
         }
     }
 
     removeElement(id: string): void {
         this.elements = this.elements.filter((e) => e.id !== id);
-        if (this.selectedElementId === id) {
-            this.selectedElementId = null;
-        }
+        this.selectedElementIds = this.selectedElementIds.filter((item) => item !== id);
         if (this.dragState && 'elementId' in this.dragState && this.dragState.elementId === id) {
             this.dragState = null;
         }
@@ -97,15 +150,223 @@ export class CanvasStore {
         }
     }
 
-    selectElement(id: string | null): void {
-        this.selectedElementId = id;
-        if (this.editingElementId && this.editingElementId !== id) {
+    /**
+     * Checks whether an element is currently in the active selection.
+     */
+    isSelected(id: string): boolean {
+        return this.selectedElementIdSet.has(id);
+    }
+
+    /**
+     * Selects a canvas element, optionally toggling or adding to existing multi-selection.
+     */
+    selectElement(id: string | null, isMulti: boolean = false): void {
+        if (id === null) {
+            this.selectedElementIds = [];
+        } else if (isMulti) {
+            if (this.selectedElementIds.includes(id)) {
+                this.selectedElementIds = this.selectedElementIds.filter((item) => item !== id);
+            } else {
+                this.selectedElementIds = [...this.selectedElementIds, id];
+            }
+        } else {
+            this.selectedElementIds = [id];
+        }
+        if (this.editingElementId && !this.selectedElementIds.includes(this.editingElementId)) {
+            this.editingElementId = null;
+        }
+    }
+
+    /**
+     * Toggles an element's selection state.
+     */
+    toggleElement(id: string): void {
+        this.selectElement(id, true);
+    }
+
+    /**
+     * Sets the active selection to a collection of element identifiers.
+     */
+    selectElements(ids: string[], additive: boolean = false): void {
+        if (additive) {
+            const next = new Set([...this.selectedElementIds, ...ids]);
+            this.selectedElementIds = Array.from(next);
+        } else {
+            this.selectedElementIds = [...ids];
+        }
+        if (this.editingElementId && !this.selectedElementIds.includes(this.editingElementId)) {
             this.editingElementId = null;
         }
     }
 
     getElementsByPage(pageIndex: number): CanvasElement[] {
         return this.elementsByPage.get(pageIndex) ?? EMPTY_ELEMENTS;
+    }
+
+    /**
+     * Reorders an element among all canvas elements and the raw PDF layer on the same page.
+     * Elements in the back band receive zIndex values in [2..9] (below raw PDF content at 10..20),
+     * while elements in the front band receive zIndex values >= 21 (above raw PDF content).
+     * Preserves relative ordering of elements on other pages.
+     */
+    reorderElement(elementId: string, direction: 'front' | 'back' | 'forward' | 'backward'): boolean {
+        const target = this.elements.find((e) => e.id === elementId);
+        if (!target) return false;
+
+        const pageIndex = target.pageIndex;
+        const pageElements = this.elements.filter((e) => e.pageIndex === pageIndex);
+        if (!pageElements.some((e) => e.id === elementId)) return false;
+
+        const backElements = pageElements.filter((e) => isElementBehindPdf(e));
+        const frontElements = pageElements.filter((e) => !isElementBehindPdf(e));
+        const isTargetInBack = isElementBehindPdf(target);
+
+        if (!isTargetInBack) {
+            const frontIdx = frontElements.findIndex((e) => e.id === elementId);
+            if (frontIdx === -1) return false;
+
+            if (direction === 'front') {
+                if (frontIdx === frontElements.length - 1) return false;
+                const [moved] = frontElements.splice(frontIdx, 1);
+                frontElements.push(moved);
+            } else if (direction === 'forward') {
+                if (frontIdx === frontElements.length - 1) return false;
+                const [moved] = frontElements.splice(frontIdx, 1);
+                frontElements.splice(frontIdx + 1, 0, moved);
+            } else if (direction === 'backward') {
+                const [moved] = frontElements.splice(frontIdx, 1);
+                if (frontIdx > 0) {
+                    frontElements.splice(frontIdx - 1, 0, moved);
+                } else {
+                    backElements.push(moved);
+                }
+            } else if (direction === 'back') {
+                const [moved] = frontElements.splice(frontIdx, 1);
+                backElements.unshift(moved);
+            }
+        } else {
+            const backIdx = backElements.findIndex((e) => e.id === elementId);
+            if (backIdx === -1) return false;
+
+            if (direction === 'back') {
+                if (backIdx === 0) return false;
+                const [moved] = backElements.splice(backIdx, 1);
+                backElements.unshift(moved);
+            } else if (direction === 'backward') {
+                if (backIdx === 0) return false;
+                const [moved] = backElements.splice(backIdx, 1);
+                backElements.splice(backIdx - 1, 0, moved);
+            } else if (direction === 'forward') {
+                if (backIdx < backElements.length - 1) {
+                    const [moved] = backElements.splice(backIdx, 1);
+                    backElements.splice(backIdx + 1, 0, moved);
+                } else {
+                    const [moved] = backElements.splice(backIdx, 1);
+                    frontElements.unshift(moved);
+                }
+            } else if (direction === 'front') {
+                const [moved] = backElements.splice(backIdx, 1);
+                frontElements.push(moved);
+            }
+        }
+
+        for (let i = 0; i < backElements.length; i++) {
+            backElements[i].zIndex = Math.min(BACK_BAND_MAX_Z_INDEX, BACK_BAND_BASE_Z_INDEX + i);
+        }
+        for (let i = 0; i < frontElements.length; i++) {
+            frontElements[i].zIndex = FRONT_BAND_BASE_Z_INDEX + i;
+        }
+
+        const nextElementsOnPage = [...backElements, ...frontElements];
+        let pageCursor = 0;
+        this.elements = this.elements.map((el) => {
+            if (el.pageIndex === pageIndex) {
+                return nextElementsOnPage[pageCursor++];
+            }
+            return el;
+        });
+
+        return true;
+    }
+
+    /**
+     * Restores an explicit ordering of elements and optional per-element z-index values.
+     */
+    reorderElementsByIds(orderedIds: string[], zIndexMap?: Record<string, number | undefined>): void {
+        const elementMap = new Map<string, CanvasElement>();
+        for (const el of this.elements) {
+            if (zIndexMap && Object.prototype.hasOwnProperty.call(zIndexMap, el.id)) {
+                el.zIndex = zIndexMap[el.id];
+            }
+            elementMap.set(el.id, el);
+        }
+
+        const reordered: CanvasElement[] = [];
+        for (const id of orderedIds) {
+            const el = elementMap.get(id);
+            if (el) {
+                reordered.push(el);
+                elementMap.delete(id);
+            }
+        }
+
+        for (const remaining of elementMap.values()) {
+            reordered.push(remaining);
+        }
+
+        this.elements = reordered;
+    }
+
+    /**
+     * Inspects the stacking order metrics of an element within its page,
+     * accounting for both the front band (above raw PDF content) and back band (below raw PDF content).
+     */
+    getElementOrder(elementId: string): {
+        isAtTop: boolean;
+        isAtBottom: boolean;
+        isBehindPdf: boolean;
+        index: number;
+        total: number;
+    } {
+        const target = this.elements.find((e) => e.id === elementId);
+        if (!target) {
+            return { isAtTop: true, isAtBottom: true, isBehindPdf: false, index: -1, total: 0 };
+        }
+
+        const pageElements = this.elements.filter((e) => e.pageIndex === target.pageIndex);
+        const backElements = pageElements.filter((e) => isElementBehindPdf(e));
+        const frontElements = pageElements.filter((e) => !isElementBehindPdf(e));
+        const orderedPageElements = [...backElements, ...frontElements];
+        const index = orderedPageElements.findIndex((e) => e.id === elementId);
+        const total = orderedPageElements.length;
+        const behindPdf = isElementBehindPdf(target);
+
+        const isAtTop = !behindPdf && frontElements.findIndex((e) => e.id === elementId) === frontElements.length - 1;
+        const isAtBottom = behindPdf && backElements.findIndex((e) => e.id === elementId) === 0;
+
+        return {
+            isAtTop,
+            isAtBottom,
+            isBehindPdf: behindPdf,
+            index,
+            total,
+        };
+    }
+
+    bringToFront(elementId: string): boolean {
+        return this.reorderElement(elementId, 'front');
+    }
+
+    bringForward(elementId: string): boolean {
+        return this.reorderElement(elementId, 'forward');
+    }
+
+    sendBackward(elementId: string): boolean {
+        return this.reorderElement(elementId, 'backward');
+    }
+
+    sendToBack(elementId: string): boolean {
+        return this.reorderElement(elementId, 'back');
     }
 
     clearDragState(): void {
