@@ -4581,33 +4581,165 @@ export class EditorActions {
     };
     const targetPage = Math.max(0, Math.min(this.store.currentPageIndex, this.store.pageCount - indices.length - 1));
 
-    await this.executeDocumentMutation('Delete Page', targetPage, () => {
-      for (const idx of [...indices].sort((a, b) => b - a)) {
-        if (this.service.document.getPageCount() <= 1) break;
-        this.service.document.deletePage(idx);
-      }
-    }, indexMap);
+    if (useQueue) {
+      await optimisticActionManager.enqueueMutation({
+        description: 'Delete Page',
+        commitKey: 'document-mutation',
+        deferReconcileUntilBackoff: true,
+        applyVisual: () => {
+          for (const idx of indices) {
+            this.store.markPageOptimisticallyDeleted(idx);
+          }
+          if (deletedSet.has(this.store.currentPageIndex)) {
+            const visibleOrder = this.store.effectivePageOrder.filter(
+              (p) => !this.store.isPageOptimisticallyDeleted(p),
+            );
+            if (visibleOrder.length > 0) {
+              const fallbackIdx = Math.min(targetPage, visibleOrder.length - 1);
+              this.store.currentPageIndex = visibleOrder[fallbackIdx] ?? 0;
+            }
+          }
+        },
+        executeProgrammatic: async () => {
+          const wasmIndices = indices.map((origIdx) => {
+            let shift = 0;
+            for (const bgDeleted of this.backgroundDeletedPageIndices) {
+              if (bgDeleted < origIdx) shift++;
+            }
+            return origIdx - shift;
+          });
+          const wasmDeletedSet = new Set(wasmIndices);
+          const wasmIndexMap = (oldIdx: number) => {
+            if (wasmDeletedSet.has(oldIdx)) return -1;
+            let shift = 0;
+            for (const d of wasmDeletedSet) {
+              if (d < oldIdx) shift++;
+            }
+            return oldIdx - shift;
+          };
+          const currentWasmPageCount = this.service.document.getPageCount();
+          const wasmTargetPage = Math.max(
+            0,
+            Math.min(this.store.currentPageIndex, currentWasmPageCount - wasmIndices.length - 1),
+          );
+          await this.executeDocumentMutation(
+            'Delete Page',
+            wasmTargetPage,
+            () => {
+              for (const wasmIdx of [...wasmIndices].sort((a, b) => b - a)) {
+                if (this.service.document.getPageCount() <= 1) break;
+                this.service.document.deletePage(wasmIdx);
+              }
+            },
+            wasmIndexMap,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            { deferCommit: true },
+          );
+          for (const origIdx of indices) {
+            this.backgroundDeletedPageIndices.add(origIdx);
+          }
+          useSelection().clear();
+        },
+        reconcileVisual: () => {
+          for (const idx of indices) {
+            this.store.clearOptimisticPageDeletion(idx);
+          }
+        },
+        rollbackVisual: () => {
+          for (const idx of indices) {
+            this.store.clearOptimisticPageDeletion(idx);
+            this.backgroundDeletedPageIndices.delete(idx);
+          }
+        },
+        onQueueDrained: () => this.commitPendingDocumentMutations(),
+        suppressError: true,
+      });
+      return;
+    }
 
-    useSelection().clear();
+    for (const idx of indices) {
+      this.store.markPageOptimisticallyDeleted(idx);
+    }
+
+    try {
+      await this.executeDocumentMutation('Delete Page', targetPage, () => {
+        for (const idx of [...indices].sort((a, b) => b - a)) {
+          if (this.service.document.getPageCount() <= 1) break;
+          this.service.document.deletePage(idx);
+        }
+      }, indexMap);
+
+      useSelection().clear();
+    } finally {
+      this.store.clearOptimisticPageDeletion();
+    }
   }
 
   async addBlankPage(afterIndex: number): Promise<void> {
-    if (!this.store.isDocumentLoaded || this.store.isReadOnly || this.store.canMutateDocument === false) return;
+    const useQueue = this.isMutationQueueEnabled();
+    if (
+      !this.store.isDocumentLoaded ||
+      this.store.isReadOnly ||
+      this.store.canMutateDocument === false ||
+      (!useQueue && this.store.isMutating)
+    ) {
+      return;
+    }
     const indices = this.getTargetPageIndices(afterIndex);
     const sortedIndices = [...indices].sort((a, b) => a - b);
     const insertAfter = sortedIndices[sortedIndices.length - 1];
     const targetIndex = insertAfter + 1;
     const indexMap = (old: number) => (old >= targetIndex ? old + 1 : old);
 
+    if (useQueue) {
+      await optimisticActionManager.enqueueMutation({
+        description: 'Add Blank Page',
+        commitKey: 'document-mutation',
+        executeProgrammatic: async () => {
+          const clampedTarget = Math.max(0, Math.min(targetIndex, this.service.document.getPageCount()));
+          const wasmIndexMap = (old: number) => (old >= clampedTarget ? old + 1 : old);
+          await this.executeDocumentMutation(
+            'Add Blank Page',
+            clampedTarget,
+            () => {
+              this.service.document.addBlankPage(clampedTarget);
+            },
+            wasmIndexMap,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            { deferCommit: true },
+          );
+          useSelection().clear();
+        },
+        onQueueDrained: () => this.commitPendingDocumentMutations(),
+        suppressError: true,
+      });
+      return;
+    }
+
     await this.executeDocumentMutation('Add Blank Page', targetIndex, () => {
       this.service.document.addBlankPage(targetIndex);
     }, indexMap);
-
     useSelection().clear();
   }
 
   async duplicatePage(index: number | number[]): Promise<void> {
-    if (!this.store.isDocumentLoaded || this.store.isReadOnly || this.store.canMutateDocument === false) return;
+    const useQueue = this.isMutationQueueEnabled();
+    if (
+      !this.store.isDocumentLoaded ||
+      this.store.isReadOnly ||
+      this.store.canMutateDocument === false ||
+      (!useQueue && this.store.isMutating)
+    ) {
+      return;
+    }
     const initialIndex = Array.isArray(index) ? index[0] : index;
     const rawIndices = Array.isArray(index) ? index : this.getTargetPageIndices(initialIndex);
     const sortedIndices = Array.from(new Set(rawIndices)).sort((a, b) => b - a);
@@ -4626,6 +4758,35 @@ export class EditorActions {
       targetIndex: indexMap(idx) + 1,
     }));
 
+    if (useQueue) {
+      await optimisticActionManager.enqueueMutation({
+        description: 'Duplicate Page',
+        commitKey: 'document-mutation',
+        executeProgrammatic: async () => {
+          await this.executeDocumentMutation(
+            'Duplicate Page',
+            targetIndex,
+            () => {
+              for (const idx of sortedIndices) {
+                this.service.document.duplicatePage(idx);
+              }
+            },
+            indexMap,
+            false,
+            duplicateCopies,
+            undefined,
+            undefined,
+            undefined,
+            { deferCommit: true },
+          );
+          useSelection().clear();
+        },
+        onQueueDrained: () => this.commitPendingDocumentMutations(),
+        suppressError: true,
+      });
+      return;
+    }
+
     await this.executeDocumentMutation(
       'Duplicate Page',
       targetIndex,
@@ -4638,14 +4799,25 @@ export class EditorActions {
       false,
       duplicateCopies,
     );
-
     useSelection().clear();
   }
 
-
-
   async reorderPages(fromIndices: number[], toIndex: number): Promise<void> {
-    if (!this.store.isDocumentLoaded || fromIndices.length === 0 || this.store.isReadOnly || this.store.canReorderPages === false) return;
+    const useOptimisticReorder = !this.featureFlags || (
+      this.featureFlags.isEnabled('performance.optimistic-actions') &&
+      this.featureFlags.isEnabled('performance.optimistic-actions.reorder')
+    );
+    const useQueue = useOptimisticReorder && this.isMutationQueueEnabled();
+    if (
+      !this.store.isDocumentLoaded ||
+      fromIndices.length === 0 ||
+      fromIndices.length >= this.store.pageCount ||
+      this.store.isReadOnly ||
+      this.store.canReorderPages === false ||
+      (!useQueue && this.store.isMutating)
+    ) {
+      return;
+    }
 
     const indexMap = (old: number) => {
       if (fromIndices.includes(old)) {
@@ -4678,14 +4850,75 @@ export class EditorActions {
       newActivePage = newIdx;
     }
 
-    await this.executeDocumentMutation('Reorder Pages', newActivePage, () => {
-      this.service.document.reorderPages(fromIndices, toIndex);
-    }, indexMap);
+    const pageCount = this.store.pageCount;
+    const currentOrder = this.store.optimisticPageOrder ?? Array.from({ length: pageCount }, (_, i) => i);
+    const newOrder = new Array<number>(pageCount);
+    for (let old = 0; old < pageCount; old++) {
+      const targetSlot = indexMap(old);
+      newOrder[targetSlot] = currentOrder[old];
+    }
+
+    if (useQueue) {
+      await optimisticActionManager.enqueueMutation({
+        description: 'Reorder Pages',
+        commitKey: 'document-mutation',
+        deferReconcileUntilBackoff: true,
+        applyVisual: () => {
+          this.store.setOptimisticPageOrder(newOrder);
+          this.store.currentPageIndex = newActivePage;
+
+          const selection = useSelection();
+          selection.clear();
+          for (let i = 0; i < fromIndices.length; i++) {
+            selection.select(`page_${toIndex + i}`, true, false);
+          }
+        },
+        executeProgrammatic: async () => {
+          await this.executeDocumentMutation(
+            'Reorder Pages',
+            newActivePage,
+            () => {
+              this.service.document.reorderPages(fromIndices, toIndex);
+            },
+            indexMap,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            { deferCommit: true },
+          );
+        },
+        reconcileVisual: () => {
+          this.store.setOptimisticPageOrder(null);
+        },
+        rollbackVisual: (err) => {
+          this.store.setOptimisticPageOrder(null);
+          throw err;
+        },
+        onQueueDrained: () => this.commitPendingDocumentMutations(),
+      });
+      return;
+    }
+
+    this.store.setOptimisticPageOrder(newOrder);
+    this.store.currentPageIndex = newActivePage;
 
     const selection = useSelection();
     selection.clear();
     for (let i = 0; i < fromIndices.length; i++) {
       selection.select(`page_${toIndex + i}`, true, false);
+    }
+
+    try {
+      await this.executeDocumentMutation('Reorder Pages', newActivePage, () => {
+        this.service.document.reorderPages(fromIndices, toIndex);
+      }, indexMap);
+    } catch (err) {
+      this.store.setOptimisticPageOrder(null);
+      throw err;
+    } finally {
+      this.store.setOptimisticPageOrder(null);
     }
   }
 
@@ -4711,6 +4944,8 @@ export class EditorActions {
                 file.type || inferImageMimeType(file.name),
                 currentIndex,
               );
+            } else if (typeof this.service.document.mergeAsync === 'function') {
+              await this.service.document.mergeAsync(buf, currentIndex);
             } else {
               this.service.document.merge(buf, currentIndex);
             }
@@ -4805,7 +5040,9 @@ export class EditorActions {
         }
       }
 
-      const splitBytes = this.service.document.split(sortedIndices);
+      const splitBytes = typeof this.service.document.splitAsync === 'function'
+        ? await this.service.document.splitAsync(sortedIndices)
+        : this.service.document.split(sortedIndices);
       const splitBuffer = splitBytes.buffer.slice(splitBytes.byteOffset, splitBytes.byteOffset + splitBytes.byteLength) as ArrayBuffer;
       
       if (mode === 'split') {
@@ -4857,13 +5094,7 @@ export class EditorActions {
         newFileName = `${baseName}-split-${maxInc + 1}.pdf`;
       }
       
-      const wasAdding = this.isAddingToWorkspace;
-      try {
-        this.isAddingToWorkspace = true;
-        await this.loadDocumentFromBuffer(splitBuffer, newFileName);
-      } finally {
-        this.isAddingToWorkspace = wasAdding;
-      }
+      await this.addDerivedDocumentToWorkspace(splitBuffer, newFileName);
 
       const activeFileId = this.store.activeWorkspaceFileId;
       const newFile = activeFileId ? this.service.getFile(activeFileId) : undefined;
@@ -4904,7 +5135,7 @@ export class EditorActions {
           } catch (err) {
             console.warn('Failed to burn canvas elements to auto-downloaded PDF:', err);
           } finally {
-            this.service.loadDocumentFromBuffer(originalBuffer);
+            this.reloadActiveDocument(originalBuffer);
             this.refreshDocument();
           }
         }
@@ -5049,7 +5280,7 @@ export class EditorActions {
 
         const finalBytes = await this.service.document.saveAsync(this.store.pageTransforms);
         const bufferArray = finalBytes.buffer.slice(finalBytes.byteOffset, finalBytes.byteOffset + finalBytes.byteLength) as ArrayBuffer;
-        this.service.loadDocumentFromBuffer(bufferArray);
+        this.reloadActiveDocument(bufferArray);
         this.store.pageTransforms = {};
       });
     } catch (err) {
@@ -5060,111 +5291,191 @@ export class EditorActions {
   async extractObjectToCanvas(
     type: 'image' | 'shape' | 'text' | 'form-field',
     span: EditableImageSpan | EditableShapeSpan | EditableTextSpan | EditableFormFieldSpan,
-    canvasStore: CanvasStore
+    canvasStore: CanvasStore,
+    options?: { preserveSelection?: boolean },
   ): Promise<string | undefined> {
     if (!this.store.isDocumentLoaded) return;
     if (this.store.isReadOnly || this.store.canMutateDocument === false) return;
     if (!canvasStore) return;
 
-    const newId = canvasStore.generateId();
-
-    let extractedElement: CanvasElement | null = null;
-
-    if (type === 'image') {
-      const imgSpan = span as EditableImageSpan;
-      extractedElement = {
-        id: newId,
-        kind: 'image',
-        pageIndex: imgSpan.pageIndex,
-        x: imgSpan.left,
-        y: imgSpan.top,
-        width: imgSpan.width,
-        height: imgSpan.height,
-        rotation: imgSpan.rotation,
-        flipX: imgSpan.flipX,
-        flipY: imgSpan.flipY,
-        locked: false,
-        visible: true,
-        src: imgSpan.src,
-        opacity: 1,
-        objectFit: 'fill'
-      } as CanvasElement;
-      canvasStore.elements.push(extractedElement);
-    } else if (type === 'shape') {
-      const shapeSpan = span as EditableShapeSpan;
-      extractedElement = {
-        id: newId,
-        kind: 'shape',
-        variant: 'rectangle',
-        pageIndex: shapeSpan.pageIndex,
-        x: shapeSpan.left,
-        y: shapeSpan.top,
-        width: shapeSpan.width,
-        height: shapeSpan.height,
-        rotation: shapeSpan.rotation,
-        flipX: shapeSpan.flipX,
-        flipY: shapeSpan.flipY,
-        locked: false,
-        visible: true,
-        fill: shapeSpan.fill,
-        stroke: 'transparent',
-        strokeWidth: 0,
-        opacity: 1,
-      } as CanvasElement;
-      canvasStore.elements.push(extractedElement);
-    } else if (type === 'text') {
-      const textSpan = span as EditableTextSpan;
-      extractedElement = buildTextElementFromSpan(textSpan, newId);
-      canvasStore.elements.push(extractedElement);
-      this.store.hiddenSpanIds.add(span.id);
-    } else if (type === 'form-field') {
-      const formSpan = span as EditableFormFieldSpan;
-      const sourceFieldName = formSpan.fieldName || formSpan.name || formSpan.fieldId;
-      extractedElement = {
-        id: newId,
-        kind: 'form-field',
-        variant: formSpan.variant,
-        pageIndex: formSpan.pageIndex,
-        x: formSpan.left,
-        y: formSpan.top,
-        width: formSpan.width,
-        height: formSpan.height,
-        rotation: formSpan.rotation || 0,
-        locked: false,
-        visible: true,
-        flipX: false,
-        label: (formSpan.variant === 'button' && typeof formSpan.value === 'string' && formSpan.value)
-          ? formSpan.value
-          : (formSpan.fieldName || formSpan.fieldId),
-        placeholder: formSpan.placeholder || (typeof formSpan.value === 'string' ? formSpan.value : ''),
-        value: typeof formSpan.value === 'string' ? formSpan.value : (formSpan.value ? 'true' : ''),
-        options: formSpan.options ? [...formSpan.options] : undefined,
-        readOnly: formSpan.readOnly ?? false,
-        required: formSpan.required ?? false,
-        fontSize: formSpan.fontSize ?? 13,
-        fontFamily: formSpan.fontFamily ?? 'Helvetica',
-        color: formSpan.color ?? '#111827',
-        backgroundColor: formSpan.backgroundColor ?? '#ffffff',
-        borderColor: formSpan.borderColor ?? '#d1d5db',
-        borderWidth: formSpan.borderWidth ?? 1,
-        borderStyle: formSpan.borderStyle ?? 'solid',
-        borderRadius: formSpan.borderRadius ?? 4,
-        textAlign: formSpan.textAlign ?? 'left',
-        sourceFieldName,
-        originalSpan: formSpan,
-      } as CanvasElement;
-      canvasStore.elements.push(extractedElement);
-      this.store.hiddenSpanIds.add(span.id);
+    const inFlight = this.extractInFlightBySpanId.get(span.id);
+    if (inFlight) {
+      return await inFlight;
     }
 
-    const mutateCmd = await this.executeDocumentMutation('Extract Object', span.pageIndex, () => {
-      if (type === 'text') {
-        this.service.document.getPage(span.pageIndex).hideTextSpan(span as EditableTextSpan);
-      } else if (type === 'form-field') {
-        const sourceFieldName = (span as EditableFormFieldSpan).fieldName || (span as EditableFormFieldSpan).name || (span as EditableFormFieldSpan).fieldId;
-        if (sourceFieldName && typeof this.service?.document?.markAcroFormFieldRemoved === 'function') {
-          this.service.document.markAcroFormFieldRemoved(sourceFieldName);
+    if (this.store.hiddenSpanIds.has(span.id)) {
+      const existing = canvasStore.elements.find((e) => {
+        if ('originalSpan' in e && (e as { originalSpan?: { id?: string } }).originalSpan?.id === span.id) {
+          return true;
         }
+        return (
+          e.kind === type &&
+          e.pageIndex === span.pageIndex &&
+          Math.abs(e.x - span.left) < 0.5 &&
+          Math.abs(e.y - span.top) < 0.5
+        );
+      });
+      if (existing) {
+        if (options?.preserveSelection) {
+          canvasStore.selectElements([existing.id], true);
+        } else {
+          canvasStore.selectElement(existing.id);
+        }
+        return existing.id;
+      }
+    }
+
+    const extractionPromise = (async (): Promise<string | undefined> => {
+      const newId = canvasStore.generateId();
+
+      let extractedElement: CanvasElement | null = null;
+
+      if (type === 'image') {
+        const imgSpan = span as EditableImageSpan;
+        extractedElement = {
+          id: newId,
+          kind: 'image',
+          pageIndex: imgSpan.pageIndex,
+          x: imgSpan.left,
+          y: imgSpan.top,
+          width: imgSpan.width,
+          height: imgSpan.height,
+          rotation: imgSpan.rotation,
+          flipX: imgSpan.flipX,
+          flipY: imgSpan.flipY,
+          locked: false,
+          visible: true,
+          src: imgSpan.src,
+          opacity: 1,
+          objectFit: 'fill'
+        } as CanvasElement;
+      } else if (type === 'shape') {
+        const shapeSpan = span as EditableShapeSpan;
+        extractedElement = {
+          id: newId,
+          kind: 'shape',
+          variant: shapeSpan.variant || 'rectangle',
+          pageIndex: shapeSpan.pageIndex,
+          x: shapeSpan.left,
+          y: shapeSpan.top,
+          width: shapeSpan.width,
+          height: shapeSpan.height,
+          rotation: shapeSpan.rotation,
+          flipX: shapeSpan.flipX,
+          flipY: shapeSpan.flipY,
+          locked: false,
+          visible: true,
+          fill: shapeSpan.fill || 'transparent',
+          stroke: shapeSpan.stroke || 'transparent',
+          strokeWidth: shapeSpan.strokeWidth ?? 0,
+          opacity: shapeSpan.opacity ?? 1,
+          isHighlight: shapeSpan.isHighlight ?? false,
+          svgPath: shapeSpan.svgPath,
+          viewBox: shapeSpan.viewBox,
+          baseWidth: shapeSpan.baseWidth ?? shapeSpan.width,
+          baseHeight: shapeSpan.baseHeight ?? shapeSpan.height,
+          fillMode: shapeSpan.fillMode,
+          fillRule: shapeSpan.fillRule,
+          strokeLineCap: shapeSpan.strokeLineCap,
+          strokeLineJoin: shapeSpan.strokeLineJoin,
+          originalSvgPath: shapeSpan.svgPath,
+        } as CanvasElement;
+      } else if (type === 'text') {
+        const textSpan = span as EditableTextSpan;
+        extractedElement = buildTextElementFromSpan(textSpan, newId);
+        this.store.hiddenSpanIds.add(span.id);
+      } else if (type === 'form-field') {
+        const formSpan = span as EditableFormFieldSpan;
+        const sourceFieldName = formSpan.fieldName || formSpan.name || formSpan.fieldId;
+        extractedElement = {
+          id: newId,
+          kind: 'form-field',
+          variant: formSpan.variant,
+          pageIndex: formSpan.pageIndex,
+          x: formSpan.left,
+          y: formSpan.top,
+          width: formSpan.width,
+          height: formSpan.height,
+          rotation: formSpan.rotation || 0,
+          locked: false,
+          visible: true,
+          flipX: false,
+          label: formSpan.label || ((formSpan.variant === 'button' && typeof formSpan.value === 'string' && formSpan.value)
+            ? formSpan.value
+            : (formSpan.fieldName || formSpan.fieldId)),
+          placeholder: formSpan.placeholder || (typeof formSpan.value === 'string' ? formSpan.value : ''),
+          value: typeof formSpan.value === 'string' ? formSpan.value : (formSpan.value ? 'true' : ''),
+          options: formSpan.options ? [...formSpan.options] : undefined,
+          multiline: formSpan.multiline,
+          password: formSpan.password,
+          readOnly: formSpan.readOnly ?? false,
+          required: formSpan.required ?? false,
+          fontSize: formSpan.fontSize ?? 13,
+          fontFamily: formSpan.fontFamily ?? 'Helvetica',
+          color: formSpan.color ?? '#111827',
+          backgroundColor: formSpan.backgroundColor ?? '#ffffff',
+          borderColor: formSpan.borderColor ?? '#d1d5db',
+          borderWidth: formSpan.borderWidth ?? 1,
+          borderStyle: formSpan.borderStyle ?? 'solid',
+          borderRadius: formSpan.borderRadius ?? 4,
+          textAlign: formSpan.textAlign ?? 'left',
+          sourceFieldName,
+          originalSpan: formSpan,
+        } as CanvasElement;
+        this.store.hiddenSpanIds.add(span.id);
+      }
+
+      const mutateCmd = await this.executeDocumentMutation(
+        'Extract Object',
+        span.pageIndex,
+        () => {
+          if (type === 'text') {
+            this.service.document.getPage(span.pageIndex).hideTextSpan(span as EditableTextSpan);
+          } else if (type === 'form-field') {
+            const sourceFieldName = (span as EditableFormFieldSpan).fieldName || (span as EditableFormFieldSpan).name || (span as EditableFormFieldSpan).fieldId;
+            if (sourceFieldName && typeof this.service?.document?.markAcroFormFieldRemoved === 'function') {
+              this.service.document.markAcroFormFieldRemoved(sourceFieldName);
+            }
+          } else {
+            const objSpan = span as EditableImageSpan | EditableShapeSpan;
+            const page = this.service.document.getPage(span.pageIndex);
+            if (typeof objSpan.pdfAnnotIndex === 'number' && objSpan.pdfAnnotIndex >= 0) {
+              page.removeAnnotation(objSpan.pdfAnnotIndex, {
+                left: objSpan.left,
+                top: objSpan.top,
+                width: objSpan.width,
+                height: objSpan.height,
+              });
+              page.generateContent?.();
+            } else if (objSpan.pdfObjectIndex >= 0) {
+              page.removeObject(objSpan.pdfObjectIndex);
+              page.generateContent?.();
+            }
+          }
+        },
+        undefined,
+        true,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { onlyIncrementTargetPageVersion: true },
+      );
+
+      if (extractedElement) {
+        if (typeof canvasStore.addElement === 'function') {
+          canvasStore.addElement(extractedElement);
+        } else {
+          canvasStore.elements.push(extractedElement);
+        }
+      }
+
+      if (type !== 'text' && type !== 'form-field') {
+        this.store.hiddenSpanIds.add(span.id);
+      }
+
+      if (options?.preserveSelection) {
+        this.store.selectedSpans = this.store.selectedSpans.filter((s) => s.id !== span.id);
       } else {
         this.service.document.getPage(span.pageIndex).removeObject((span as EditableImageSpan | EditableShapeSpan).pdfObjectIndex);
       }
