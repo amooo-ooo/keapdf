@@ -10,14 +10,18 @@ import { getContext, setContext } from 'svelte';
 import { SvelteSet } from 'svelte/reactivity';
 import type {
   EditableSpan,
+  EditableFormFieldSpan,
   CompressionLevel,
 } from '../core/types';
 import type { CanvasElement, CanvasElementKind } from './canvas-types';
-import { DEFAULT_PAGE_TRANSFORM, type ActiveCropState, type EditorTool, type InlineEditState, type LeftPanelMode, type PageTransform, type DocumentViewMode, type ViewModeConfig } from './types';
+import { DEFAULT_PAGE_TRANSFORM, type ActiveCropState, type PendingDigitalSignatureState, type EditorTool, type SelectMode, type InlineEditState, type LeftPanelMode, type PageTransform, type DocumentViewMode, type ViewModeConfig } from './types';
 import { getViewModeConfig, isTabAllowedInMode, isToolAllowedInMode } from '../core/document-mode';
 
 // Non-reactive storage for binary PDF payloads to prevent reactive proxy overhead
 const fileBufferStore = new Map<string, ArrayBuffer>();
+
+// Non-reactive, memory-only storage for passwords that unlocked encrypted workspace files
+const fileCredentialStore = new Map<string, string>();
 
 export function getFileBuffer(id: string): ArrayBuffer | undefined {
   return fileBufferStore.get(id);
@@ -29,10 +33,36 @@ export function setFileBuffer(id: string, buffer: ArrayBuffer): void {
 
 export function deleteFileBuffer(id: string): void {
   fileBufferStore.delete(id);
+  fileCredentialStore.delete(id);
 }
 
 export function clearAllFileBuffers(): void {
   fileBufferStore.clear();
+  fileCredentialStore.clear();
+}
+
+/**
+ * Returns the password that unlocked an encrypted workspace file.
+ *
+ * @param id Workspace file id.
+ * @return The recorded password, empty when none was required.
+ */
+export function getFileCredential(id: string): string {
+  return fileCredentialStore.get(id) ?? '';
+}
+
+/**
+ * Records the password that unlocks a workspace file so its stored buffer can be reopened.
+ *
+ * @param id Workspace file id.
+ * @param password Password to record; an empty value forgets any stored password.
+ */
+export function setFileCredential(id: string, password: string): void {
+  if (password) {
+    fileCredentialStore.set(id, password);
+  } else {
+    fileCredentialStore.delete(id);
+  }
 }
 
 export interface WorkspaceFile {
@@ -40,12 +70,14 @@ export interface WorkspaceFile {
   fileName: string;
   thumbnail?: string;
   sizeBytes?: number;
+  pageCount?: number;
   canvasElements?: CanvasElement[];
   pageTransforms?: Record<number, PageTransform>;
   hiddenSpanIds?: string[];
   currentPageIndex?: number;
   pageVersions?: Record<number, number>;
   scannedPages?: number[];
+  formFieldValues?: Record<string, string | boolean>;
 }
 
 export type AppTheme = 'system' | 'light' | 'dark';
@@ -67,13 +99,24 @@ function getInitialTheme(): AppTheme {
 
 export function applyThemeToDocument(theme: AppTheme): void {
   if (typeof document === 'undefined' || !document?.documentElement?.classList) return;
+  const rootEl = document.documentElement;
+  rootEl.classList.add('theme-transition-suppressed');
   const isDark =
     theme === 'dark' ||
     (theme === 'system' &&
       typeof window !== 'undefined' &&
       typeof window.matchMedia === 'function' &&
       window.matchMedia('(prefers-color-scheme: dark)').matches);
-  document.documentElement.classList.toggle('dark', isDark);
+  rootEl.classList.toggle('dark', isDark);
+  // note: force synchronous style recalculation before re-enabling transitions
+  void rootEl.offsetHeight;
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(() => {
+      rootEl.classList.remove('theme-transition-suppressed');
+    });
+  } else {
+    rootEl.classList.remove('theme-transition-suppressed');
+  }
 }
 
 const EDITOR_STORE_KEY = Symbol('editor-store');
@@ -119,15 +162,31 @@ export class EditorStore {
 
   // -- Interaction --
   activeTool = $state<EditorTool>('select');
+  selectMode = $state<SelectMode>('select');
   annotateColor = $state('#fde047');
-  annotateStrokeWidth = $state(2);
-  selectedSpan = $state<EditableSpan | null>(null);
+  annotateStrokeWidth = $state(1);
+  selectedSpans = $state<EditableSpan[]>([]);
+
+  get selectedSpan(): EditableSpan | null {
+    return this.selectedSpans[this.selectedSpans.length - 1] ?? null;
+  }
+
+  set selectedSpan(span: EditableSpan | null) {
+    if (span === null) {
+      this.selectedSpans = [];
+    } else {
+      this.selectedSpans = [span];
+    }
+  }
+
+  activeFormField = $state<EditableFormFieldSpan | null>(null);
+  formFieldVersion = $state<number>(0);
   inlineEdit = $state<InlineEditState | null>(null);
 
   // -- UI panels --
   leftPanelMode = $state<LeftPanelMode>('workspace');
-  leftPanelCollapsed = $state(false);
-  rightPanelCollapsed = $state(false);
+  leftPanelCollapsed = $state(true);
+  rightPanelCollapsed = $state(true);
 
   // -- Views and modals --
   showOrganizerView = $state(false);
@@ -136,7 +195,10 @@ export class EditorStore {
   showCompressDialog = $state(false);
   compressInitialPreset = $state<CompressionLevel>('recommended');
   showSanitizeDialog = $state(false);
+  showAdjustColorsDialog = $state(false);
   showImpositionDialog = $state(false);
+  showPageNumberingDialog = $state(false);
+  pageNumberingInitialMode = $state<'page-numbers' | 'bates' | 'header-footer'>('page-numbers');
   showDocumentInfoDialog = $state(false);
   showEsignDialog = $state(false);
   showCertSignDialog = $state(false);
@@ -169,6 +231,10 @@ export class EditorStore {
   // -- Page crop tool interaction --
   activeCrop = $state<ActiveCropState | null>(null);
 
+  // -- Interactive digital signature placement --
+  pendingDigitalSignature = $state<PendingDigitalSignatureState | null>(null);
+  isSigningDocument = $state(false);
+
   // -- Drag-and-drop --
   isDraggingOver = $state(false);
 
@@ -177,13 +243,22 @@ export class EditorStore {
 
   hiddenSpanIds = new SvelteSet<string>();
 
-  // -- Page transforms --
+  // Page transforms and optimistic actions
   pageTransforms = $state<Record<number, PageTransform>>({});
+  optimisticRotations = $state<Record<number, number>>({});
+  pendingRenderRotations = $state<Record<number, number>>({});
+  optimisticDeletedPageIndices = $state<Set<number>>(new Set());
+  optimisticPageOrder = $state<number[] | null>(null);
+  isMutating = $state(false);
 
   // -- Derived values --
 
   get isCropping(): boolean {
     return this.activeCrop !== null;
+  }
+
+  get isPlacingDigitalSignature(): boolean {
+    return this.pendingDigitalSignature !== null;
   }
 
   get zoomPercent(): number {
@@ -199,7 +274,11 @@ export class EditorStore {
   }
 
   get hasSelection(): boolean {
-    return this.selectedSpan !== null;
+    return this.selectedSpans.length > 0;
+  }
+
+  isSpanSelected(spanId: string): boolean {
+    return this.selectedSpans.some((s) => s.id === spanId);
   }
 
   get isInlineEditing(): boolean {
@@ -227,7 +306,7 @@ export class EditorStore {
   }
 
   get canAnnotate(): boolean {
-    return this.viewMode !== 'viewing';
+    return this.viewModeConfig.canAnnotate;
   }
 
   get canSelectElements(): boolean {
@@ -266,6 +345,18 @@ export class EditorStore {
     return this.viewModeConfig.canDeleteElements;
   }
 
+  get canEditElements(): boolean {
+    return this.viewModeConfig.canEditContent;
+  }
+
+  get canRotateElements(): boolean {
+    return this.viewModeConfig.canResizeElements;
+  }
+
+  get canDuplicateElements(): boolean {
+    return this.viewModeConfig.canEditContent;
+  }
+
   get viewModeConfig(): ViewModeConfig {
     return getViewModeConfig(this.viewMode);
   }
@@ -277,7 +368,14 @@ export class EditorStore {
    * @param collapseRightPanel Whether to collapse the right panel when entering viewing mode.
    */
   setViewMode(mode: DocumentViewMode, collapseRightPanel: boolean = true): void {
-    if (this.viewMode === mode) return;
+    if (this.viewMode === mode) {
+      if (mode === 'editing' || mode === 'suggesting') {
+        this.rightPanelCollapsed = false;
+      } else if (mode === 'viewing' && collapseRightPanel) {
+        this.rightPanelCollapsed = true;
+      }
+      return;
+    }
     this.viewMode = mode;
 
     if (mode === 'viewing') {
@@ -290,11 +388,16 @@ export class EditorStore {
       this.placingElementKind = null;
       this.showOrganizerView = false;
       this.showSanitizeDialog = false;
+      this.showAdjustColorsDialog = false;
       this.showCompressDialog = false;
       this.showPageScaleDialog = false;
       this.showImpositionDialog = false;
+      this.showPageNumberingDialog = false;
       if (this.isCropping) {
         this.activeCrop = null;
+      }
+      if (this.isPlacingDigitalSignature) {
+        this.pendingDigitalSignature = null;
       }
       if (!isToolAllowedInMode(mode, this.activeTool)) {
         this.activeTool = 'select';
@@ -307,11 +410,16 @@ export class EditorStore {
       this.inlineEdit = null;
       this.showOrganizerView = false;
       this.showSanitizeDialog = false;
+      this.showAdjustColorsDialog = false;
       this.showCompressDialog = false;
       this.showPageScaleDialog = false;
       this.showImpositionDialog = false;
+      this.showPageNumberingDialog = false;
       if (this.isCropping) {
         this.activeCrop = null;
+      }
+      if (this.isPlacingDigitalSignature) {
+        this.pendingDigitalSignature = null;
       }
       if (!isToolAllowedInMode(mode, this.activeTool)) {
         this.activeTool = 'select';
@@ -332,8 +440,17 @@ export class EditorStore {
     this.pageVersions[pageIndex] = (this.pageVersions[pageIndex] || 0) + 1;
   }
 
+  incrementFormFieldVersion(): void {
+    this.formFieldVersion++;
+  }
+
+  setActiveFormField(field: EditableFormFieldSpan | null): void {
+    this.activeFormField = field;
+  }
+
   clearSelection(): void {
-    this.selectedSpan = null;
+    this.selectedSpans = [];
+    this.activeFormField = null;
     this.inlineEdit = null;
   }
 
@@ -346,6 +463,133 @@ export class EditorStore {
   updatePageTransform(pageIndex: number, updates: Partial<PageTransform>): void {
     const current = this.getPageTransform(pageIndex);
     this.pageTransforms[pageIndex] = { ...current, ...updates };
+  }
+
+  /** Retrieve the pending optimistic rotation delta in degrees for a given page. */
+  getOptimisticRotation(pageIndex: number): number {
+    return this.optimisticRotations[pageIndex] ?? 0;
+  }
+
+  /** Add an optimistic rotation delta for immediate visual feedback. */
+  addOptimisticRotation(pageIndex: number, degreesDelta: number): void {
+    const current = this.optimisticRotations[pageIndex] ?? 0;
+    this.optimisticRotations = {
+      ...this.optimisticRotations,
+      [pageIndex]: (((current + degreesDelta) % 360) + 360) % 360,
+    };
+  }
+
+  /** Subtract an applied or failed rotation delta from pending optimistic rotation. */
+  subtractOptimisticRotation(pageIndex: number, degreesDelta: number): void {
+    const current = this.optimisticRotations[pageIndex] ?? 0;
+    if (current === 0) return;
+    const next = (((current - degreesDelta) % 360) + 360) % 360;
+    const nextRotations = { ...this.optimisticRotations };
+    if (next === 0) {
+      delete nextRotations[pageIndex];
+    } else {
+      nextRotations[pageIndex] = next;
+    }
+    this.optimisticRotations = nextRotations;
+  }
+
+  /** Clear pending optimistic rotation for a page. */
+  clearOptimisticRotation(pageIndex: number): void {
+    const nextRotations = { ...this.optimisticRotations };
+    delete nextRotations[pageIndex];
+    this.optimisticRotations = nextRotations;
+  }
+
+  /** Retrieve background-executed rotation delta awaiting final canvas bitmap commit. */
+  getPendingRenderRotation(pageIndex: number): number {
+    return this.pendingRenderRotations[pageIndex] ?? 0;
+  }
+
+  /** Record rotation applied to WASM in the background before the bitmap re-renders. */
+  addPendingRenderRotation(pageIndex: number, degreesDelta: number): void {
+    const current = this.pendingRenderRotations[pageIndex] ?? 0;
+    const next = (((current + degreesDelta) % 360) + 360) % 360;
+    const nextRotations = { ...this.pendingRenderRotations };
+    if (next === 0) {
+      delete nextRotations[pageIndex];
+    } else {
+      nextRotations[pageIndex] = next;
+    }
+    this.pendingRenderRotations = nextRotations;
+  }
+
+  /** Clear background-executed rotation delta once the bitmap re-renders. */
+  clearPendingRenderRotation(pageIndex?: number): void {
+    if (pageIndex === undefined) {
+      if (Object.keys(this.pendingRenderRotations).length > 0) {
+        this.pendingRenderRotations = {};
+      }
+      return;
+    }
+    if (this.pendingRenderRotations[pageIndex] === undefined) return;
+    const nextRotations = { ...this.pendingRenderRotations };
+    delete nextRotations[pageIndex];
+    this.pendingRenderRotations = nextRotations;
+  }
+
+  /** Compute the combined visual rotation accounting for base transform, optimistic rotation, and unrendered background rotation. */
+  getEffectivePageRotation(pageIndex: number): number {
+    const base = this.pageTransforms[pageIndex]?.rotation ?? 0;
+    const opt = this.optimisticRotations[pageIndex] ?? 0;
+    const pendingRender = this.pendingRenderRotations[pageIndex] ?? 0;
+    return (((base + opt + pendingRender) % 360) + 360) % 360;
+  }
+
+  /** Compute the layout rotation relative to current WASM page dimensions. */
+  getLayoutPageRotation(pageIndex: number): number {
+    const base = this.pageTransforms[pageIndex]?.rotation ?? 0;
+    const opt = this.optimisticRotations[pageIndex] ?? 0;
+    return (((base + opt) % 360) + 360) % 360;
+  }
+
+  /** Check whether a page is currently marked as optimistically deleted. */
+  isPageOptimisticallyDeleted(pageIndex: number): boolean {
+    return this.optimisticDeletedPageIndices.has(pageIndex);
+  }
+
+  /** Mark a page as optimistically deleted for exit transitions. */
+  markPageOptimisticallyDeleted(pageIndex: number): void {
+    this.optimisticDeletedPageIndices.add(pageIndex);
+  }
+
+  /** Clear optimistic deletion state for a page or all pages. */
+  clearOptimisticPageDeletion(pageIndex?: number): void {
+    if (pageIndex !== undefined) {
+      this.optimisticDeletedPageIndices.delete(pageIndex);
+    } else {
+      this.optimisticDeletedPageIndices.clear();
+    }
+  }
+
+  /** Compute the active visual sequence of pages accounting for pending optimistic reorders. */
+  get effectivePageOrder(): number[] {
+    if (this.optimisticPageOrder && this.optimisticPageOrder.length === this.pageCount) {
+      return this.optimisticPageOrder;
+    }
+    return Array.from({ length: this.pageCount }, (_, i) => i);
+  }
+
+  /** Set or clear the pending optimistic page sequence. */
+  setOptimisticPageOrder(order: number[] | null): void {
+    this.optimisticPageOrder = order;
+  }
+
+  /** Retrieve the underlying document page index displayed at a given visual position. */
+  getEffectivePageIndex(visualIndex: number): number {
+    const order = this.effectivePageOrder;
+    return order[visualIndex] ?? visualIndex;
+  }
+
+  /** Retrieve the visual position of a given document page index. */
+  getVisualPageIndex(pageIndex: number): number {
+    const order = this.effectivePageOrder;
+    const idx = order.indexOf(pageIndex);
+    return idx !== -1 ? idx : pageIndex;
   }
 
   /** Open the imposition dialog with the given initial mode. */
@@ -396,6 +640,29 @@ export class EditorStore {
   /** Close the page scale and resizing dialog. */
   closePageScaleDialog(): void {
     this.showPageScaleDialog = false;
+  }
+
+  /** Open the adjust colours and contrast dialog. */
+  openAdjustColorsDialog(): void {
+    this.showAdjustColorsDialog = true;
+  }
+
+  /** Close the adjust colours and contrast dialog. */
+  closeAdjustColorsDialog(): void {
+    this.showAdjustColorsDialog = false;
+  }
+
+  /** Open the page numbering and Bates numbering dialog with the given initial mode. */
+  openPageNumberingDialog(
+    mode: 'page-numbers' | 'bates' | 'header-footer' = 'page-numbers'
+  ): void {
+    this.pageNumberingInitialMode = mode;
+    this.showPageNumberingDialog = true;
+  }
+
+  /** Close the page numbering and Bates numbering dialog. */
+  closePageNumberingDialog(): void {
+    this.showPageNumberingDialog = false;
   }
 
   /** Open the granular permissions configuration dialog. */
