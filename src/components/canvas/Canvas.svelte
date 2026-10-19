@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { flushSync, tick, untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions, ZOOM_MIN, ZOOM_MAX, type ScrollTargetOptions } from '../../stores/editor-actions';
   import { useCanvasStore } from '../../stores/canvas.svelte';
@@ -13,9 +13,11 @@
     screenToPageCoordsWithMetrics,
     capturePageMetrics,
     calculatePageCenteringScroll,
+    calculateCenterPreservingScroll,
     calculateOutOfBoundsScrollSpeeds,
     calculatePageLayoutDimensions,
     calculateZoomScrollOffsets,
+    calculatePageAnchorZoomScroll,
     calculateSmoothZoomFactor,
     computePageVerticalOffsets,
     resolvePageIndexFromOffsets,
@@ -27,10 +29,11 @@
   } from '../../utils/geometry';
   import { computeDragSnap, extractSnapCandidates } from '../../utils/snapping-engine';
   import PdfPageView from './PdfPageView.svelte';
+  import EmptyStateFeatureCarousel from './EmptyStateFeatureCarousel.svelte';
   import PageOrganizerPanel from '../panels/PageOrganizerPanel.svelte';
 
   import { Button } from '$lib/components/ui/button/index.js';
-  import { FileText, Globe, AlertCircle, Files, FileType, FolderOpen } from 'lucide-svelte';
+  import { AlertCircle, FolderOpen } from 'lucide-svelte';
   import { useFeatureFlagStore } from '../../core/feature-flags';
   import { isPdfFile, isConvertibleDocumentFile } from '../../utils/file-type-utils';
 
@@ -74,7 +77,7 @@
         e.stopImmediatePropagation();
         e.stopPropagation();
         e.preventDefault();
-        canvasActions.deleteSelectedElement();
+        void actions.deleteSelected();
       } else if (e.key === 'Escape') {
         e.stopImmediatePropagation();
         e.stopPropagation();
@@ -124,14 +127,21 @@
   let cachedTargetPageIndex: number | null = null;
   let cachedTargetLayerEl: HTMLElement | null = null;
   let dropRafId: number | null = null;
-  let cachedDropPageMetrics: { pageIndex: number; metrics: CachedPageMetrics; pageEl: HTMLElement } | null = null;
+  let cachedDropPageMetrics: {
+    pageIndex: number;
+    metrics: CachedPageMetrics;
+    pageEl: HTMLElement;
+    snapCandidates?: ReturnType<typeof extractSnapCandidates>;
+  } | null = null;
   let latestDragClientX = 0;
   let latestDragClientY = 0;
   let latestDragTarget: HTMLElement | null = null;
+  let dragJustEnded = false;
+  let dragJustEndedTimer: ReturnType<typeof setTimeout> | null = null;
 
   function performDragMove(clientX: number, clientY: number, disabledSnap: boolean = false): void {
     if (!canvasStore.dragState || canvasStore.dragState.mode !== 'move' || !viewportEl) return;
-    const draggedElement = canvasStore.elements.find(el => el.id === canvasStore.dragState?.elementId);
+    const draggedElement = canvasStore.getElementById(canvasStore.dragState.elementId);
     if (!draggedElement) return;
 
     // Resolve target page based on vertical pointer position and midpoint thresholds
@@ -143,7 +153,7 @@
       targetPageIndex = resolvePageIndexAtScrollY(targetScrollY);
     }
 
-    if (targetPageIndex !== cachedTargetPageIndex || !cachedTargetLayerEl) {
+    if (targetPageIndex !== cachedTargetPageIndex || !cachedTargetLayerEl || !cachedTargetLayerEl.isConnected) {
       cachedTargetPageIndex = targetPageIndex;
       const targetPageSelector = `[data-page-index="${targetPageIndex}"]`;
       cachedTargetLayerEl = (
@@ -184,11 +194,18 @@
     if (autoScrollRafId !== null) return;
     const step = () => {
       if (viewportEl && (autoScrollSpeedX !== 0 || autoScrollSpeedY !== 0) && canvasStore.dragState) {
+        const prevScrollTop = viewportEl.scrollTop;
+        const prevScrollLeft = viewportEl.scrollLeft;
         if (autoScrollSpeedY !== 0) {
           viewportEl.scrollTop += autoScrollSpeedY;
         }
         if (autoScrollSpeedX !== 0) {
           viewportEl.scrollLeft += autoScrollSpeedX;
+        }
+        const actualDx = viewportEl.scrollLeft - prevScrollLeft;
+        const actualDy = viewportEl.scrollTop - prevScrollTop;
+        if (actualDx !== 0 || actualDy !== 0) {
+          canvasActions.adjustCachedPageMetricsForScroll(actualDx, actualDy);
         }
         if (lastDragClientX !== null && lastDragClientY !== null && canvasStore.dragState.mode === 'move') {
           performDragMove(lastDragClientX, lastDragClientY);
@@ -211,6 +228,19 @@
   }
 
   function handlePointerMove(e: PointerEvent): void {
+    if (viewportEl) {
+      const rect = viewportEl.getBoundingClientRect();
+      const inX = e.clientX >= rect.left && e.clientX <= rect.right;
+      const inY = e.clientY >= rect.top && e.clientY <= rect.bottom;
+      if (inX && inY) {
+        isPointerOverViewport = true;
+        lastPointerViewportX = e.clientX - rect.left;
+        lastPointerViewportY = e.clientY - rect.top;
+      } else {
+        isPointerOverViewport = false;
+      }
+    }
+
     if (isPanning && viewportEl) {
       e.preventDefault();
       const dx = e.clientX - panStartX;
@@ -218,7 +248,7 @@
       viewportEl.scrollLeft = scrollStartX - dx;
       viewportEl.scrollTop = scrollStartY - dy;
     } else if (canvasStore.dragState && viewportEl) {
-      const draggedElement = canvasStore.elements.find(el => el.id === canvasStore.dragState?.elementId);
+      const draggedElement = canvasStore.getElementById(canvasStore.dragState.elementId);
       if (!draggedElement) return;
 
       if (canvasStore.dragState.mode === 'move') {
@@ -228,17 +258,24 @@
         updateAutoScroll(e.clientX, e.clientY);
         performDragMove(e.clientX, e.clientY, disabledSnap);
       } else {
-        const pageSelector = `[data-page-index="${draggedElement.pageIndex}"]`;
-        const layerEl = (
-          viewportEl.querySelector(`${pageSelector} [data-canvas-layer]`) ??
-          viewportEl.querySelector(`${pageSelector} [data-page-element]`)
-        ) as HTMLElement | null;
+        if (draggedElement.pageIndex !== cachedTargetPageIndex || !cachedTargetLayerEl || !cachedTargetLayerEl.isConnected) {
+          cachedTargetPageIndex = draggedElement.pageIndex;
+          const pageSelector = `[data-page-index="${draggedElement.pageIndex}"]`;
+          cachedTargetLayerEl = (
+            viewportEl.querySelector(`${pageSelector} [data-canvas-layer]`) ??
+            viewportEl.querySelector(`${pageSelector} [data-page-element]`)
+          ) as HTMLElement | null;
+        }
+        const layerEl = cachedTargetLayerEl;
         if (!layerEl) return;
 
         const pt = store.getPageTransform(draggedElement.pageIndex);
         if (canvasStore.dragState.mode === 'resize') {
           const disabledSnap = e.ctrlKey || e.metaKey;
           canvasActions.updateResize(e.clientX, e.clientY, layerEl, store.zoom, e.shiftKey, pt, { disabledSnap });
+        } else if (canvasStore.dragState.mode === 'endpoint') {
+          const disabledSnap = e.ctrlKey || e.metaKey;
+          canvasActions.updateEndpointAdjust(e.clientX, e.clientY, layerEl, store.zoom, e.shiftKey, pt, { disabledSnap });
         } else if (canvasStore.dragState.mode === 'rotate') {
           canvasActions.updateRotate(e.clientX, e.clientY, layerEl, store.zoom, pt);
         }
@@ -267,10 +304,21 @@
     }
 
     if (canvasStore.dragState) {
+      dragJustEnded = true;
+      if (dragJustEndedTimer !== null) {
+        clearTimeout(dragJustEndedTimer);
+      }
+      dragJustEndedTimer = setTimeout(() => {
+        dragJustEnded = false;
+        dragJustEndedTimer = null;
+      }, 100);
+
       if (canvasStore.dragState.mode === 'move') {
         canvasActions.endDrag();
       } else if (canvasStore.dragState.mode === 'resize') {
         canvasActions.endResize();
+      } else if (canvasStore.dragState.mode === 'endpoint') {
+        canvasActions.endEndpointAdjust();
       } else if (canvasStore.dragState.mode === 'rotate') {
         canvasActions.endRotate();
       }
@@ -280,28 +328,52 @@
   }
 
   function handleWindowClick(e: MouseEvent): void {
+    if (dragJustEnded || canvasActions.consumeDragEnd()) {
+      dragJustEnded = false;
+      return;
+    }
+
     if (!canvasStore.selectedElement) return;
 
-    const target = e.target as HTMLElement;
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    const isInside = (selector: string): boolean => {
+      for (let i = 0; i < path.length; i++) {
+        const node = path[i];
+        if (node instanceof Element && node.matches(selector)) {
+          return true;
+        }
+      }
+      const target = e.target;
+      if (target instanceof Element && target.closest(selector)) {
+        return true;
+      }
+      return false;
+    };
 
     if (
-      target.closest('.editor-shell-right') || 
-      target.closest('.editor-shell-left') || 
-      target.closest('.editor-shell-nav') ||
-      target.closest('[role="dialog"]') ||
-      target.closest('[role="menu"]') ||
-      target.closest('[role="listbox"]') ||
-      target.closest('[data-radix-popper-content-wrapper]') ||
-      target.closest('[data-bits-menu-content]') ||
-      target.closest('[data-bits-select-content]') ||
-      target.closest('[data-bits-popover-content]') ||
-      target.closest('[data-bits-dialog-content]') ||
-      target.closest('.toaster')
+      isInside('.editor-shell-right') || 
+      isInside('.editor-shell-left') || 
+      isInside('.editor-shell-nav') ||
+      isInside('[role="dialog"]') ||
+      isInside('[role="menu"]') ||
+      isInside('[role="listbox"]') ||
+      isInside('[data-radix-popper-content-wrapper]') ||
+      isInside('[data-bits-menu-content]') ||
+      isInside('[data-bits-select-content]') ||
+      isInside('[data-bits-popover-content]') ||
+      isInside('[data-bits-dialog-content]') ||
+      isInside('.pdf-form-layer') ||
+      isInside('.pdf-form-field-wrapper') ||
+      isInside('.toaster')
     ) {
       return;
     }
 
-    if (!target.closest('.canvas-element-container') && !target.closest('.selection-overlay-container')) {
+    if (
+      !isInside('.canvas-element-container') &&
+      !isInside('.selection-overlay-container') &&
+      !isInside('.line-selection-overlay')
+    ) {
       canvasStore.selectElement(null);
     }
   }
@@ -310,23 +382,52 @@
     stopAutoScroll();
     isSpaceDown = false;
     isPanning = false;
+    isPointerOverViewport = false;
+    activeZoomAnchor = null;
   }
 
 
   let scrollRafId: number | null = null;
   let isCentering = false;
+  let isZoomTransitioning = false;
   let cachedVerticalOffsets: PageVerticalOffset[] | null = null;
+  let cachedOffsetsTargetZoom: number | null = null;
   let cachedFirstPageOffsetTop: number | null = null;
+
+  let lastPointerViewportX: number | null = null;
+  let lastPointerViewportY: number | null = null;
+  let isPointerOverViewport = false;
+
+  function handleViewportPointerEnter(e: PointerEvent): void {
+    if (!viewportEl) return;
+    isPointerOverViewport = true;
+    const rect = viewportEl.getBoundingClientRect();
+    lastPointerViewportX = e.clientX - rect.left;
+    lastPointerViewportY = e.clientY - rect.top;
+  }
+
+  function handleViewportPointerLeave(): void {
+    isPointerOverViewport = false;
+  }
+
+  function handleViewportPointerMove(e: PointerEvent): void {
+    if (!viewportEl) return;
+    isPointerOverViewport = true;
+    const rect = viewportEl.getBoundingClientRect();
+    lastPointerViewportX = e.clientX - rect.left;
+    lastPointerViewportY = e.clientY - rect.top;
+  }
 
   function invalidatePageOffsetsCache(): void {
     cachedVerticalOffsets = null;
+    cachedOffsetsTargetZoom = null;
     cachedFirstPageOffsetTop = null;
   }
 
   let visiblePageRange = $state<{ min: number; max: number }>({ min: 0, max: 2 });
   const VIRTUAL_OVERSCAN = 2;
 
-  function updateVisiblePageRange(): void {
+  function updateVisiblePageRange(explicitScrollTop?: number, explicitClientHeight?: number): void {
     if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0) return;
     if (!featureFlags.isEnabled('performance.virtual-rendering') || store.pageCount <= 10) {
       const targetMax = store.pageCount - 1;
@@ -338,8 +439,8 @@
       return;
     }
 
-    const scrollTop = viewportEl.scrollTop;
-    const clientHeight = viewportEl.clientHeight;
+    const scrollTop = explicitScrollTop !== undefined ? explicitScrollTop : viewportEl.scrollTop;
+    const clientHeight = explicitClientHeight !== undefined ? explicitClientHeight : viewportEl.clientHeight;
     if (clientHeight <= 0) {
       const cur = store.currentPageIndex;
       const newMin = Math.max(0, cur - VIRTUAL_OVERSCAN);
@@ -374,6 +475,10 @@
       return true;
     }
 
+    if (activeZoomAnchor && activeZoomAnchor.pageIndex === pageIdx) {
+      return true;
+    }
+
     if (store.activeCrop?.pageIndex === pageIdx) {
       return true;
     }
@@ -394,7 +499,8 @@
       }
     }
 
-    return pageIdx >= visiblePageRange.min && pageIdx <= visiblePageRange.max;
+    const visualSlot = store.getVisualPageIndex(pageIdx);
+    return visualSlot >= visiblePageRange.min && visualSlot <= visiblePageRange.max;
   }
 
   // Spacer-based DOM virtualisation: compute heights for placeholder spacer divs
@@ -427,20 +533,20 @@
   let windowedPageIndices = $derived.by(() => {
     const useWindowing = featureFlags.isEnabled('performance.virtual-rendering') && store.pageCount > 10;
     if (!useWindowing) {
-      return Array.from({ length: store.pageCount }, (_, i) => i);
+      return store.effectivePageOrder;
     }
     const min = visiblePageRange.min;
     const max = visiblePageRange.max;
     const count = max - min + 1;
     const indices: number[] = new Array(count);
     for (let i = 0; i < count; i++) {
-      indices[i] = min + i;
+      indices[i] = store.getEffectivePageIndex(min + i);
     }
     return indices;
   });
 
-  function getPageVerticalOffsets(): PageVerticalOffset[] {
-    if (cachedVerticalOffsets) return cachedVerticalOffsets;
+  function getPageVerticalOffsets(targetZoom: number = store.zoom): PageVerticalOffset[] {
+    if (cachedVerticalOffsets && cachedOffsetsTargetZoom === targetZoom) return cachedVerticalOffsets;
     if (!viewportEl || store.pageCount === 0) return [];
 
     let currentY: number = cachedFirstPageOffsetTop !== null ? cachedFirstPageOffsetTop : 0;
@@ -456,7 +562,7 @@
       const hasCustomTransforms = Boolean(
         store.pageTransforms && Object.keys(store.pageTransforms).length > 0
       );
-      if (!hasCustomTransforms) {
+      if (!hasCustomTransforms && !store.optimisticPageOrder) {
         const firstDims = actions.service.document?.getPageDimensions(0) ?? { widthPts: 612, heightPts: 792 };
         const midDims = actions.service.document?.getPageDimensions(Math.floor(pageCount / 2)) ?? firstDims;
         const lastDims = actions.service.document?.getPageDimensions(pageCount - 1) ?? firstDims;
@@ -467,7 +573,7 @@
           firstDims.heightPts === lastDims.heightPts;
 
         if (isUniform) {
-          const firstLayout = getPageLayout(0);
+          const firstLayout = getPageLayoutAtZoom(0, targetZoom);
           const offsets: PageVerticalOffset[] = new Array(pageCount);
           let currentTop = currentY;
           const height = firstLayout.height;
@@ -490,6 +596,7 @@
             currentTop = bottom + s;
           }
           cachedVerticalOffsets = offsets;
+          cachedOffsetsTargetZoom = targetZoom;
           return offsets;
         }
       }
@@ -497,11 +604,12 @@
 
     const layouts: PageLayoutDimensions[] = [];
     for (let i = 0; i < pageCount; i++) {
-      layouts.push(getPageLayout(i));
+      layouts.push(getPageLayoutAtZoom(store.getEffectivePageIndex(i), targetZoom));
     }
 
     const offsets = computePageVerticalOffsets(layouts, currentY);
     cachedVerticalOffsets = offsets;
+    cachedOffsetsTargetZoom = targetZoom;
     return offsets;
   }
 
@@ -512,14 +620,220 @@
   }
 
   function computeCurrentPage(): void {
-    if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0 || store.showOrganizerView || isCentering || store.isZooming) return;
+    if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0 || store.showOrganizerView || isCentering || store.isZooming || isZoomTransitioning) return;
 
     const viewportCenterScrollY = viewportEl.scrollTop + viewportEl.clientHeight / 2;
-    const resolvedIndex = resolvePageIndexAtScrollY(viewportCenterScrollY);
+    const resolvedSlot = resolvePageIndexAtScrollY(viewportCenterScrollY);
+    const resolvedIndex = store.getEffectivePageIndex(resolvedSlot);
 
     if (resolvedIndex !== store.currentPageIndex) {
       actions.setCurrentPageFromScroll(resolvedIndex);
     }
+  }
+
+  interface ActiveZoomAnchor {
+    pageIndex: number;
+    normX: number;
+    normY: number;
+    viewportX: number;
+    viewportY: number;
+    isCursorAnchor?: boolean;
+  }
+
+  let activeZoomAnchor: ActiveZoomAnchor | null = null;
+  let zoomAnchorResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function getPageLayoutAtZoom(pageIdx: number, targetZoom: number): PageLayoutDimensions {
+    const dims = actions.service.document?.getPageDimensions(pageIdx) ?? { widthPts: 612, heightPts: 792 };
+    const pageTransform = store.getPageTransform(pageIdx);
+    const effectiveRotation = store.getEffectivePageRotation(pageIdx);
+    return calculatePageLayoutDimensions({
+      widthPts: dims.widthPts,
+      heightPts: dims.heightPts,
+      zoom: targetZoom,
+      pageTransform: {
+        ...pageTransform,
+        rotation: effectiveRotation,
+      },
+      isLastPage: pageIdx === store.pageCount - 1,
+    });
+  }
+
+  function getPageTopOffsetAtZoom(pageIndex: number, targetZoom: number): number {
+    if (!viewportEl) return 0;
+    const initialTop = Math.round(viewportEl.clientHeight * 0.2);
+    const visualSlot = store.getVisualPageIndex(pageIndex);
+    if (visualSlot <= 0) return initialTop;
+
+    const offsets = getPageVerticalOffsets(targetZoom);
+    if (offsets && offsets[visualSlot]) {
+      return offsets[visualSlot].top;
+    }
+
+    const pageCount = store.pageCount;
+    const firstLayout = getPageLayoutAtZoom(0, targetZoom);
+    if (featureFlags.isEnabled('performance.fast-dimensions') && pageCount > 50) {
+      const hasCustomTransforms = Boolean(
+        store.pageTransforms && Object.keys(store.pageTransforms).length > 0
+      );
+      if (!hasCustomTransforms && !store.optimisticPageOrder) {
+        const firstDims = actions.service.document?.getPageDimensions(0) ?? { widthPts: 612, heightPts: 792 };
+        const midDims = actions.service.document?.getPageDimensions(Math.floor(pageCount / 2)) ?? firstDims;
+        const lastDims = actions.service.document?.getPageDimensions(pageCount - 1) ?? firstDims;
+        const isUniform =
+          firstDims.widthPts === midDims.widthPts &&
+          firstDims.heightPts === midDims.heightPts &&
+          firstDims.widthPts === lastDims.widthPts &&
+          firstDims.heightPts === lastDims.heightPts;
+
+        if (isUniform) {
+          return initialTop + visualSlot * (firstLayout.height + firstLayout.spacing);
+        }
+      }
+    }
+
+    let top = initialTop;
+    for (let slot = 0; slot < visualSlot; slot++) {
+      const pIdx = store.getEffectivePageIndex(slot);
+      const layout = getPageLayoutAtZoom(pIdx, targetZoom);
+      top += layout.height + layout.spacing;
+    }
+    return top;
+  }
+
+  function captureActiveZoomAnchor(preferredViewportX?: number, preferredViewportY?: number, atZoom: number = store.zoom): ActiveZoomAnchor {
+    if (!viewportEl) {
+      return {
+        pageIndex: store.currentPageIndex,
+        normX: 0.5,
+        normY: 0.5,
+        viewportX: 0,
+        viewportY: 0,
+        isCursorAnchor: false,
+      };
+    }
+    const viewportRect = viewportEl.getBoundingClientRect();
+    const visibleContainer = (document.querySelector('.editor-shell-canvas') as HTMLElement | null) ?? viewportEl;
+    const visibleRect = visibleContainer.getBoundingClientRect();
+
+    const cursorViewportX = (isPointerOverViewport && lastPointerViewportX !== null)
+      ? lastPointerViewportX
+      : undefined;
+    const cursorViewportY = (isPointerOverViewport && lastPointerViewportY !== null)
+      ? lastPointerViewportY
+      : undefined;
+
+    const resolvedPreferredX = preferredViewportX !== undefined ? preferredViewportX : cursorViewportX;
+    const resolvedPreferredY = preferredViewportY !== undefined ? preferredViewportY : cursorViewportY;
+    const isCursorAnchor = resolvedPreferredX !== undefined && resolvedPreferredY !== undefined;
+
+    const anchorViewportX = resolvedPreferredX !== undefined
+      ? Math.max(0, Math.min(viewportRect.width, resolvedPreferredX))
+      : (visibleRect.left + visibleRect.width / 2) - viewportRect.left;
+
+    const anchorViewportY = resolvedPreferredY !== undefined
+      ? Math.max(0, Math.min(viewportRect.height, resolvedPreferredY))
+      : (visibleRect.top + visibleRect.height / 2) - viewportRect.top;
+
+    const currentScrollY = viewportEl.scrollTop + anchorViewportY;
+    const offsets = getPageVerticalOffsets(atZoom);
+    const firstPageTop = offsets[0]?.top ?? Math.round(viewportEl.clientHeight * 0.2);
+
+    let visualSlot = 0;
+    let normY = 0.5;
+
+    if (offsets.length > 0) {
+      if (currentScrollY < firstPageTop) {
+        visualSlot = 0;
+        const firstPageH = (offsets[0]?.bottom ?? 0) - (offsets[0]?.top ?? 0);
+        normY = firstPageH > 0 ? (currentScrollY - firstPageTop) / firstPageH : 0;
+      } else {
+        visualSlot = resolvePageIndexFromOffsets(currentScrollY, offsets);
+        const pageOffset = offsets[visualSlot];
+        if (pageOffset) {
+          const pageH = pageOffset.bottom - pageOffset.top;
+          normY = pageH > 0 ? (currentScrollY - pageOffset.top) / pageH : 0.5;
+        }
+      }
+    }
+
+    const pageIndex = store.getEffectivePageIndex(visualSlot);
+    const layout = getPageLayoutAtZoom(pageIndex, atZoom);
+    const paddingLeft = typeof window !== 'undefined'
+      ? Math.round(window.innerWidth * 0.5)
+      : Math.round(viewportEl.clientWidth / 2);
+    const contentWidth = paddingLeft * 2 + layout.width;
+    const pageLeft = Math.max(0, (contentWidth - layout.width) / 2);
+    const currentScrollX = viewportEl.scrollLeft + anchorViewportX;
+    const normX = layout.width > 0 ? (currentScrollX - pageLeft) / layout.width : 0.5;
+
+    return {
+      pageIndex,
+      normX,
+      normY,
+      viewportX: anchorViewportX,
+      viewportY: anchorViewportY,
+      isCursorAnchor,
+    };
+  }
+
+  function applyDiscreteZoomScroll(prevZoom: number, newZoom: number): void {
+    if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0 || store.showOrganizerView) return;
+    if (zoomAnchorResetTimer) {
+      clearTimeout(zoomAnchorResetTimer);
+      zoomAnchorResetTimer = null;
+    }
+    const viewportRect = viewportEl.getBoundingClientRect();
+    const visibleContainer = (document.querySelector('.editor-shell-canvas') as HTMLElement | null) ?? viewportEl;
+    const visibleRect = visibleContainer.getBoundingClientRect();
+    const viewportClientHeight = viewportEl.clientHeight;
+
+    const anchor = captureActiveZoomAnchor(undefined, undefined, prevZoom);
+    activeZoomAnchor = anchor;
+    const targetPageIndex = anchor.pageIndex;
+    const visibleWidth = visibleContainer.clientWidth || viewportEl.clientWidth;
+    const visibleOffsetX = Math.max(0, visibleRect.left - viewportRect.left);
+
+    const paddingLeft = typeof window !== 'undefined'
+      ? Math.round(window.innerWidth * 0.5)
+      : Math.round(viewportEl.clientWidth / 2);
+
+    const newLayout = getPageLayoutAtZoom(targetPageIndex, newZoom);
+    const newPageTop = getPageTopOffsetAtZoom(targetPageIndex, newZoom);
+    const newContentWidth = paddingLeft * 2 + newLayout.width;
+
+    const calibratedOffsets = calculatePageAnchorZoomScroll({
+      anchorViewportX: anchor.viewportX,
+      anchorViewportY: anchor.viewportY,
+      normX: anchor.normX,
+      normY: anchor.normY,
+      newPageTop,
+      newPageLeft: Math.max(0, (newContentWidth - newLayout.width) / 2),
+      newPageWidth: newLayout.width,
+      newPageHeight: newLayout.height,
+      visibleWidth,
+      contentWidth: newContentWidth,
+      visibleOffsetX,
+      anchorToCursor: anchor.isCursorAnchor ?? false,
+    });
+
+    if (cachedOffsetsTargetZoom !== newZoom) {
+      invalidatePageOffsetsCache();
+    }
+    isZoomTransitioning = true;
+    try {
+      flushSync(() => {
+        // Synchronously flush layout updates before scroll assignment
+      });
+
+      viewportEl.scrollLeft = calibratedOffsets.scrollLeft;
+      viewportEl.scrollTop = calibratedOffsets.scrollTop;
+    } finally {
+      isZoomTransitioning = false;
+      activeZoomAnchor = null;
+    }
+
+    updateVisiblePageRange(calibratedOffsets.scrollTop, viewportClientHeight);
   }
 
   function handleScroll(): void {
