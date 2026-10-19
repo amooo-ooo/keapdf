@@ -1957,10 +1957,10 @@ export function createWebMcpTools(ctx: WebMcpContext): Array<ModelContextTool<Re
         if (typeof input.margins === 'object' && input.margins !== null) {
           const m = input.margins as Record<string, unknown>;
           options.margins = {
-            top: typeof m.top === 'number' ? m.top : 54,
-            bottom: typeof m.bottom === 'number' ? m.bottom : 54,
-            left: typeof m.left === 'number' ? m.left : 54,
-            right: typeof m.right === 'number' ? m.right : 54,
+            top: typeof m.top === 'number' ? m.top : 36,
+            bottom: typeof m.bottom === 'number' ? m.bottom : 36,
+            left: typeof m.left === 'number' ? m.left : 36,
+            right: typeof m.right === 'number' ? m.right : 36,
           };
         }
         if (typeof input.fontSize === 'number') {
@@ -2258,12 +2258,13 @@ export function createWebMcpTools(ctx: WebMcpContext): Array<ModelContextTool<Re
         };
       }
 
-      const splitBytes = ctx.pdfDoc.split(pages);
+      // note: splitAsync keeps the source encryption, whereas the native split emits plaintext
+      const splitBytes = await ctx.pdfDoc.splitAsync(pages);
       const newFileName = typeof input.newFileName === 'string' ? input.newFileName : `extracted_${Date.now()}.pdf`;
 
       if (input.saveToWorkspace && ctx.editorActions) {
         const buffer = splitBytes.buffer.slice(splitBytes.byteOffset, splitBytes.byteOffset + splitBytes.byteLength) as ArrayBuffer;
-        await ctx.editorActions.loadDocumentFromBuffer(buffer, newFileName, true);
+        await ctx.editorActions.loadDocumentFromBuffer(buffer, newFileName, true, ctx.pdfDoc.getSecurityCredential());
       }
 
       return {
