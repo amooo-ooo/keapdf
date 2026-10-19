@@ -8,6 +8,9 @@ import type { EditableTextSpan, TextLine } from '../core/types';
 /** Active editing tool in the toolbar. */
 export type EditorTool = 'select' | 'hand' | 'text' | 'place' | 'highlight' | 'pen' | 'signature' | 'note' | 'redact' | 'eraser';
 
+/** Selection modes available in the selection tool dropdown. */
+export type SelectMode = 'select' | 'text' | 'precise';
+
 /** Content mode for the left panel. */
 export type LeftPanelMode = 'workspace' | 'components' | 'annotate' | 'tools' | 'settings';
 
@@ -53,5 +56,20 @@ export interface ActiveCropState {
   };
   unit: CropUnit;
   scope: CropScope;
+}
+
+/** Active freeform digital signature placement state on the PDF canvas. */
+export interface PendingDigitalSignatureState {
+  pageIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  preset: import('../utils/signature-placement').SignaturePlacementPreset;
+  graphicDataUrl?: string;
+  showTextDetails: boolean;
+  signerName: string;
+  signOptions: Omit<import('../services/pdf/operations/signature-ops').SignPdfOptions, 'visual'>;
+  onSigned?: () => void;
 }
 

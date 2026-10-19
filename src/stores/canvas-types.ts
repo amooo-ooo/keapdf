@@ -36,13 +36,16 @@ export type BuiltinCanvasElementKind =
 export type CanvasElementKind = BuiltinCanvasElementKind | (string & {});
 
 /** Shape sub-types for the shape element kind. */
-export type ShapeVariant = 'rectangle' | 'circle' | 'line' | 'arrow';
+export type ShapeVariant = 'rectangle' | 'circle' | 'line' | 'arrow' | 'path';
 
 /** Form field sub-types. */
 export type FormFieldVariant = 'text-input' | 'checkbox' | 'radio' | 'dropdown' | 'signature' | 'attachment' | 'button';
 
 /** Resize handle positions around an element bounding box. */
 export type HandlePosition = 'top-left' | 'top' | 'top-right' | 'right' | 'bottom-right' | 'bottom' | 'bottom-left' | 'left';
+
+/** Handle positions for linear elements such as lines and arrows. */
+export type LineEndpointHandle = 'start' | 'end';
 
 /** 2D point coordinate in PDF points. */
 export interface Point {
@@ -64,6 +67,7 @@ export interface CanvasElementBase {
   visible: boolean;
   flipX: boolean;
   flipY: boolean;
+  zIndex?: number;
 }
 
 import type { EditableTextSpan, EditableFormFieldSpan } from '../core/types';
@@ -104,6 +108,12 @@ export interface TextSegment {
   top?: number;
   /** Baseline Y relative to element bounding box. */
   baselineY?: number;
+  /** Letter spacing specification for this segment. */
+  letterSpacing?: string;
+  /** Extra word spacing in PDF points for this segment. */
+  wordSpacing?: number;
+  /** Horizontal scaling factor for this segment. */
+  scaleX?: number;
 }
 
 /** A line of styled text segments with layout metrics. */
@@ -132,6 +142,12 @@ export interface TextElementLine {
   strikethrough?: boolean;
   /** Background highlight color for the line. */
   backgroundColor?: string;
+  /** Letter spacing specification for the line. */
+  letterSpacing?: string;
+  /** Extra word spacing in PDF points for the line. */
+  wordSpacing?: number;
+  /** Horizontal scaling factor for the line. */
+  scaleX?: number;
 }
 
 /** Text box element. */
@@ -150,6 +166,8 @@ export interface TextElement extends CanvasElementBase {
   textAlign: 'left' | 'center' | 'right';
   lineHeight?: number;
   letterSpacing?: string;
+  wordSpacing?: number;
+  scaleX?: number;
   lines?: TextElementLine[];
   segments?: TextSegment[];
   originalSpan?: EditableTextSpan;
@@ -172,6 +190,16 @@ export interface ShapeElement extends CanvasElementBase {
   strokeWidth: number;
   opacity: number;
   isHighlight?: boolean;
+  svgPath?: string;
+  viewBox?: string;
+  baseWidth?: number;
+  baseHeight?: number;
+  fillMode?: number;
+  fillRule?: 'nonzero' | 'evenodd';
+  originalSvgPath?: string;
+  strokeLineCap?: 'butt' | 'round' | 'square';
+  strokeLineJoin?: 'miter' | 'round' | 'bevel';
+  selectionVariation?: 'auto' | 'line' | 'box';
 }
 
 /** Form field placeholder element. */
@@ -306,23 +334,44 @@ export type CanvasElement = BuiltinCanvasElement | (CanvasElementBase & { kind: 
 /** Active drag/resize interaction state. */
 export interface DragState {
   elementId: string;
-  mode: 'move' | 'resize' | 'rotate';
-  handle: HandlePosition | null;  // null when mode is 'move' or 'rotate'
+  mode: 'move' | 'resize' | 'rotate' | 'endpoint';
+  handle: HandlePosition | LineEndpointHandle | null;  // null when mode is 'move' or 'rotate'
   startX: number;     // pointer start in page-point coords
   startY: number;
   originX: number;    // element origin at drag start
   originY: number;
   originWidth: number;
   originHeight: number;
+  originStartPoint?: Point; // start terminal snapshot for line endpoint dragging
+  originEndPoint?: Point; // end terminal snapshot for line endpoint dragging
+  endpointHandle?: LineEndpointHandle; // active endpoint handle being dragged
   originPageIndex?: number; // element page index at drag start
   grabOffsetX?: number; // pointer offset X from element.x in page points at drag start
   grabOffsetY?: number; // pointer offset Y from element.y in page points at drag start
   originPoints?: Point[]; // path points snapshot at drag start
   originRotation?: number; // element rotation at drag start (used for rotate mode)
+  originFlipX?: boolean; // element flipX at drag start
+  originFlipY?: boolean; // element flipY at drag start
   originFontSize?: number; // font size at drag start (used for scaling text)
   originLines?: TextElementLine[]; // lines snapshot at drag start
   originSegments?: TextSegment[]; // segments snapshot at drag start
   activeGuides?: SnapGuide[]; // active visual snapping guidelines
+  otherElementOrigins?: Record<string, { originX: number; originY: number; originPoints?: Point[] }>; // snapshots of other multi-selected elements
+  otherElementPageOrigins?: Record<string, number>; // page index snapshots of other multi-selected elements
+  otherResizeOrigins?: Record<
+    string,
+    {
+      originX: number;
+      originY: number;
+      originWidth: number;
+      originHeight: number;
+      originFontSize?: number;
+      originLines?: TextElementLine[];
+      originSegments?: TextSegment[];
+      originPoints?: Point[];
+    }
+  >; // resize geometry snapshots of other multi-selected elements
+  otherRotateOrigins?: Record<string, number>; // rotation snapshots of other multi-selected elements
 }
 
 /** Active drag-and-drop ghost preview indicator on the canvas. */
@@ -346,7 +395,10 @@ export interface ElementDropPayload {
   author?: string;
   fontSize?: number;
   fontWeight?: 'normal' | 'bold';
+  fontStyle?: 'normal' | 'italic';
   fontFamily?: string;
+  rawFontFamily?: string;
+  lineHeight?: number;
   width?: number;
   height?: number;
   color?: string;
