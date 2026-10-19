@@ -838,7 +838,8 @@
 
   function handleScroll(): void {
     cachedDropPageMetrics = null;
-    if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0 || store.showOrganizerView || isCentering || store.isZooming) return;
+    if (!viewportEl || !store.isDocumentLoaded || store.pageCount === 0 || store.showOrganizerView || isCentering || store.isZooming || isZoomTransitioning) return;
+    activeZoomAnchor = null;
     if (scrollRafId !== null) return;
 
     scrollRafId = requestAnimationFrame(() => {
@@ -907,8 +908,9 @@
       }
     } else {
       // Fallback for unmounted (virtualised) pages or headless environments without DOM layout boxes
+      const visualSlot = store.getVisualPageIndex(pageIndex);
       const offsets = getPageVerticalOffsets();
-      const pageOffset = offsets[pageIndex];
+      const pageOffset = offsets[visualSlot];
       const layout = getPageLayout(pageIndex);
       const pageWidth = pageEl?.offsetWidth || layout.width;
       const pageHeight = pageEl?.offsetHeight || (pageOffset ? (pageOffset.bottom - pageOffset.top) : layout.height);
@@ -982,11 +984,60 @@
     }
   }
 
+  /**
+   * Captures the visual screen centre of a target page before layout changes,
+   * returning a restoration closure to calibrate viewport scroll offsets after DOM updates.
+   */
+  function capturePageVisualCenter(pageIndex: number): (() => void) | null {
+    if (!viewportEl || !contentEl) return null;
+    const pageEl = viewportEl.querySelector(`[data-page-index="${pageIndex}"]`) as HTMLElement | null;
+    if (!pageEl) return null;
+
+    const rectBefore = pageEl.getBoundingClientRect();
+    if (rectBefore.width <= 0 || rectBefore.height <= 0) return null;
+
+    const centerBeforeX = rectBefore.left + rectBefore.width / 2;
+    const centerBeforeY = rectBefore.top + rectBefore.height / 2;
+
+    return () => {
+      if (!viewportEl) return;
+      const newRect = pageEl.getBoundingClientRect();
+      if (newRect.width <= 0 || newRect.height <= 0) return;
+
+      const centerAfterX = newRect.left + newRect.width / 2;
+      const centerAfterY = newRect.top + newRect.height / 2;
+
+      const scrollPos = calculateCenterPreservingScroll({
+        currentScrollLeft: viewportEl.scrollLeft,
+        currentScrollTop: viewportEl.scrollTop,
+        preRotationCenter: { x: centerBeforeX, y: centerBeforeY },
+        postRotationCenter: { x: centerAfterX, y: centerAfterY },
+      });
+
+      if (scrollPos.scrollLeft !== viewportEl.scrollLeft || scrollPos.scrollTop !== viewportEl.scrollTop) {
+        isCentering = true;
+        viewportEl.scrollLeft = scrollPos.scrollLeft;
+        viewportEl.scrollTop = scrollPos.scrollTop;
+        requestAnimationFrame(() => {
+          isCentering = false;
+        });
+      }
+    };
+  }
+
   $effect(() => {
     actions.registerScrollCallback((idx, scrollOptions) => {
       centerPage(idx, scrollOptions?.behavior ?? 'smooth', scrollOptions);
     });
-    return () => actions.registerScrollCallback(() => {});
+    actions.registerPageCenterPreserver((idx) => capturePageVisualCenter(idx));
+    actions.registerZoomChangeCallback((prevZoom, newZoom) => {
+      applyDiscreteZoomScroll(prevZoom, newZoom);
+    });
+    return () => {
+      actions.registerScrollCallback(() => {});
+      actions.registerPageCenterPreserver(() => null);
+      actions.registerZoomChangeCallback(null);
+    };
   });
 
   let lastCenteredDocKey = $state<string | null>(null);
@@ -1037,11 +1088,25 @@
         cancelAnimationFrame(wheelRafId);
         wheelRafId = null;
       }
+      if (scrollRafId !== null) {
+        cancelAnimationFrame(scrollRafId);
+        scrollRafId = null;
+      }
+      if (zoomAnchorResetTimer) {
+        clearTimeout(zoomAnchorResetTimer);
+        zoomAnchorResetTimer = null;
+      }
     };
   });
 
   $effect(() => {
     void store.currentPageIndex;
+    if (!canvasStore.dragState) {
+      cachedDropPageMetrics = null;
+      cachedTargetPageIndex = null;
+      cachedTargetLayerEl = null;
+      canvasActions.clearInteractionCache();
+    }
     untrack(() => updateVisiblePageRange());
   });
 
@@ -1049,12 +1114,25 @@
     void store.zoom;
     void store.pageCount;
     void store.renderVersion;
+    void store.optimisticRotations;
+    void store.effectivePageOrder;
+    cachedDropPageMetrics = null;
+    cachedTargetPageIndex = null;
+    cachedTargetLayerEl = null;
+    canvasActions.clearInteractionCache();
     invalidatePageOffsetsCache();
-    untrack(() => updateVisiblePageRange());
+    if (!isZoomTransitioning) {
+      untrack(() => updateVisiblePageRange());
+    }
   });
 
+
   function handleWindowResize(): void {
+    activeZoomAnchor = null;
     cachedDropPageMetrics = null;
+    cachedTargetPageIndex = null;
+    cachedTargetLayerEl = null;
+    canvasActions.clearInteractionCache();
     invalidatePageOffsetsCache();
     updateVisiblePageRange();
     if (!store.isDocumentLoaded || !viewportEl || store.pageCount === 0 || store.showOrganizerView || canvasStore.dragState || store.isZooming) return;
@@ -1066,8 +1144,9 @@
   let lastWheelEvent: WheelEvent | null = null;
 
   /**
-   * Handles wheel zoom gestures using calibrated smooth zoom scaling
-   * and zero-reflow focal point scroll offset calculation.
+   * Handles wheel zoom gestures using calibrated smooth zoom scaling,
+   * zero-reflow focal point scroll offset calculation, and continuous
+   * anchor tracking preventing scroll drift across zoom transitions.
    */
   function handleWheel(e: WheelEvent): void {
     if (e.ctrlKey || e.metaKey) {
@@ -1093,41 +1172,109 @@
         lastWheelEvent = null;
 
         const currentZoom = store.zoom;
-        const zoomFactor = Math.max(0.75, Math.min(1.35, calculateSmoothZoomFactor(dyToApply, 600)));
+
+        // Device-adaptive sensitivity: trackpads emit continuous fine deltas (< 40px or fractional) with ctrlKey,
+        // while discrete mouse wheels emit notch deltas (typically >= 50px integer).
+        const isTrackpadPinch = Boolean(targetEvent.ctrlKey && (!Number.isInteger(targetEvent.deltaY) || Math.abs(dyToApply) < 40));
+        const sensitivityDivisor = isTrackpadPinch ? 180 : 420;
+        const zoomFactor = Math.max(0.70, Math.min(1.45, calculateSmoothZoomFactor(dyToApply, sensitivityDivisor)));
         const newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, currentZoom * zoomFactor));
 
         if (newZoom === currentZoom) return;
 
+        // Batched layout read phase: query all geometric bounds up-front to eliminate interleaved layout thrashing
         const viewportRect = viewportEl.getBoundingClientRect();
+        const viewportClientWidth = viewportEl.clientWidth;
+        const viewportClientHeight = viewportEl.clientHeight;
+        const viewportScrollLeft = viewportEl.scrollLeft;
+        const viewportScrollTop = viewportEl.scrollTop;
+
+        const visibleContainer = (document.querySelector('.editor-shell-canvas') as HTMLElement | null) ?? viewportEl;
+        const visibleRect = visibleContainer.getBoundingClientRect();
+        const visibleWidth = visibleContainer.clientWidth || viewportClientWidth;
+        const visibleOffsetX = Math.max(0, visibleRect.left - viewportRect.left);
+
         const pointerViewportX = targetEvent.clientX - viewportRect.left;
         const pointerViewportY = targetEvent.clientY - viewportRect.top;
 
         const paddingLeft = typeof window !== 'undefined'
           ? Math.round(window.innerWidth * 0.5)
-          : Math.round(viewportEl.clientWidth / 2);
+          : Math.round(viewportClientWidth / 2);
         const paddingTop = typeof window !== 'undefined'
           ? Math.round(window.innerHeight * 0.2)
-          : Math.round(viewportEl.clientHeight * 0.2);
+          : Math.round(viewportClientHeight * 0.2);
 
-        const newOffsets = calculateZoomScrollOffsets({
+        if (!activeZoomAnchor) {
+          activeZoomAnchor = captureActiveZoomAnchor(pointerViewportX, pointerViewportY, currentZoom);
+        } else {
+          const dist = Math.hypot(
+            pointerViewportX - activeZoomAnchor.viewportX,
+            pointerViewportY - activeZoomAnchor.viewportY
+          );
+          if (dist > 8) {
+            activeZoomAnchor = captureActiveZoomAnchor(pointerViewportX, pointerViewportY, currentZoom);
+          }
+        }
+
+        if (zoomAnchorResetTimer) clearTimeout(zoomAnchorResetTimer);
+        zoomAnchorResetTimer = setTimeout(() => {
+          activeZoomAnchor = null;
+          zoomAnchorResetTimer = null;
+        }, 250);
+
+        // Computation phase: pure geometric arithmetic without DOM mutations or forced reflows
+        const newLayout = getPageLayoutAtZoom(activeZoomAnchor.pageIndex, newZoom);
+        const newPageTop = getPageTopOffsetAtZoom(activeZoomAnchor.pageIndex, newZoom);
+        const newContentWidth = paddingLeft * 2 + newLayout.width;
+
+        const calibratedOffsets = calculatePageAnchorZoomScroll({
+          anchorViewportX: activeZoomAnchor.viewportX,
+          anchorViewportY: activeZoomAnchor.viewportY,
+          normX: activeZoomAnchor.normX,
+          normY: activeZoomAnchor.normY,
+          newPageTop,
+          newPageLeft: Math.max(0, (newContentWidth - newLayout.width) / 2),
+          newPageWidth: newLayout.width,
+          newPageHeight: newLayout.height,
+          visibleWidth,
+          contentWidth: newContentWidth,
+          visibleOffsetX,
+          anchorToCursor: true,
+        });
+
+        calculateZoomScrollOffsets({
           currentZoom,
           newZoom,
-          scrollLeft: viewportEl.scrollLeft,
-          scrollTop: viewportEl.scrollTop,
+          scrollLeft: viewportScrollLeft,
+          scrollTop: viewportScrollTop,
           pointerViewportX,
           pointerViewportY,
           paddingLeft,
           paddingTop,
         });
 
-        invalidatePageOffsetsCache();
-        actions.setZoom(newZoom, true);
+        // Retain precalculated newZoom offsets if already computed, avoiding redundant 200-page passes
+        if (cachedOffsetsTargetZoom !== newZoom) {
+          invalidatePageOffsetsCache();
+        }
 
-        viewportEl.scrollLeft = newOffsets.scrollLeft;
-        viewportEl.scrollTop = newOffsets.scrollTop;
+        // Batched write phase: apply store mutation, DOM transforms, and scroll coordinates in single pass
+        isZoomTransitioning = true;
+        try {
+          flushSync(() => {
+            actions.setZoom(newZoom, true);
+          });
 
-        updateVisiblePageRange();
+          viewportEl.scrollLeft = calibratedOffsets.scrollLeft;
+          viewportEl.scrollTop = calibratedOffsets.scrollTop;
+        } finally {
+          isZoomTransitioning = false;
+        }
+
+        updateVisiblePageRange(calibratedOffsets.scrollTop, viewportClientHeight);
       });
+    } else if (store.isZooming) {
+      e.preventDefault();
     }
   }
 
@@ -1178,14 +1325,25 @@
 
     // Zero-DOM-reflow arithmetic conversion using cached page metrics
     if (!cachedDropPageMetrics || cachedDropPageMetrics.pageIndex !== pageIndex || cachedDropPageMetrics.pageEl !== pageEl) {
+      const pdfSpans = actions.service.document?.getCachedPageSpans(pageIndex);
       cachedDropPageMetrics = {
         pageIndex,
         pageEl,
         metrics: capturePageMetrics(pageEl),
+        snapCandidates: extractSnapCandidates(
+          pageIndex,
+          canvasStore.getElementsByPage(pageIndex),
+          undefined,
+          pdfSpans,
+          store.hiddenSpanIds,
+        ),
       };
     }
 
-    const pt = store.getPageTransform(pageIndex);
+    const pt = {
+      ...store.getPageTransform(pageIndex),
+      rotation: store.getEffectivePageRotation(pageIndex),
+    };
     const coords = screenToPageCoordsWithMetrics(clientX, clientY, cachedDropPageMetrics.metrics, store.zoom, pt);
 
     // Fast zero-WASM page dimensions resolution
@@ -1210,12 +1368,11 @@
     let previewY = coords.y - h / 2;
 
     const pageDims = { width: maxW, height: maxH };
-    const pdfSpans = actions.service.document?.getCachedPageSpans(pageIndex);
-    const candidates = extractSnapCandidates(
+    const candidates = cachedDropPageMetrics.snapCandidates ?? extractSnapCandidates(
       pageIndex,
       canvasStore.getElementsByPage(pageIndex),
       undefined,
-      pdfSpans,
+      actions.service.document?.getCachedPageSpans(pageIndex),
       store.hiddenSpanIds,
     );
 
@@ -1332,7 +1489,10 @@
 
       const { pageIndex, pageEl } = resolved;
       const dims = actions.service.document?.getPageDimensions(pageIndex);
-      const pt = store.getPageTransform(pageIndex);
+      const pt = {
+        ...store.getPageTransform(pageIndex),
+        rotation: store.getEffectivePageRotation(pageIndex),
+      };
       const metrics = capturePageMetrics(pageEl);
       const coords = screenToPageCoordsWithMetrics(e.clientX, e.clientY, metrics, store.zoom, pt);
 
@@ -1391,13 +1551,21 @@
   function getPageLayout(pageIdx: number): PageLayoutDimensions {
     void store.renderVersion;
     void store.pageVersions[pageIdx];
+    void store.optimisticRotations[pageIdx];
     const dims = actions.service.document?.getPageDimensions(pageIdx) ?? { widthPts: 612, heightPts: 792 };
     const pageTransform = store.getPageTransform(pageIdx);
+    void store.pendingRenderRotations[pageIdx];
+    const effectiveRotation = store.getEffectivePageRotation(pageIdx);
+    void effectiveRotation;
+    const layoutRotation = store.getLayoutPageRotation(pageIdx);
     return calculatePageLayoutDimensions({
       widthPts: dims.widthPts,
       heightPts: dims.heightPts,
       zoom: store.zoom,
-      pageTransform: pageTransform,
+      pageTransform: {
+        ...pageTransform,
+        rotation: layoutRotation,
+      },
       isLastPage: pageIdx === store.pageCount - 1,
     });
   }
@@ -1425,6 +1593,9 @@
       onpointerdown={handlePointerDown}
       oncontextmenu={(e) => { e.preventDefault(); }}
       onwheel={handleWheel}
+      onpointerenter={handleViewportPointerEnter}
+      onpointerleave={handleViewportPointerLeave}
+      onpointermove={handleViewportPointerMove}
       role="presentation"
     ></div>
   {/if}
@@ -1434,7 +1605,8 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div
     bind:this={viewportEl}
-    class="flex-1 min-h-0 w-full relative transition-colors no-scrollbars {store.showOrganizerView ? 'overflow-hidden' : 'overflow-auto bg-background'} {store.isDraggingOver ? 'bg-primary/10' : ''}"
+    id="main-canvas-viewport"
+    class="flex-1 min-h-0 w-full relative transition-colors no-scrollbars {store.showOrganizerView ? 'overflow-hidden' : 'overflow-auto bg-background'} {store.isDraggingOver ? 'bg-secondary/40' : ''}"
     style="overflow-anchor: none;"
     ondragover={handleDragOver}
     ondragleave={handleDragLeave}
@@ -1442,6 +1614,9 @@
     onwheel={handleWheel}
     onscroll={handleScroll}
     onpointerdown={handlePointerDown}
+    onpointerenter={handleViewportPointerEnter}
+    onpointerleave={handleViewportPointerLeave}
+    onpointermove={handleViewportPointerMove}
     onclick={(e) => {
       if (e.target === viewportEl) {
         actions.clearSelection(true);
@@ -1452,55 +1627,98 @@
     tabindex="0"
   >
     {#if store.isDraggingOver}
-      <div class="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm pointer-events-none border-2 border-dashed border-primary">
-        <div class="text-xl font-semibold text-primary">
+      <div class="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm pointer-events-none border border-dashed border-ring">
+        <div class="text-xl font-semibold text-foreground">
           {store.isDocumentLoaded ? 'Drop PDF or convertible document here to open' : 'Drop PDF, Office, spreadsheet, or image files here to open or merge'}
         </div>
       </div>
     {/if}
 
     {#if !store.isDocumentLoaded}
-      <div class="flex h-full w-full items-center justify-center">
-        <div class="flex flex-col items-center justify-center gap-3 text-muted-foreground max-w-md text-center p-4">
-          <FileText aria-hidden="true" class="h-12 w-12 stroke-[1.5]" />
-          <h2 class="text-lg font-semibold text-foreground">No Document Loaded</h2>
-          <p class="text-xs text-muted-foreground">
-            Open a local PDF file, convert office documents, spreadsheets, and markdown to PDF, merge multiple files, or choose from industry-standard compliance test suites.
-          </p>
+      <div class="flex h-full w-full items-center justify-center p-4 md:p-6">
+        <div class="w-full max-w-3xl rounded-2xl border border-border bg-card overflow-hidden shadow-xs flex flex-col md:flex-row items-stretch min-h-[480px] md:min-h-[500px]">
+          <!-- Left side: logo, title, description, and options -->
+          <div class="w-full md:w-[36%] flex flex-col justify-between p-2 sm:p-4 text-left">
+            <div class="flex flex-col gap-4">
+              <!-- Top left temporary logo affordance -->
+              <div class="flex items-center gap-2.5">
+                <img src="/vite.svg" alt="Vite Logo" class="h-8 w-8 shrink-0 select-none" />
+              </div>
 
-          {#if store.loadError}
-            <div class="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-start gap-2 text-xs text-destructive text-left w-full my-1">
-              <AlertCircle class="w-4 h-4 mt-0.5 shrink-0" />
-              <div class="flex-1 leading-relaxed">{store.loadError}</div>
+              <!-- Main title and single sentence description -->
+              <div class="space-y-1.5">
+                <h1 class="text-2xl font-bold tracking-tight text-foreground">KeaPDF</h1>
+                <p class="text-xs text-muted-foreground leading-relaxed">
+                  Edit, annotate, convert, and sign PDF documents entirely in your browser with private client-side processing.
+                </p>
+              </div>
+
+              {#if store.loadError}
+                <div role="alert" class="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-start gap-2 text-xs text-destructive text-left w-full my-1">
+                  <AlertCircle class="w-4 h-4 mt-0.5 shrink-0" />
+                  <div class="flex-1 leading-relaxed">{store.loadError}</div>
+                </div>
+              {/if}
+            </div>
+
+            <!-- Empty state document action options -->
+            <div class="flex flex-col items-stretch gap-1.5 mt-2 w-full text-foreground">
+              {#if featureFlags.isEnabled('workspace.open')}
+              <Button
+                variant="tile"
+                onclick={() => actions.triggerFileOpen()}
+                class="w-full"
+              >
+                <FolderOpen class="w-4 h-4 text-foreground shrink-0" />
+                <span class="font-medium text-sm leading-none">Open File(s)</span>
+              </Button>
+              {/if}
+              {#if featureFlags.isEnabled('conversion') && featureFlags.isEnabled('workspace.convert') && featureFlags.isEnabled('workspace.quick-convert')}
+              <Button
+                variant="inline-text"
+                size="sm"
+                onclick={() => actions.triggerQuickConvert()}
+                class="w-full justify-start font-medium"
+              >
+                <span>Convert to PDF</span>
+              </Button>
+              {/if}
+              {#if featureFlags.isEnabled('merge') && featureFlags.isEnabled('workspace.merge')}
+              <Button
+                variant="inline-text"
+                size="sm"
+                onclick={() => actions.triggerMergeFiles()}
+                class="w-full justify-start font-medium"
+              >
+                <span>Merge Files</span>
+              </Button>
+              {/if}
+              {#if featureFlags.isEnabled('workspace.compliance') && featureFlags.isEnabled('compliance')}
+              <Button
+                variant="inline-text"
+                size="sm"
+                onclick={() => store.openUrlDialog()}
+                class="w-full justify-start font-medium"
+              >
+                <span>Compliance Suites/URL</span>
+              </Button>
+              {/if}
+            </div>
+          </div>
+
+          <!-- note: right side feature showcase carousel with static cover image fallback -->
+          {#if featureFlags.isEnabled('workspace.feature-carousel') && featureFlags.isEnabled('components.carousel')}
+            <EmptyStateFeatureCarousel />
+          {:else}
+            <div class="w-full md:w-[64%] relative min-h-[260px] md:min-h-full overflow-hidden bg-muted/20">
+              <img
+                src="/cover.jpg"
+                alt="KeaPDF Cover"
+                class="absolute inset-0 w-full h-full object-cover select-none pointer-events-none"
+                loading="eager"
+              />
             </div>
           {/if}
-
-          <div class="flex flex-col items-stretch gap-2 mt-2 w-full max-w-xs text-foreground">
-            {#if featureFlags.isEnabled('workspace.open')}
-            <Button size="sm" onclick={() => actions.triggerFileOpen()} class="w-full justify-start gap-2">
-              <FolderOpen class="w-3.5 h-3.5" />
-              Open File(s)
-            </Button>
-            {/if}
-            {#if featureFlags.isEnabled('conversion') && featureFlags.isEnabled('workspace.convert') && featureFlags.isEnabled('workspace.quick-convert')}
-            <Button variant="outline" size="sm" onclick={() => actions.triggerQuickConvert()} class="w-full justify-start gap-2">
-              <FileType class="w-3.5 h-3.5 text-primary" />
-              Quick Convert to PDF
-            </Button>
-            {/if}
-            {#if featureFlags.isEnabled('merge') && featureFlags.isEnabled('workspace.merge')}
-            <Button variant="outline" size="sm" onclick={() => actions.triggerMergeFiles()} class="w-full justify-start gap-2">
-              <Files class="w-3.5 h-3.5 text-primary" />
-              Merge Files...
-            </Button>
-            {/if}
-            {#if featureFlags.isEnabled('workspace.compliance') && featureFlags.isEnabled('compliance')}
-            <Button variant="outline" size="sm" onclick={() => store.openUrlDialog()} class="w-full justify-start gap-2">
-              <Globe class="w-3.5 h-3.5 text-primary" />
-              Compliance Suites / URL...
-            </Button>
-            {/if}
-          </div>
         </div>
       </div>
     {:else if featureFlags.isEnabled('organizer') && store.showOrganizerView}
@@ -1558,7 +1776,7 @@
                 aria-label="PDF Page {pageIdx + 1}"
               >
                 <div
-                  class="relative bg-white shadow-md border border-border/80 overflow-hidden rounded-none flex items-center justify-center"
+                  class="relative bg-white border border-border/80 overflow-hidden rounded-none flex items-center justify-center"
                   style="width: {layout.width}px; height: {layout.height}px;"
                 >
                   <span class="text-xs text-muted-foreground/30 font-sans select-none">
