@@ -2533,27 +2533,57 @@
       </div>
     {/if}
 
+    <!-- Interactive AcroForm Layer in View Mode (Google Chromium PDFium parity) -->
+    {#if store.isReadOnly && store.canEditValues && !store.showOrganizerView && isVisible && (featureFlags ? featureFlags.isEnabled('view-mode.viewing.form-values') : true)}
+      <div
+        class="pdf-form-layer-container absolute top-0 left-0 z-[15]"
+        style="contain: strict; transform-origin: top left; transform: scale({visualScale / renderScale}); width: {Math.round(widthPts * renderScale)}px; height: {Math.round(heightPts * renderScale)}px; pointer-events: {store.isZooming ? 'none' : 'auto'};"
+        data-page-element="true"
+      >
+        <PdfFormLayer
+          {pageIndex}
+          scale={renderScale}
+          fields={editableFormFieldSpans}
+          canEditValues={store.canEditValues}
+          disabled={store.isZooming}
+        />
+      </div>
+    {/if}
+
     {#if showOverlays && !isPageCropping}
       <div 
-        class="editable-overlay-layer absolute inset-0" 
-        style="contain: strict; transform-origin: top left; transform: scale({visualScale / renderScale}); width: {Math.round(widthPts * renderScale)}px; height: {Math.round(heightPts * renderScale)}px; pointer-events: {store.isZooming ? 'none' : 'auto'};" 
+        class="editable-overlay-layer absolute inset-0 pointer-events-none" 
+        style="{Math.abs(visualScale - renderScale) > 0.001 ? `transform-origin: top left; transform: scale(${visualScale / renderScale}); ` : ''}width: {Math.round(widthPts * renderScale)}px; height: {Math.round(heightPts * renderScale)}px;" 
         data-page-element="true"
       >
         {#if (featureFlags ? featureFlags.isEnabled('text-editing') : true) && store.inlineEdit && store.inlineEdit.span.pageIndex === pageIndex}
           {@const editSpan = store.inlineEdit.span}
+          {@const nextRowColSpan = (!featureFlags || featureFlags.isEnabled('text-editing.table-aware-clustering'))
+            ? allSpans
+                .filter((s): s is EditableTextSpan => s.type === 'text' && s.id !== editSpan.id && Math.abs(s.baselineY - editSpan.baselineY) <= 4.0 && s.left > editSpan.left + editSpan.width + 6.0)
+                .sort((a, b) => a.left - b.left)[0]
+            : undefined}
+          {@const inlineMaxWidthPts = nextRowColSpan
+            ? Math.max(editSpan.width, nextRowColSpan.left - editSpan.left - 6.0)
+            : Math.max(editSpan.width, widthPts - editSpan.left)}
           <div
             bind:this={inlineEditorEl}
-            class="inline-editor-input absolute text-card-foreground z-50 outline-none select-text cursor-text"
+            class="inline-editor-input absolute text-card-foreground z-50 outline-none select-text cursor-text {store.isZooming ? 'pointer-events-none' : 'pointer-events-auto'}"
             contenteditable="true"
             role="textbox"
             tabindex="0"
+            aria-label="Inline text editor"
             aria-multiline="true"
             use:focusInlineEditable
             oninput={(e) => {
+              isInternalInlineTyping = true;
               const target = e.currentTarget as HTMLDivElement;
               const extracted = extractStyledLinesFromEditor(target, renderScale, editSpan);
               actions.updateInlineText(extracted.text, extracted.lines);
               handleInlineSelectionUpdate(target);
+              queueMicrotask(() => {
+                isInternalInlineTyping = false;
+              });
             }}
             onclick={(e) => { e.stopPropagation(); handleInlineSelectionUpdate(e.currentTarget as HTMLDivElement); }}
             onpointerdown={(e) => e.stopPropagation()}
@@ -2563,21 +2593,25 @@
             onkeyup={(e) => handleInlineSelectionUpdate(e.currentTarget as HTMLDivElement)}
             ondblclick={(e) => { e.stopPropagation(); handleInlineSelectionUpdate(e.currentTarget as HTMLDivElement); }}
             style="
-              left: {(editSpan.left * renderScale - 1.5).toFixed(2)}px;
-              top: {(editSpan.top * renderScale - 1.5).toFixed(2)}px;
-              width: {Math.max(60, Math.min((editSpan.width + 16) * renderScale + 11, (widthPts - editSpan.left) * renderScale + 1.5)).toFixed(2)}px;
-              max-width: {Math.max(60, (widthPts - editSpan.left) * renderScale + 1.5).toFixed(2)}px;
-              min-height: {(editSpan.height * renderScale + 3).toFixed(2)}px;
+              left: {(editSpan.left * renderScale).toFixed(2)}px;
+              top: {((editSpan.top + computeHalfLeadingTopOffsetPts(editSpan.lines?.[0]?.fontSize || editSpan.fontSize, editSpan.lines?.[0]?.lineHeight || editSpan.lineHeight || (editSpan.lines?.[0]?.fontSize || editSpan.fontSize) * 1.25)) * renderScale).toFixed(2)}px;
+              min-width: {(editSpan.width * renderScale).toFixed(2)}px;
+              width: fit-content;
+              max-width: {(inlineMaxWidthPts * renderScale).toFixed(2)}px;
+              min-height: {(editSpan.height * renderScale).toFixed(2)}px;
               font-size: {(editSpan.fontSize * renderScale).toFixed(2)}px;
               font-family: {getCssFontFamily(editSpan.rawFontFamily || editSpan.matchedFontFamily || editSpan.fontFamily, extractBaseFontFamily)};
-              font-weight: {(editSpan.rawFontFamily || '').toLowerCase().includes('bold') || editSpan.fontWeight === 'bold' ? 'bold' : 'normal'};
-              font-style: {((editSpan.rawFontFamily || '').toLowerCase().includes('italic') || (editSpan.rawFontFamily || '').toLowerCase().includes('oblique') || editSpan.fontStyle === 'italic') ? 'italic' : 'normal'};
+              font-weight: {(editSpan.fontWeight ? editSpan.fontWeight === 'bold' : isBoldFontName(editSpan.rawFontFamily || editSpan.fontFamily)) ? 'bold' : 'normal'};
+              font-style: {(editSpan.fontStyle ? editSpan.fontStyle === 'italic' : isItalicFontName(editSpan.rawFontFamily || editSpan.fontFamily)) ? 'italic' : 'normal'};
               color: rgba({editSpan.color.r}, {editSpan.color.g}, {editSpan.color.b}, {editSpan.color.a / 255});
               line-height: {editSpan.lineHeight ? (editSpan.lineHeight * renderScale).toFixed(2) + 'px' : '1.25'};
+              letter-spacing: {formatScaledCssLetterSpacing(editSpan.letterSpacing, editSpan.fontSize, renderScale)};
+              word-spacing: {formatScaledCssWordSpacing(editSpan.wordSpacing, renderScale)};
               text-rendering: geometricPrecision;
               -webkit-font-smoothing: antialiased;
               box-sizing: border-box;
               background-color: {editSpan.backgroundColor || 'transparent'};
+              text-align: {editSpan.textAlign || 'left'};
               padding: 0;
               margin: 0;
               white-space: pre-wrap;
@@ -2602,7 +2636,7 @@
           {#if store.inlineEdit?.spanId !== span.id && !store.hiddenSpanIds.has(span.id)}
             <div
               data-span-id={span.id}
-              class="absolute pointer-events-auto cursor-pointer group {store.selectedSpan?.id === span.id ? 'z-20' : (span.type === 'form-field' ? 'z-[16]' : (span.type === 'text' ? 'z-[15]' : 'z-[1]'))}"
+              class="absolute {store.isZooming ? 'pointer-events-none' : 'pointer-events-auto'} cursor-pointer group {getSpanZIndexClass(span)}"
               style="
                 left: {(span.left * renderScale).toFixed(2)}px;
                 top: {(span.top * renderScale).toFixed(2)}px;
@@ -2610,15 +2644,18 @@
                 height: {(span.height * renderScale).toFixed(2)}px;
                 {'rotation' in span && typeof span.rotation === 'number' && span.rotation !== 0 ? `transform: rotate(${span.rotation}deg); transform-origin: center;` : ''}
               "
-              onclick={async (e) => {
+              onclick={(e) => {
                 e.stopPropagation();
+                if (store.hiddenSpanIds.has(span.id)) return;
                 actions.setCurrentPageFromScroll(pageIndex);
-                selection.clear();
-                if (span.type === 'form-field' || span.type === 'shape') {
-                  if (featureFlags ? featureFlags.isEnabled('canvas-elements') : true) {
-                    await actions.extractObjectToCanvas(span.type, span, canvasStore);
-                  }
+                const isMulti = Boolean(
+                  (e.ctrlKey || e.metaKey || e.shiftKey) &&
+                  (!featureFlags || featureFlags.isEnabled('select-tool.multiselect'))
+                );
+                if (isMulti) {
+                  actions.toggleSpanSelection(span);
                 } else {
+                  selection.clear();
                   canvasStore.selectElement(null);
                   actions.selectSpan(span);
                 }
@@ -2648,23 +2685,18 @@
               tabindex="0"
               aria-label="{span.type === 'text' ? `Text block: ${(span as EditableTextSpan).text}` : (span.type === 'form-field' ? `Form field: ${(span as EditableFormFieldSpan).fieldName || (span as EditableFormFieldSpan).fieldId}` : `${span.type === 'image' ? 'Image' : 'Shape'} block`)}"
               onpointerdown={(e) => handleSpanPointerDown(e, span)}
-              onkeydown={async (e) => {
-                if (e.key === 'Enter' || (span.type !== 'text' && e.key === ' ')) {
+              onkeydown={(e) => {
+                if (e.key === 'Enter') {
                   e.stopPropagation();
-                  if (span.type === 'form-field') {
-                    if (store.canEditValues && (featureFlags ? featureFlags.isEnabled('canvas-elements') : true)) {
-                      await actions.extractObjectToCanvas(span.type, span, canvasStore);
-                    }
-                  } else if (span.type === 'text') {
-                    if (!store.isReadOnly && store.canEditContent && (featureFlags ? featureFlags.isEnabled('text-editing') : true)) {
-                      actions.setCurrentPageFromScroll(pageIndex);
-                      actions.startInlineEdit(span as EditableTextSpan);
-                    }
-                  } else {
-                    if (!store.isReadOnly && (featureFlags ? featureFlags.isEnabled('canvas-elements') : true)) {
-                      await actions.extractObjectToCanvas(span.type, span, canvasStore);
-                    }
-                  }
+                  e.preventDefault();
+                  actions.clearSelection(true);
+                  canvasStore.selectElement(null);
+                  return;
+                }
+                if (span.type !== 'text' && e.key === ' ') {
+                  e.stopPropagation();
+                  canvasStore.selectElement(null);
+                  actions.selectSpan(span);
                 }
               }}
             >
@@ -2681,64 +2713,140 @@
                     "
                   >{textSpan.text}</span>
                 {/if}
-                {#if textSpan.backgroundColor}
-                  <div
-                    class="absolute inset-0 pointer-events-none rounded-[2px]"
-                    style="background-color: {textSpan.backgroundColor}; mix-blend-mode: multiply;"
-                  ></div>
-                {:else if textSpan.lines && textSpan.lines.length > 0}
-                  {#each textSpan.lines as line}
-                    {#if line.backgroundColor}
+                {#if textSpan.isOcr}
+                  {#if textSpan.backgroundColor}
+                    <div
+                      class="absolute inset-0 pointer-events-none rounded-[2px]"
+                      style="background-color: {textSpan.backgroundColor}; mix-blend-mode: multiply;"
+                    ></div>
+                  {:else if textSpan.lines && textSpan.lines.length > 0}
+                    {#each textSpan.lines as line}
+                      {#if line.backgroundColor}
+                        <div
+                          class="absolute pointer-events-none rounded-[2px]"
+                          style="
+                            left: {Math.max(0, Math.round((line.left - span.left) * renderScale))}px;
+                            top: {Math.max(0, Math.round((line.top - span.top) * renderScale))}px;
+                            width: {Math.max(2, Math.round(line.width * renderScale))}px;
+                            height: {Math.max(2, Math.round(line.height * renderScale))}px;
+                            background-color: {line.backgroundColor};
+                            mix-blend-mode: multiply;
+                          "
+                        ></div>
+                      {/if}
+                      {#if line.words}
+                        {#each line.words as word}
+                          {#if word.backgroundColor && !line.backgroundColor}
+                            <div
+                              class="absolute pointer-events-none rounded-[2px]"
+                              style="
+                                left: {Math.max(0, Math.round((word.left - span.left) * renderScale))}px;
+                                top: {Math.max(0, Math.round((word.top - span.top) * renderScale))}px;
+                                width: {Math.max(2, Math.round(word.width * renderScale))}px;
+                                height: {Math.max(2, Math.round(word.height * renderScale))}px;
+                                background-color: {word.backgroundColor};
+                                mix-blend-mode: multiply;
+                              "
+                            ></div>
+                          {/if}
+                        {/each}
+                      {/if}
+                    {/each}
+                  {/if}
+                  {#if textSpan.lines && textSpan.lines.length > 0}
+                    {#each textSpan.lines as line}
+                      {@const isLineU = Boolean(line.underline || textSpan.underline)}
+                      {@const isLineS = Boolean(line.strikethrough || textSpan.strikethrough)}
+                      {@const lFs = line.fontSize || textSpan.fontSize}
+                      {@const lineRelLeft = Math.max(0, Math.round((line.left - span.left) * renderScale))}
+                      {@const lineW = Math.max(2, Math.round(line.width * renderScale))}
+                      {@const uTop = Math.round((line.top - span.top + lFs * 0.94) * renderScale)}
+                      {@const sTop = Math.round((line.top - span.top + lFs * 0.52) * renderScale)}
+
+                      {#if isLineU}
+                        <div
+                          class="absolute pointer-events-none"
+                          style="
+                            left: {lineRelLeft}px;
+                            top: {uTop}px;
+                            width: {lineW}px;
+                            height: {Math.max(1, Math.round(1.5 * renderScale))}px;
+                            background-color: rgba({textSpan.color.r}, {textSpan.color.g}, {textSpan.color.b}, {textSpan.color.a / 255});
+                          "
+                        ></div>
+                      {/if}
+
+                      {#if isLineS}
+                        <div
+                          class="absolute pointer-events-none"
+                          style="
+                            left: {lineRelLeft}px;
+                            top: {sTop}px;
+                            width: {lineW}px;
+                            height: {Math.max(1, Math.round(1.5 * renderScale))}px;
+                            background-color: rgba({textSpan.color.r}, {textSpan.color.g}, {textSpan.color.b}, {textSpan.color.a / 255});
+                          "
+                        ></div>
+                      {/if}
+
+                      {#if line.words}
+                        {#each line.words as word}
+                          {@const wFs = word.fontSize || lFs}
+                          {@const wRelLeft = Math.max(0, Math.round((word.left - span.left) * renderScale))}
+                          {@const wW = Math.max(2, Math.round(word.width * renderScale))}
+                          {@const wColor = word.color || textSpan.color}
+                          {@const wUTop = Math.round((word.top - span.top + wFs * 0.94) * renderScale)}
+                          {@const wSTop = Math.round((word.top - span.top + wFs * 0.52) * renderScale)}
+
+                          {#if word.underline && !isLineU}
+                            <div
+                              class="absolute pointer-events-none"
+                              style="
+                                left: {wRelLeft}px;
+                                top: {wUTop}px;
+                                width: {wW}px;
+                                height: {Math.max(1, Math.round(1.5 * renderScale))}px;
+                                background-color: rgba({wColor.r}, {wColor.g}, {wColor.b}, {wColor.a / 255});
+                              "
+                            ></div>
+                          {/if}
+                          {#if word.strikethrough && !isLineS}
+                            <div
+                              class="absolute pointer-events-none"
+                              style="
+                                left: {wRelLeft}px;
+                                top: {wSTop}px;
+                                width: {wW}px;
+                                height: {Math.max(1, Math.round(1.5 * renderScale))}px;
+                                background-color: rgba({wColor.r}, {wColor.g}, {wColor.b}, {wColor.a / 255});
+                              "
+                            ></div>
+                          {/if}
+                        {/each}
+                      {/if}
+                    {/each}
+                  {:else}
+                    {#if textSpan.underline}
                       <div
-                        class="absolute pointer-events-none rounded-[2px]"
+                        class="absolute left-0 w-full pointer-events-none"
                         style="
-                          left: {Math.max(0, Math.round((line.left - span.left) * renderScale))}px;
-                          top: {Math.max(0, Math.round((line.top - span.top) * renderScale))}px;
-                          width: {Math.max(2, Math.round(line.width * renderScale))}px;
-                          height: {Math.max(2, Math.round(line.height * renderScale))}px;
-                          background-color: {line.backgroundColor};
-                          mix-blend-mode: multiply;
+                          bottom: 1px;
+                          height: {Math.max(1, Math.round(1.5 * renderScale))}px;
+                          background-color: rgba({textSpan.color.r}, {textSpan.color.g}, {textSpan.color.b}, {textSpan.color.a / 255});
                         "
                       ></div>
                     {/if}
-                    {#if line.words}
-                      {#each line.words as word}
-                        {#if word.backgroundColor && !line.backgroundColor}
-                          <div
-                            class="absolute pointer-events-none rounded-[2px]"
-                            style="
-                              left: {Math.max(0, Math.round((word.left - span.left) * renderScale))}px;
-                              top: {Math.max(0, Math.round((word.top - span.top) * renderScale))}px;
-                              width: {Math.max(2, Math.round(word.width * renderScale))}px;
-                              height: {Math.max(2, Math.round(word.height * renderScale))}px;
-                              background-color: {word.backgroundColor};
-                              mix-blend-mode: multiply;
-                            "
-                          ></div>
-                        {/if}
-                      {/each}
+                    {#if textSpan.strikethrough}
+                      <div
+                        class="absolute left-0 w-full pointer-events-none"
+                        style="
+                          top: 50%;
+                          height: {Math.max(1, Math.round(1.5 * renderScale))}px;
+                          background-color: rgba({textSpan.color.r}, {textSpan.color.g}, {textSpan.color.b}, {textSpan.color.a / 255});
+                        "
+                      ></div>
                     {/if}
-                  {/each}
-                {/if}
-                {#if textSpan.underline}
-                  <div
-                    class="absolute left-0 w-full pointer-events-none"
-                    style="
-                      bottom: 1px;
-                      height: {Math.max(1, Math.round(1.5 * renderScale))}px;
-                      background-color: rgba({textSpan.color.r}, {textSpan.color.g}, {textSpan.color.b}, {textSpan.color.a / 255});
-                    "
-                  ></div>
-                {/if}
-                {#if textSpan.strikethrough}
-                  <div
-                    class="absolute left-0 w-full pointer-events-none"
-                    style="
-                      top: 50%;
-                      height: {Math.max(1, Math.round(1.5 * renderScale))}px;
-                      background-color: rgba({textSpan.color.r}, {textSpan.color.g}, {textSpan.color.b}, {textSpan.color.a / 255});
-                    "
-                  ></div>
+                  {/if}
                 {/if}
                 {@const isVert = textSpan.isVertical || textSpan.rotation === 90 || textSpan.rotation === 270}
                 {#if textSpan.lines && textSpan.lines.length > 0}
@@ -2791,7 +2899,7 @@
               {:else if span.type === 'form-field'}
                 {@const formSpan = span as EditableFormFieldSpan}
                 <div
-                  class="absolute inset-0 rounded-[3px] border border-blue-600 bg-blue-50/25 hover:bg-blue-100/35 transition-colors pointer-events-none flex items-center px-1.5 text-[11px] font-sans text-blue-950 overflow-hidden select-none"
+                  class="absolute inset-0 rounded-[3px] border border-selection bg-selection/10 hover:bg-selection/15 transition-colors pointer-events-none flex items-center px-1.5 text-[11px] font-sans text-foreground overflow-hidden select-none"
                   style="
                     {formSpan.backgroundColor ? `background-color: ${formSpan.backgroundColor};` : ''}
                     {formSpan.borderColor ? `border-color: ${formSpan.borderColor};` : ''}
@@ -2799,28 +2907,28 @@
                   "
                 >
                   {#if formSpan.variant === 'checkbox'}
-                    <CheckSquare class="w-3.5 h-3.5 mr-1 shrink-0 text-blue-600" />
+                    <CheckSquare class="w-3.5 h-3.5 mr-1 shrink-0 text-selection" />
                   {:else if formSpan.variant === 'radio'}
-                    <Circle class="w-3.5 h-3.5 mr-1 shrink-0 text-blue-600" />
+                    <Circle class="w-3.5 h-3.5 mr-1 shrink-0 text-selection" />
                   {:else if formSpan.variant === 'dropdown'}
-                    <ChevronDown class="w-3.5 h-3.5 mr-1 shrink-0 text-blue-600" />
+                    <ChevronDown class="w-3.5 h-3.5 mr-1 shrink-0 text-selection" />
                   {:else if formSpan.variant === 'signature'}
-                    <PenTool class="w-3 h-3 mr-1 shrink-0 text-blue-600" />
+                    <PenTool class="w-3 h-3 mr-1 shrink-0 text-selection" />
                   {:else}
-                    <span class="w-1.5 h-1.5 rounded-full bg-blue-600 mr-1 shrink-0"></span>
+                    <span class="w-1.5 h-1.5 rounded-full bg-selection mr-1 shrink-0"></span>
                   {/if}
-                  <span class="truncate opacity-80 leading-none">{formSpan.value !== undefined && formSpan.value !== '' ? formSpan.value : (formSpan.fieldName || formSpan.fieldId)}</span>
+                  <span class="truncate opacity-80 leading-none" title={String(formSpan.value !== undefined && formSpan.value !== '' ? formSpan.value : (formSpan.fieldName || formSpan.fieldId || ''))}>{formSpan.value !== undefined && formSpan.value !== '' ? formSpan.value : (formSpan.fieldName || formSpan.fieldId)}</span>
                   {#if formSpan.required}
-                    <span class="text-red-500 font-bold ml-0.5 select-none">*</span>
+                    <span class="text-destructive font-bold ml-0.5 select-none">*</span>
                   {/if}
                 </div>
                 <div
-                  class="absolute top-0 right-0 bg-blue-600 text-white text-[9px] px-1.5 py-0.5 rounded-bl-[3px] font-medium opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none select-none z-10 leading-none shadow-none"
+                  class="absolute top-0 right-0 bg-selection text-white text-[9px] px-1.5 py-0.5 rounded-bl-[3px] font-medium opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none select-none z-10 leading-none shadow-none"
                   style="{formSpan.borderColor ? `background-color: ${formSpan.borderColor};` : ''}"
                 >
                   AcroForm
                 </div>
-              {:else if span.type === 'image'}
+              {:else if span.type === 'image' || span.type === 'shape'}
                 <div class="absolute inset-0 ring-[1.5px] ring-inset ring-selection {store.selectedSpan?.id === span.id ? 'hidden' : 'hidden group-hover:block'} pointer-events-none"></div>
               {/if}
             </div>
@@ -2830,50 +2938,150 @@
         <!-- Span Selection Overlay (Kept visible during inline edit for consistent selection borders and white square handles) -->
         {#if store.selectedSpan?.pageIndex === pageIndex && !store.isReadOnly && store.canSelectElements}
           <div class="absolute inset-0 pointer-events-none z-20">
-            <SelectionOverlay 
-              element={{ 
-                id: store.selectedSpan.id, 
-                x: store.selectedSpan.left, 
-                y: store.selectedSpan.top, 
-                width: store.selectedSpan.width, 
-                height: store.selectedSpan.height, 
-                rotation: ('rotation' in store.selectedSpan && typeof store.selectedSpan.rotation === 'number' ? store.selectedSpan.rotation : 0)
-              }} 
-              zoom={renderScale} 
-              showRotateCursor={store.selectedSpan?.type !== 'text'} 
-              onResizeStart={async (e, handle, _pageEl) => {
-                if (store.selectedSpan) {
-                  const type = store.selectedSpan.type as 'text' | 'image' | 'shape' | 'form-field';
-                  const newId = await actions.extractObjectToCanvas(type, store.selectedSpan as EditableTextSpan | EditableImageSpan | EditableShapeSpan | EditableFormFieldSpan, canvasStore);
-                  if (newId) {
-                    // After extraction the element lives in the CanvasElementLayer.
-                    // Resolve that layer so startResize uses the same reference frame
-                    // as subsequent updateResize calls from Canvas.svelte.
-                    const canvasLayer = containerWrapperEl?.querySelector('[data-canvas-layer]') as HTMLElement | null;
-                    canvasActions.startResize(newId, handle, e.clientX, e.clientY, canvasLayer ?? _pageEl, visualScale, pageTransform);
-                  }
-                }
-              }}
-              onRotateStart={async (e, _pageEl) => {
-                if (store.selectedSpan) {
-                  const type = store.selectedSpan.type as 'text' | 'image' | 'shape' | 'form-field';
-                  const newId = await actions.extractObjectToCanvas(type, store.selectedSpan as EditableTextSpan | EditableImageSpan | EditableShapeSpan | EditableFormFieldSpan, canvasStore);
+            {#each (store.selectedSpans.length > 0 ? store.selectedSpans.filter((s) => s.pageIndex === pageIndex) : [store.selectedSpan]) as selectedItem (selectedItem.id)}
+              <SelectionOverlay 
+                element={{ 
+                  id: selectedItem.id, 
+                  x: selectedItem.left, 
+                  y: selectedItem.top, 
+                  width: selectedItem.width, 
+                  height: selectedItem.height, 
+                  rotation: ('rotation' in selectedItem && typeof selectedItem.rotation === 'number' ? selectedItem.rotation : 0),
+                  kind: 'type' in selectedItem && typeof selectedItem.type === 'string' ? selectedItem.type : undefined,
+                  type: 'type' in selectedItem && typeof selectedItem.type === 'string' ? selectedItem.type : undefined,
+                  variant: 'variant' in selectedItem && typeof selectedItem.variant === 'string' ? selectedItem.variant : undefined,
+                }} 
+                zoom={renderScale} 
+                showRotateCursor={store.selectedSpans.length <= 1 && selectedItem.type !== 'text'} 
+                onResizeStart={async (e, handle, _pageEl) => {
+                  const type = selectedItem.type as 'text' | 'image' | 'shape' | 'form-field';
+                  const multiTransformEnabled =
+                    !featureFlags ||
+                    (featureFlags.isEnabled('select-tool.multiselect') &&
+                     featureFlags.isEnabled('select-tool.multiselect.transform'));
+                  const newId = multiTransformEnabled
+                    ? (await actions.extractSelectedSpansToCanvas(selectedItem, canvasStore)).primaryElementId
+                    : await actions.extractObjectToCanvas(type, selectedItem as EditableTextSpan | EditableImageSpan | EditableShapeSpan | EditableFormFieldSpan, canvasStore);
                   if (newId) {
                     const canvasLayer = containerWrapperEl?.querySelector('[data-canvas-layer]') as HTMLElement | null;
-                    canvasActions.startRotate(newId, e.clientX, e.clientY, canvasLayer ?? _pageEl, visualScale, pageTransform);
+                    canvasActions.startResize(newId, handle, e.clientX, e.clientY, canvasLayer ?? _pageEl, visualScale, effectivePageTransform);
                   }
-                }
-              }}
-            />
+                }}
+                onAdjustStart={async (e, handle, _pageEl) => {
+                  const type = selectedItem.type as 'text' | 'image' | 'shape' | 'form-field';
+                  const multiTransformEnabled =
+                    !featureFlags ||
+                    (featureFlags.isEnabled('select-tool.multiselect') &&
+                     featureFlags.isEnabled('select-tool.multiselect.transform'));
+                  const newId = multiTransformEnabled
+                    ? (await actions.extractSelectedSpansToCanvas(selectedItem, canvasStore)).primaryElementId
+                    : await actions.extractObjectToCanvas(type, selectedItem as EditableTextSpan | EditableImageSpan | EditableShapeSpan | EditableFormFieldSpan, canvasStore);
+                  if (newId) {
+                    const canvasLayer = containerWrapperEl?.querySelector('[data-canvas-layer]') as HTMLElement | null;
+                    canvasActions.startEndpointAdjust(newId, handle, e.clientX, e.clientY, canvasLayer ?? _pageEl, visualScale, effectivePageTransform);
+                  }
+                }}
+                onRotateStart={async (e, _pageEl) => {
+                  const type = selectedItem.type as 'text' | 'image' | 'shape' | 'form-field';
+                  const multiTransformEnabled =
+                    !featureFlags ||
+                    (featureFlags.isEnabled('select-tool.multiselect') &&
+                     featureFlags.isEnabled('select-tool.multiselect.transform'));
+                  const newId = multiTransformEnabled
+                    ? (await actions.extractSelectedSpansToCanvas(selectedItem, canvasStore)).primaryElementId
+                    : await actions.extractObjectToCanvas(type, selectedItem as EditableTextSpan | EditableImageSpan | EditableShapeSpan | EditableFormFieldSpan, canvasStore);
+                  if (newId) {
+                    const canvasLayer = containerWrapperEl?.querySelector('[data-canvas-layer]') as HTMLElement | null;
+                    canvasActions.startRotate(newId, e.clientX, e.clientY, canvasLayer ?? _pageEl, visualScale, effectivePageTransform);
+                  }
+                }}
+              />
+            {/each}
           </div>
+        {:else if store.selectedSpans.some((s) => s.pageIndex === pageIndex) && !store.isReadOnly && store.canSelectElements}
+          <div class="absolute inset-0 pointer-events-none z-20">
+            {#each store.selectedSpans.filter((s) => s.pageIndex === pageIndex) as selectedItem (selectedItem.id)}
+              <SelectionOverlay 
+                element={{ 
+                  id: selectedItem.id, 
+                  x: selectedItem.left, 
+                  y: selectedItem.top, 
+                  width: selectedItem.width, 
+                  height: selectedItem.height, 
+                  rotation: ('rotation' in selectedItem && typeof selectedItem.rotation === 'number' ? selectedItem.rotation : 0),
+                  kind: 'type' in selectedItem && typeof selectedItem.type === 'string' ? selectedItem.type : undefined,
+                  type: 'type' in selectedItem && typeof selectedItem.type === 'string' ? selectedItem.type : undefined,
+                  variant: 'variant' in selectedItem && typeof selectedItem.variant === 'string' ? selectedItem.variant : undefined,
+                }} 
+                zoom={renderScale} 
+                showRotateCursor={store.selectedSpans.length <= 1 && selectedItem.type !== 'text'} 
+                onResizeStart={async (e, handle, _pageEl) => {
+                  const type = selectedItem.type as 'text' | 'image' | 'shape' | 'form-field';
+                  const multiTransformEnabled =
+                    !featureFlags ||
+                    (featureFlags.isEnabled('select-tool.multiselect') &&
+                     featureFlags.isEnabled('select-tool.multiselect.transform'));
+                  const newId = multiTransformEnabled
+                    ? (await actions.extractSelectedSpansToCanvas(selectedItem, canvasStore)).primaryElementId
+                    : await actions.extractObjectToCanvas(type, selectedItem as EditableTextSpan | EditableImageSpan | EditableShapeSpan | EditableFormFieldSpan, canvasStore);
+                  if (newId) {
+                    const canvasLayer = containerWrapperEl?.querySelector('[data-canvas-layer]') as HTMLElement | null;
+                    canvasActions.startResize(newId, handle, e.clientX, e.clientY, canvasLayer ?? _pageEl, visualScale, effectivePageTransform);
+                  }
+                }}
+                onAdjustStart={async (e, handle, _pageEl) => {
+                  const type = selectedItem.type as 'text' | 'image' | 'shape' | 'form-field';
+                  const multiTransformEnabled =
+                    !featureFlags ||
+                    (featureFlags.isEnabled('select-tool.multiselect') &&
+                     featureFlags.isEnabled('select-tool.multiselect.transform'));
+                  const newId = multiTransformEnabled
+                    ? (await actions.extractSelectedSpansToCanvas(selectedItem, canvasStore)).primaryElementId
+                    : await actions.extractObjectToCanvas(type, selectedItem as EditableTextSpan | EditableImageSpan | EditableShapeSpan | EditableFormFieldSpan, canvasStore);
+                  if (newId) {
+                    const canvasLayer = containerWrapperEl?.querySelector('[data-canvas-layer]') as HTMLElement | null;
+                    canvasActions.startEndpointAdjust(newId, handle, e.clientX, e.clientY, canvasLayer ?? _pageEl, visualScale, effectivePageTransform);
+                  }
+                }}
+                onRotateStart={async (e, _pageEl) => {
+                  const type = selectedItem.type as 'text' | 'image' | 'shape' | 'form-field';
+                  const multiTransformEnabled =
+                    !featureFlags ||
+                    (featureFlags.isEnabled('select-tool.multiselect') &&
+                     featureFlags.isEnabled('select-tool.multiselect.transform'));
+                  const newId = multiTransformEnabled
+                    ? (await actions.extractSelectedSpansToCanvas(selectedItem, canvasStore)).primaryElementId
+                    : await actions.extractObjectToCanvas(type, selectedItem as EditableTextSpan | EditableImageSpan | EditableShapeSpan | EditableFormFieldSpan, canvasStore);
+                  if (newId) {
+                    const canvasLayer = containerWrapperEl?.querySelector('[data-canvas-layer]') as HTMLElement | null;
+                    canvasActions.startRotate(newId, e.clientX, e.clientY, canvasLayer ?? _pageEl, visualScale, effectivePageTransform);
+                  }
+                }}
+              />
+            {/each}
+          </div>
+        {/if}
+
+        <!-- Marquee Selection Rectangle Overlay -->
+        {#if isMarqueeActive && marqueeRect}
+          <div
+            data-marquee-additive={marqueeAdditive}
+            class="absolute border border-selection bg-selection/15 pointer-events-none rounded-[1px] z-[55]"
+            style="
+              left: {Math.round(marqueeRect.x * renderScale)}px;
+              top: {Math.round(marqueeRect.y * renderScale)}px;
+              width: {Math.round(marqueeRect.width * renderScale)}px;
+              height: {Math.round(marqueeRect.height * renderScale)}px;
+            "
+          ></div>
         {/if}
       </div>
     {/if}
 
     <!-- Annotation & Drawing Tool Interactive Overlay (Topmost) -->
-    {#if store.activeTool === 'pen' || store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'note' || store.activeTool === 'eraser'}
+    {#if store.activeTool === 'pen' || store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'note' || store.activeTool === 'eraser' || store.activeTool === 'text'}
       <div 
-        class="absolute inset-0 z-[60] touch-none {store.activeTool === 'note' ? 'cursor-cell' : (store.activeTool === 'eraser' ? 'cursor-crosshair' : ((store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'pen') ? (hoveringChar || isTextHighlightMode ? 'cursor-text' : 'cursor-crosshair') : (activeToolDef?.cursor || 'cursor-crosshair')))}"
+        class="absolute inset-0 z-[60] touch-none {store.activeTool === 'note' ? 'cursor-cell' : (store.activeTool === 'text' ? 'cursor-text' : (store.activeTool === 'eraser' ? 'cursor-crosshair' : ((store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'pen') ? (hoveringChar || isTextHighlightMode ? 'cursor-text' : 'cursor-crosshair') : (activeToolDef?.cursor || 'cursor-crosshair'))))}"
         onpointerdown={handlePointerDownDrawing}
         onpointermove={handlePointerMoveDrawing}
         onpointerup={handlePointerUpDrawing}
@@ -2889,7 +3097,7 @@
         {#each previewHighlightRects as rect}
           {#if store.activeTool === 'redact'}
             <div
-              class="absolute pointer-events-none border border-red-500/80 rounded-[1px]"
+              class="absolute pointer-events-none border border-destructive/80 rounded-[1px]"
               style="
                 left: {(rect.x * visualScale).toFixed(2)}px;
                 top: {(rect.y * visualScale).toFixed(2)}px;
@@ -2929,7 +3137,12 @@
     {/if}
   </div>
 
-  <!-- Active Page Crop Overlay (outside overflow-hidden so handles and floating action badge are never cut off) -->
+  <!-- Canvas element overlay for user-added elements (positioned outside overflow-hidden for seamless cross-page dragging) -->
+  {#if !store.showOrganizerView && (featureFlags ? featureFlags.isEnabled('canvas-elements') : true)}
+    <CanvasElementLayer {pageIndex} zoom={visualScale} />
+  {/if}
+
+  <!-- Active Page Crop Overlay (outside overflow-hidden and after CanvasElementLayer so handles and floating action badge sit above all canvas elements) -->
   {#if isPageCropping && (featureFlags ? featureFlags.isEnabled('crop') : true)}
     <CropOverlay
       {pageIndex}
@@ -2941,9 +3154,16 @@
     />
   {/if}
 
-  <!-- Canvas element overlay for user-added elements (positioned outside overflow-hidden for seamless cross-page dragging) -->
-  {#if !store.showOrganizerView && (featureFlags ? featureFlags.isEnabled('canvas-elements') : true)}
-    <CanvasElementLayer {pageIndex} zoom={visualScale} />
+  <!-- Active Digital Signature Placement Overlay -->
+  {#if store.pendingDigitalSignature !== null && store.pendingDigitalSignature.pageIndex === pageIndex && (featureFlags ? featureFlags.isEnabled('signatures.cert-sign.interactive-placement') : true)}
+    <DigitalSignaturePlacementOverlay
+      {pageIndex}
+      containerEl={containerWrapperEl}
+      {widthPts}
+      {heightPts}
+      {visualScale}
+      {pageTransform}
+    />
   {/if}
 
   {#if selection.isSelected(`page_${pageIndex}`) && !isPageCropping && !store.isReadOnly && store.canSelectElements}
@@ -2959,26 +3179,26 @@
   {/if}
 
 
-  <!-- Scanned Document OCR Badge & Progress Indicator -->
-  {#if (featureFlags ? featureFlags.isEnabled('ocr') : true) && store.scannedPages.has(pageIndex) && !store.pageOcrResults.has(pageIndex)}
+  <!-- Scanned Document OCR Badge and Progress Indicator -->
+  {#if canRecognizePage && store.scannedPages.has(pageIndex) && !store.pageOcrResults.has(pageIndex)}
     <div class="absolute top-2.5 right-2.5 z-30 pointer-events-auto">
       <button
         type="button"
-        class="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium bg-card/95 hover:bg-card text-foreground border border-border/80 rounded-md shadow-sm backdrop-blur-sm transition-all hover:border-primary/50 cursor-pointer"
+        class="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium bg-card/95 hover:bg-card text-foreground border border-border/80 rounded-md backdrop-blur-sm transition-[color,background-color,border-color] hover:border-ring cursor-pointer"
         onclick={(e) => {
           e.stopPropagation();
           actions.runOcrOnPage(pageIndex);
         }}
         title="Scanned page detected. Click to recognize text for selection and editing."
       >
-        <ScanText class="h-3.5 w-3.5 text-primary" />
+        <ScanText class="h-3.5 w-3.5" />
         <span>Recognize Text</span>
       </button>
     </div>
-  {:else if (featureFlags ? featureFlags.isEnabled('ocr') : true) && store.isOcrRunning && store.ocrProgress?.pageIndex === pageIndex}
+  {:else if canRecognizePage && store.isOcrRunning && store.ocrProgress?.pageIndex === pageIndex}
     <div class="absolute top-2.5 right-2.5 z-30 pointer-events-auto">
-      <div class="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium bg-card/95 text-foreground border border-border/80 rounded-md shadow-sm backdrop-blur-sm">
-        <Loader2 class="h-3.5 w-3.5 text-primary animate-spin" />
+      <div class="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium bg-card/95 text-foreground border border-border/80 rounded-md backdrop-blur-sm">
+        <Loader2 class="h-3.5 w-3.5 animate-spin" />
         <span>{store.ocrProgress.status || 'Recognizing text...'}</span>
       </div>
     </div>
