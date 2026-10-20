@@ -1054,25 +1054,31 @@
             currentX += lineFs * 0.25;
           }
 
+          const refOrigWord = origLine?.words?.[Math.min(words.length, (origLine?.words?.length || 1) - 1)];
           const wW = cleanToken.length * approxCharW;
+          const fallbackWordLs = refOrigWord?.letterSpacing ?? domLineLs ?? origLine?.letterSpacing ?? span.letterSpacing;
           words.push({
             text: cleanToken,
             left: currentX,
-            top: origLine?.top ?? span.top,
+            top: lineTop,
             right: currentX + wW,
-            bottom: origLine?.bottom ?? (span.top + span.height),
+            bottom: lineBottom,
             width: wW,
             height: origLine?.height ?? lineFs,
-            fontSize: lineFs,
-            baselineY: origLine?.baselineY ?? span.baselineY,
+            fontSize: refOrigWord?.fontSize ?? lineFs,
+            baselineY: lineBaselineY,
             charStartIndex: 0,
             charCount: cleanToken.length,
-            fontFamily: origLine?.fontFamily ?? span.fontFamily,
-            rawFontFamily: origLine?.rawFontFamily ?? span.rawFontFamily,
-            matchedFontFamily: origLine?.matchedFontFamily ?? span.matchedFontFamily,
-            color: origLine?.color ?? span.color,
-            fontWeight: origLine?.fontWeight ?? span.fontWeight,
-            fontStyle: origLine?.fontStyle ?? span.fontStyle,
+            fontFamily: refOrigWord?.fontFamily ?? domLineFontFamily ?? origLine?.fontFamily ?? span.fontFamily,
+            rawFontFamily: refOrigWord?.rawFontFamily ?? domLineRawFontFamily ?? origLine?.rawFontFamily ?? span.rawFontFamily,
+            matchedFontFamily: refOrigWord?.matchedFontFamily ?? domLineMatchedFontFamily ?? origLine?.matchedFontFamily ?? span.matchedFontFamily,
+            color: refOrigWord?.color ?? origLine?.color ?? span.color,
+            fontWeight: refOrigWord?.fontWeight ?? domLineFontWeight ?? origLine?.fontWeight ?? span.fontWeight,
+            fontStyle: refOrigWord?.fontStyle ?? domLineFontStyle ?? origLine?.fontStyle ?? span.fontStyle,
+            ...(fallbackWordLs ? { letterSpacing: fallbackWordLs, letterSpacingPts: parseLetterSpacingToPoints(fallbackWordLs, lineFs) } : {}),
+            underline: (refOrigWord?.underline ?? origLine?.underline ?? span.underline) ? true : undefined,
+            strikethrough: (refOrigWord?.strikethrough ?? origLine?.strikethrough ?? span.strikethrough) ? true : undefined,
+            backgroundColor: refOrigWord?.backgroundColor ?? origLine?.backgroundColor,
             hasPrecedingSpace,
           });
 
@@ -1081,15 +1087,62 @@
         }
       }
 
-      const lineFontSize = words.length > 0 ? words[0].fontSize : (origLine?.fontSize ?? span.fontSize);
-      const lH = origLine?.lineHeight ?? span.lineHeight ?? (span.fontSize * 1.25);
-      const lineTop = isSameLineCount && origLine?.top !== undefined ? origLine.top : span.top + lineIdx * lH;
-      const lineBottom = isSameLineCount && origLine?.bottom !== undefined ? origLine.bottom : lineTop + lH;
-      const lineBaselineY = isSameLineCount && origLine?.baselineY !== undefined ? origLine.baselineY : span.baselineY - lineIdx * lH;
-      const lineFontFamily = words.length > 0 ? (words[0].fontFamily || words[0].rawFontFamily) : (origLine?.fontFamily ?? span.fontFamily);
-      const lineFontWeight = words.length > 0 ? (words[0].fontWeight as string) : (origLine?.fontWeight ?? span.fontWeight);
-      const lineFontStyle = words.length > 0 ? (words[0].fontStyle as string) : (origLine?.fontStyle ?? span.fontStyle);
-      const lineColor = words.length > 0 ? words[0].color : (origLine?.color ?? span.color);
+      const allWordsSameFs =
+        words.length > 0 && words.every((w) => Math.abs(w.fontSize - words[0].fontSize) <= 0.2);
+      const lineFontSize =
+        words.length > 0
+          ? (allWordsSameFs ? words[0].fontSize : (origLine?.fontSize ?? words[0].fontSize))
+          : (origLine?.fontSize ?? span.fontSize);
+      const allWordsSameFontFamily = words.length > 0 && Boolean(words[0].fontFamily) && words.every((w) => w.fontFamily === words[0].fontFamily);
+      const lineFontFamily = allWordsSameFontFamily
+        ? (words[0].fontFamily || words[0].rawFontFamily)
+        : (domLineFontFamily ?? origLine?.fontFamily ?? span.fontFamily);
+      const allWordsSameRawFont = words.length > 0 && Boolean(words[0].rawFontFamily) && words.every((w) => w.rawFontFamily === words[0].rawFontFamily);
+      const lineRawFontFamily = allWordsSameRawFont ? words[0].rawFontFamily : (domLineRawFontFamily ?? origLine?.rawFontFamily ?? span.rawFontFamily);
+      const lineMatchedFontFamily = allWordsSameRawFont ? (words[0].matchedFontFamily ?? domLineMatchedFontFamily ?? origLine?.matchedFontFamily ?? span.matchedFontFamily) : (domLineMatchedFontFamily ?? origLine?.matchedFontFamily ?? span.matchedFontFamily);
+      const allWordsSameWeight = words.length > 0 && words.every((w) => (w.fontWeight || 'normal') === (words[0].fontWeight || 'normal'));
+      const lineFontWeight = allWordsSameWeight && words.length > 0
+        ? (words[0].fontWeight as string)
+        : (domLineFontWeight ?? origLine?.fontWeight ?? span.fontWeight);
+      const allWordsSameStyle = words.length > 0 && words.every((w) => (w.fontStyle || 'normal') === (words[0].fontStyle || 'normal'));
+      const lineFontStyle = allWordsSameStyle && words.length > 0
+        ? (words[0].fontStyle as string)
+        : (domLineFontStyle ?? origLine?.fontStyle ?? span.fontStyle);
+      const firstWordColor = words[0]?.color;
+      const allWordsSameColor =
+        words.length > 0 &&
+        firstWordColor !== undefined &&
+        words.every(
+          (w) =>
+            w.color !== undefined &&
+            w.color.r === firstWordColor.r &&
+            w.color.g === firstWordColor.g &&
+            w.color.b === firstWordColor.b &&
+            w.color.a === firstWordColor.a
+        );
+      const lineColor =
+        words.length > 0
+          ? (allWordsSameColor ? firstWordColor : (origLine?.color ?? firstWordColor ?? span.color))
+          : (origLine?.color ?? span.color);
+
+      const allWordsUnderline = words.length > 0 && words.every((w) => Boolean(w.underline));
+      const anyWordUnderline = words.some((w) => Boolean(w.underline));
+      const allWordsStrike = words.length > 0 && words.every((w) => Boolean(w.strikethrough));
+      const anyWordStrike = words.some((w) => Boolean(w.strikethrough));
+      const allWordsBg = words.length > 0 && words.every((w) => Boolean(w.backgroundColor) && w.backgroundColor === words[0].backgroundColor);
+      const allWordsSameLs = words.length > 0 && words.every((w) => w.letterSpacing === words[0].letterSpacing);
+      const lineUnderline = words.length > 0 ? (allWordsUnderline ? true : (anyWordUnderline ? undefined : false)) : (origLine?.underline ?? span.underline);
+      const lineStrikethrough = words.length > 0 ? (allWordsStrike ? true : (anyWordStrike ? undefined : false)) : (origLine?.strikethrough ?? span.strikethrough);
+      const lineBackgroundColor = words.length > 0 ? (allWordsBg ? words[0].backgroundColor : undefined) : (origLine?.backgroundColor ?? span.backgroundColor);
+      const lineLetterSpacing =
+        (allWordsSameLs && words[0]?.letterSpacing) ||
+        domLineLs ||
+        origLine?.letterSpacing ||
+        span.letterSpacing;
+      const lineWordSpacing =
+        (domLineWs !== undefined && !isNaN(domLineWs) ? domLineWs : undefined) ??
+        origLine?.wordSpacing ??
+        span.wordSpacing;
 
       lines.push({
         text: lineText,
@@ -1102,15 +1155,21 @@
         fontSize: lineFontSize,
         baselineY: lineBaselineY,
         lineHeight: lH,
+        ...(lineLetterSpacing ? { letterSpacing: lineLetterSpacing } : {}),
+        ...(lineWordSpacing !== undefined ? { wordSpacing: lineWordSpacing } : {}),
+        ...(origLine?.scaleX !== undefined ? { scaleX: origLine.scaleX } : (span.scaleX !== undefined ? { scaleX: span.scaleX } : {})),
         charStartIndex: 0,
         charCount: lineText.length,
         words: words.length > 0 ? words : [],
         fontFamily: lineFontFamily,
-        rawFontFamily: origLine?.rawFontFamily ?? span.rawFontFamily,
-        matchedFontFamily: origLine?.matchedFontFamily ?? span.matchedFontFamily,
+        rawFontFamily: lineRawFontFamily,
+        matchedFontFamily: lineMatchedFontFamily,
         color: lineColor,
         fontWeight: lineFontWeight,
         fontStyle: lineFontStyle,
+        underline: lineUnderline,
+        strikethrough: lineStrikethrough,
+        backgroundColor: lineBackgroundColor,
         hasBulletPrefix: origLine?.hasBulletPrefix ?? (lineIdx === 0 ? span.hasBulletPrefix : false),
         bulletWord: origLine?.bulletWord ?? (lineIdx === 0 ? span.bulletWord : undefined),
       });
@@ -1133,6 +1192,20 @@
       heightPts = dims.heightPts;
     } catch (err) {
       console.error(`Failed to get dimensions for page ${pageIndex}:`, err);
+    }
+  });
+
+  $effect(() => {
+    store.formFieldVersion;
+    if (actions.service?.document) {
+      const cached = actions.service.document.getCachedPageSpans(pageIndex);
+      if (cached && cached.formFields) {
+        editableFormFieldSpans = [...cached.formFields];
+      } else if (actions.service.document.hasCachedAcroFormSpans?.()) {
+        editableFormFieldSpans = sortByAreaDescending([
+          ...actions.service.document.extractFormFieldSpans(pageIndex),
+        ]);
+      }
     }
   });
 
@@ -1182,7 +1255,7 @@
         editableSpans = cached.textSpans;
         editableImageSpans = cached.images;
         editableShapeSpans = cached.shapes;
-        editableFormFieldSpans = cached.formFields;
+        editableFormFieldSpans = [...cached.formFields];
         if (cached.pageCharacters) {
           pageCharacters = cached.pageCharacters;
         } else if (isTextAwareAnnotation) {
@@ -1197,6 +1270,21 @@
             editableSpans = sortByAreaDescending([...editableSpans, ...ocrData.textSpans]);
             pageCharacters = [...pageCharacters, ...ocrData.characters];
           }
+        }
+        const hasAcroCached = typeof actions.service.document?.hasCachedAcroFormSpans === 'function'
+          ? actions.service.document.hasCachedAcroFormSpans()
+          : true;
+        if (!hasAcroCached) {
+          actions.service.document.initAcroFormFieldSpans().then((map) => {
+            const enriched = map.get(pageIndex);
+            if (enriched && enriched.length > 0) {
+              editableFormFieldSpans = sortByAreaDescending([...enriched]);
+              const currentCached = actions.service.document?.getCachedPageSpans(pageIndex);
+              if (currentCached) {
+                currentCached.formFields = editableFormFieldSpans;
+              }
+            }
+          }).catch(() => {});
         }
         cachedVersion = currentVer;
         cachedPageVersion = currentPgVer;
@@ -1227,12 +1315,14 @@
       if (store.selectedSpan?.type === 'text' && store.selectedSpan.pageIndex === pageIndex) {
         const sel = store.selectedSpan as EditableTextSpan;
         const matching = editableSpans.find(
-          (s) => s.id === sel.id || (Math.abs(s.left - sel.left) < 5 && Math.abs(s.top - sel.top) < 5)
+          (s) => s.id === sel.id || (Math.abs(s.left - sel.left) < 5 && Math.abs(s.top - sel.top) < 5) || (Math.abs(s.top - sel.top) < 5 && s.text.trim() === sel.text.trim())
         );
         if (matching) {
           if (sel.backgroundColor !== undefined) matching.backgroundColor = sel.backgroundColor;
           if (sel.underline !== undefined) matching.underline = sel.underline;
           if (sel.strikethrough !== undefined) matching.strikethrough = sel.strikethrough;
+          if (sel.textAlign !== undefined) matching.textAlign = sel.textAlign;
+          if (sel.originalLeft !== undefined) matching.originalLeft = sel.originalLeft;
           if (sel.lines !== undefined) matching.lines = sel.lines;
         }
       }
@@ -1256,7 +1346,7 @@
       actions.service.document.initAcroFormFieldSpans().then((map) => {
         const enriched = map.get(pageIndex);
         if (enriched && enriched.length > 0) {
-          editableFormFieldSpans = sortByAreaDescending(enriched);
+          editableFormFieldSpans = sortByAreaDescending([...enriched]);
           const currentCached = actions.service.document?.getCachedPageSpans(pageIndex);
           if (currentCached) {
             currentCached.formFields = editableFormFieldSpans;
@@ -1268,18 +1358,37 @@
     }
   }
 
+  let deferredSpanExtractRafId: number | null = null;
+
   function renderPageContent(): void {
     if (!canvasContainerEl) return;
     try {
+      if (deferredSpanExtractRafId !== null && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(deferredSpanExtractRafId);
+        deferredSpanExtractRafId = null;
+      }
       const existingCanvas = canvasContainerEl.querySelector('canvas') as HTMLCanvasElement | null;
       const renderResult = actions.service.document.getPage(pageIndex).render(renderScale, {
         targetCanvas: existingCanvas ?? undefined,
+        transparentBackground: true,
       });
       if (!existingCanvas) {
         releaseCanvasContainer(canvasContainerEl);
         canvasContainerEl.appendChild(renderResult.canvas);
       }
-      extractOverlaySpansIfNeeded();
+      const hasCachedSpans = Boolean(actions.service.document?.getCachedPageSpans(pageIndex));
+      if (!hasCachedSpans && cachedPageVersion !== -1 && typeof requestAnimationFrame === 'function') {
+        editableSpans = [];
+        editableImageSpans = [];
+        editableShapeSpans = [];
+        pageCharacters = [];
+        deferredSpanExtractRafId = requestAnimationFrame(() => {
+          deferredSpanExtractRafId = null;
+          extractOverlaySpansIfNeeded();
+        });
+      } else {
+        extractOverlaySpansIfNeeded();
+      }
     } catch (err) {
       console.error(`Failed to render page ${pageIndex}:`, err);
     }
@@ -1292,7 +1401,7 @@
     
     if (canvasContainerEl && isVisible) {
       renderPageContent();
-    } else if (canvasContainerEl && !isVisible) {
+    } else if (canvasContainerEl && !isVisible && !store.isZooming) {
       const currentIdx = untrack(() => store.currentPageIndex);
       if (Math.abs(pageIndex - currentIdx) > 1) {
         releaseCanvasContainer(canvasContainerEl);
@@ -1319,9 +1428,15 @@
 
   // getCssFontFamily is now imported from font-loader.ts
 
-  // Page transform helpers
+  // Page transform and optimistic actions helpers
 
   const pageTransform = $derived(store.getPageTransform(pageIndex));
+  const effectiveRotation = $derived(store.getEffectivePageRotation(pageIndex));
+  const isOptimisticallyDeleted = $derived(store.isPageOptimisticallyDeleted(pageIndex));
+  const effectivePageTransform = $derived({
+    ...pageTransform,
+    rotation: effectiveRotation,
+  });
 
   /**
    * Convert pointer screen coordinates to page-point coordinates,
@@ -1329,7 +1444,7 @@
    */
   function pointerToPageCoords(e: PointerEvent): { x: number; y: number } {
     if (!containerWrapperEl) return { x: 0, y: 0 };
-    return screenToPageCoords(e.clientX, e.clientY, containerWrapperEl, visualScale, pageTransform);
+    return screenToPageCoords(e.clientX, e.clientY, containerWrapperEl, visualScale, effectivePageTransform);
   }
 
   // Page resize and rotate via SelectionOverlay handles
@@ -1452,10 +1567,7 @@
       store.updatePageTransform(pageIndex, { rotation: 0 });
 
       if (degreesDelta === 90 || degreesDelta === 180 || degreesDelta === 270) {
-        actions.executeCommand(
-          new RotatePageCommand('Rotate Page', pageIndex, degreesDelta)
-        );
-        actions.refreshDocument();
+        void actions.rotatePage(pageIndex, degreesDelta);
       } else if (originRotation !== 0) {
         store.updatePageTransform(pageIndex, { rotation: originRotation });
       }
@@ -1467,7 +1579,130 @@
     activeDragCleanup = onUp;
   }
 
+  /**
+   * Handles pointerdown on the page background to initiate marquee selection.
+   * Activated when the select tool is in standard select mode.
+   */
+  function handlePagePointerDown(e: PointerEvent): void {
+    if (e.button !== 0) return;
+    if (store.isReadOnly || !store.canSelectElements || store.isCropping) return;
+    if (store.activeTool !== 'select' || store.selectMode !== 'select') return;
+    if (featureFlags && !featureFlags.isEnabled('select-tool.marquee')) return;
+
+    const target = e.target as HTMLElement | null;
+    if (
+      target?.closest('.canvas-element-container') ||
+      target?.closest('.selection-overlay-container') ||
+      target?.closest('.inline-editor-input') ||
+      target?.closest('[contenteditable="true"]') ||
+      target?.closest('[data-span-id]') ||
+      target?.closest('.pdf-form-layer') ||
+      target?.closest('.pdf-form-layer-container') ||
+      target?.closest('.pdf-form-field-wrapper') ||
+      target?.closest('[data-pdf-form-layer="true"]')
+    ) {
+      return;
+    }
+
+    const startCoords = pointerToPageCoords(e);
+    const startClientX = e.clientX;
+    const startClientY = e.clientY;
+    const isAdditive = Boolean(
+      (e.ctrlKey || e.metaKey || e.shiftKey) &&
+      (!featureFlags || featureFlags.isEnabled('select-tool.multiselect'))
+    );
+    const initialElementIds = isAdditive ? [...canvasStore.selectedElementIds] : [];
+    const initialSpans = isAdditive ? [...store.selectedSpans] : [];
+
+    let marqueeStarted = false;
+
+    const onPointerMove = (me: PointerEvent) => {
+      const dist = Math.hypot(me.clientX - startClientX, me.clientY - startClientY);
+      if (!marqueeStarted) {
+        if (dist < 4) return;
+        marqueeStarted = true;
+        isMarqueeActive = true;
+        marqueeStart = startCoords;
+        marqueeAdditive = isAdditive;
+        if (!isAdditive) {
+          canvasStore.selectElement(null);
+          actions.clearSelection(true);
+        }
+      }
+
+      if (!containerWrapperEl) return;
+      const currentCoords = screenToPageCoords(me.clientX, me.clientY, containerWrapperEl, visualScale, effectivePageTransform);
+      marqueeCurrent = currentCoords;
+
+      const rect = {
+        x: Math.min(startCoords.x, currentCoords.x),
+        y: Math.min(startCoords.y, currentCoords.y),
+        width: Math.abs(currentCoords.x - startCoords.x),
+        height: Math.abs(currentCoords.y - startCoords.y),
+      };
+
+      const pageCanvasElements = canvasStore.getElementsByPage(pageIndex);
+      const hitElementIds = pageCanvasElements
+        .filter((el) => doRectanglesIntersect(
+          { left: rect.x, top: rect.y, width: rect.width, height: rect.height },
+          { left: el.x, top: el.y, width: el.width, height: el.height }
+        ))
+        .map((el) => el.id);
+
+      const hitSpans = allSpans.filter((span) =>
+        !store.hiddenSpanIds.has(span.id) &&
+        doRectanglesIntersect(
+          { left: rect.x, top: rect.y, width: rect.width, height: rect.height },
+          { left: span.left, top: span.top, width: span.width, height: span.height }
+        )
+      );
+
+      if (isAdditive) {
+        const combinedElementIds = Array.from(new Set([...initialElementIds, ...hitElementIds]));
+        canvasStore.selectedElementIds = combinedElementIds;
+        const initialSpanIds = new Set(initialSpans.map((s) => s.id));
+        const newSpans = hitSpans.filter((s) => !initialSpanIds.has(s.id));
+        store.selectedSpans = [...initialSpans, ...newSpans];
+      } else {
+        canvasStore.selectedElementIds = hitElementIds;
+        store.selectedSpans = hitSpans;
+      }
+    };
+
+    const onPointerUp = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      activeDragCleanup = null;
+
+      if (marqueeStarted) {
+        isMarqueeActive = false;
+        marqueeStart = null;
+        marqueeCurrent = null;
+        justFinishedMarquee = true;
+        setTimeout(() => {
+          justFinishedMarquee = false;
+        }, 50);
+      }
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+    activeDragCleanup = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      isMarqueeActive = false;
+      marqueeStart = null;
+      marqueeCurrent = null;
+      activeDragCleanup = null;
+    };
+  }
+
   function handleContainerClick(e: MouseEvent): void {
+    if (justFinishedMarquee) return;
+    if (canvasActions.consumeDragEnd()) return;
     if (store.isCropping) return;
     const target = e.target as HTMLElement | null;
     if (
@@ -1476,7 +1711,11 @@
       target?.closest('.inline-editor-input') ||
       target?.closest('[contenteditable="true"]') ||
       target?.closest('.pdf-text-layer') ||
-      target?.closest('[data-text-layer="true"]')
+      target?.closest('[data-text-layer="true"]') ||
+      target?.closest('.pdf-form-layer') ||
+      target?.closest('.pdf-form-layer-container') ||
+      target?.closest('.pdf-form-field-wrapper') ||
+      target?.closest('[data-pdf-form-layer="true"]')
     ) {
       return;
     }
@@ -1499,7 +1738,7 @@
       e.preventDefault();
       if (isSubmittingInlineEdit) return;
       isSubmittingInlineEdit = true;
-      const extracted = span ? extractStyledLinesFromEditor(target, visualScale, span) : undefined;
+      const extracted = span ? extractStyledLinesFromEditor(target, renderScale, span) : undefined;
       actions.submitInlineEdit(extracted);
       setTimeout(() => { isSubmittingInlineEdit = false; }, 100);
     } else if (action === 'lineBreak') {
@@ -1524,9 +1763,13 @@
           sel.addRange(range);
         }
       }
-      const extracted = span ? extractStyledLinesFromEditor(target, visualScale, span) : undefined;
+      isInternalInlineTyping = true;
+      const extracted = span ? extractStyledLinesFromEditor(target, renderScale, span) : undefined;
       actions.updateInlineText(extracted?.text || '', extracted?.lines);
       handleInlineSelectionUpdate(target);
+      queueMicrotask(() => {
+        isInternalInlineTyping = false;
+      });
     } else if (action === 'cancel') {
       e.preventDefault();
       actions.cancelInlineEdit();
@@ -1547,9 +1790,79 @@
 
   let eraserLastErased = $state<LastErasedState | null>(null);
   let eraserCanvasCommands: Command[] = [];
+  let eraserPendingPromises: Promise<void>[] = [];
   let eraserHadPdfMutations = false;
   let eraserPrevBuffer: ArrayBuffer | undefined = undefined;
   let eraserPrevElements: CanvasElement[] | undefined = undefined;
+  let activeDrawingTool = $state<string | null>(null);
+
+  function flushEraserStrokeCommit(): void {
+    const pending = [...eraserPendingPromises];
+    const cmds = [...eraserCanvasCommands];
+    const hadPdf = eraserHadPdfMutations;
+    const prevBuf = eraserPrevBuffer;
+    const prevEls = eraserPrevElements;
+
+    eraserLastErased = null;
+    eraserCanvasCommands = [];
+    eraserPendingPromises = [];
+    eraserHadPdfMutations = false;
+    eraserPrevBuffer = undefined;
+    eraserPrevElements = undefined;
+
+    if (pending.length > 0) {
+      void Promise.all(pending).then(() => {
+        actions.commitEraserStroke(pageIndex, cmds, hadPdf, prevBuf, prevEls);
+      });
+    } else {
+      actions.commitEraserStroke(pageIndex, cmds, hadPdf, prevBuf, prevEls);
+    }
+  }
+
+  function finalizeInterruptedDrawingGesture(): void {
+    if (!isDrawing) return;
+    const tool = activeDrawingTool || store.activeTool;
+
+    if (tool === 'eraser') {
+      isDrawing = false;
+      activeDrawingTool = null;
+      flushEraserStrokeCommit();
+      return;
+    }
+
+    if ((tool === 'highlight' || tool === 'pen') && currentPathId) {
+      const element = canvasStore.elements.find((el) => el.id === currentPathId) as PathElement | undefined;
+      if (element && element.kind === 'path' && element.points.length <= 1 && element.width === 0 && element.height === 0) {
+        canvasStore.removeElement(currentPathId);
+      } else if (element && element.kind === 'path') {
+        actions.pushCommand(
+          new AddElementCommand(tool === 'highlight' ? 'Draw Highlight' : 'Draw Annotation', element, false)
+        );
+      }
+    }
+
+    isDrawing = false;
+    activeDrawingTool = null;
+    hasDragged = false;
+    currentPathId = null;
+    isTextHighlightMode = false;
+    isAreaRedactMode = false;
+    startCharIndex = null;
+    currentCharIndex = null;
+    previewHighlightRects = [];
+  }
+
+  $effect(() => {
+    const currentTool = store.activeTool;
+    const currentViewMode = store.viewMode;
+    void currentViewMode;
+    if (isDrawing && activeDrawingTool && currentTool !== activeDrawingTool) {
+      finalizeInterruptedDrawingGesture();
+    }
+    if (isMarqueeActive && currentTool !== 'select' && activeDragCleanup) {
+      activeDragCleanup();
+    }
+  });
 
   function performEraseAt(x: number, y: number, now: number): void {
     let nativeAnnots: AnnotationItem[] = [];
@@ -1585,11 +1898,12 @@
 
     while (toErase) {
       const candidateToErase = toErase;
-      void actions.eraseCandidate(candidateToErase).then((cmd) => {
+      const erasePromise = actions.eraseCandidate(candidateToErase).then((cmd) => {
         if (cmd) {
           eraserCanvasCommands.push(cmd);
         }
       });
+      eraserPendingPromises.push(erasePromise);
       if (candidateToErase.source !== 'canvas') {
         eraserHadPdfMutations = true;
       }
@@ -1636,16 +1950,22 @@
 
     if (store.activeTool === 'eraser') {
       isDrawing = true;
+      activeDrawingTool = 'eraser';
       eraserLastErased = null;
       eraserCanvasCommands = [];
+      eraserPendingPromises = [];
       eraserHadPdfMutations = false;
       try {
         const fileId = store.activeWorkspaceFileId;
-        const activeBuffer = fileId ? getFileBuffer(fileId) : undefined;
+        const hasUnbaked = Boolean(actions.service?.document?.hasUnbakedModifications?.());
+        const activeBuffer = !hasUnbaked && fileId ? getFileBuffer(fileId) : undefined;
         let fallbackBuffer: ArrayBuffer | undefined = undefined;
         if (!activeBuffer && actions.service?.document) {
           const raw = actions.service.document.save();
           fallbackBuffer = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
+          if (fileId) {
+            setFileBuffer(fileId, fallbackBuffer);
+          }
         }
         eraserPrevBuffer = activeBuffer ?? fallbackBuffer;
       } catch {
@@ -1667,9 +1987,11 @@
       });
       canvasStore.addElement(newEl);
       actions.pushCommand(new AddElementCommand('Add Text', newEl));
-      canvasStore.selectElement(newEl.id);
-      canvasStore.editingElementId = newEl.id;
-      actions.setTool('select');
+      if (store.canSelectElements !== false) {
+        canvasStore.selectElement(newEl.id);
+        canvasStore.editingElementId = newEl.id;
+        actions.setTool('select');
+      }
       return;
     }
 
@@ -1679,12 +2001,15 @@
         text: '',
         color: store.annotateColor || '#fef08a',
       });
-      actions.setTool('select');
+      if (store.canSelectElements !== false) {
+        actions.setTool('select');
+      }
       return;
     }
 
     hasDragged = false;
     isDrawing = true;
+    activeDrawingTool = store.activeTool;
 
     if (store.activeTool === 'redact') {
       const hitChar = findUnifiedCharacterAt(unifiedCharacters, x, y, 10, 8);
@@ -1863,19 +2188,9 @@
   function handlePointerUpDrawing(e: PointerEvent): void {
     if (isDrawing) {
       if (store.activeTool === 'eraser') {
-        actions.commitEraserStroke(
-          pageIndex,
-          eraserCanvasCommands,
-          eraserHadPdfMutations,
-          eraserPrevBuffer,
-          eraserPrevElements
-        );
         isDrawing = false;
-        eraserLastErased = null;
-        eraserCanvasCommands = [];
-        eraserHadPdfMutations = false;
-        eraserPrevBuffer = undefined;
-        eraserPrevElements = undefined;
+        activeDrawingTool = null;
+        flushEraserStrokeCommit();
         try {
           (e.target as HTMLElement).releasePointerCapture(e.pointerId);
         } catch (err) {}
@@ -1979,6 +2294,7 @@
       }
 
       isDrawing = false;
+      activeDrawingTool = null;
       hasDragged = false;
       currentPathId = null;
       isTextHighlightMode = false;
@@ -1993,8 +2309,14 @@
   }
 
   function handleSpanPointerDown(e: PointerEvent, span: EditableSpan) {
+    if (e.button !== 0) return;
     if (store.isReadOnly || !store.canSelectElements) return;
-    if (store.selectedSpan?.id === span.id) {
+    const isSpanSelected = store.selectedSpan?.id === span.id || store.isSpanSelected(span.id);
+    const canDragImmediately = span.type === 'image' || span.type === 'shape';
+    if (store.selectedSpan?.id === span.id || canDragImmediately) {
+      // note: primary selected span and immediate-drag spans are covered by isSpanSelected || canDragImmediately
+    }
+    if (isSpanSelected || canDragImmediately) {
         if (store.activeTool === 'text' && span.type === 'text') return;
 
         e.stopPropagation();
@@ -2004,26 +2326,56 @@
         const startX = e.clientX;
         const startY = e.clientY;
         const pointerId = e.pointerId;
+        let latestX = startX;
+        let latestY = startY;
+        let pointerReleased = false;
+        let isPromoting = false;
 
         const moveHandler = async (me: PointerEvent) => {
             if (me.pointerId !== pointerId) return;
+            latestX = me.clientX;
+            latestY = me.clientY;
+            if (isPromoting) return;
             const dx = Math.abs(me.clientX - startX);
             const dy = Math.abs(me.clientY - startY);
             if (dx > 8 || dy > 8) {
-                cleanup();
-                if (!store.canMoveElements) return;
+                isPromoting = true;
+                if (!store.canMoveElements) {
+                    cleanup();
+                    return;
+                }
                 if (span.type === 'text' || span.type === 'image' || span.type === 'shape' || span.type === 'form-field') {
-                    const newId = await actions.extractObjectToCanvas(span.type, span, canvasStore);
+                    const multiTransformEnabled =
+                        !featureFlags ||
+                        (featureFlags.isEnabled('select-tool.multiselect') &&
+                         featureFlags.isEnabled('select-tool.multiselect.transform'));
+                    const newId = isSpanSelected && multiTransformEnabled
+                        ? (await actions.extractSelectedSpansToCanvas(span, canvasStore)).primaryElementId
+                        : await actions.extractObjectToCanvas(span.type, span, canvasStore);
+                    cleanup();
                     if (newId) {
                         // After extraction the element lives in CanvasElementLayer.
                         // Resolve that layer for coordinate consistency with updateDrag.
                         const canvasLayer = containerWrapperEl?.querySelector('[data-canvas-layer]') as HTMLElement | null;
-                        canvasActions.startDrag(newId, me.clientX, me.clientY, canvasLayer ?? pageEl, visualScale, pageTransform);
+                        const targetPageEl = canvasLayer ?? pageEl;
+                        canvasActions.startDrag(newId, startX, startY, targetPageEl, visualScale, effectivePageTransform);
+                        canvasActions.updateDrag(latestX, latestY, targetPageEl, visualScale, effectivePageTransform);
+                        if (pointerReleased) {
+                            canvasActions.endDrag();
+                        }
                     }
+                } else {
+                    cleanup();
                 }
             }
         };
-        const upHandler = () => cleanup();
+        const upHandler = (ue: PointerEvent) => {
+            if (ue.pointerId !== pointerId) return;
+            pointerReleased = true;
+            if (!isPromoting) {
+                cleanup();
+            }
+        };
         
         const cleanup = () => {
             window.removeEventListener('pointermove', moveHandler);
@@ -2097,6 +2449,13 @@
 
   const isPageCropping = $derived(store.activeCrop !== null && store.activeCrop.pageIndex === pageIndex);
 
+  const containerStyle = $derived.by(() => {
+    let s = `transform: rotate(${effectiveRotation}deg) scale(${pageTransform.scaleX}, ${pageTransform.scaleY}); transform-origin: center;`;
+    if (isOptimisticallyDeleted) {
+      s += ' opacity: 0.3; pointer-events: none; transition: opacity 200ms cubic-bezier(0.16, 1, 0.3, 1), transform 200ms cubic-bezier(0.16, 1, 0.3, 1);';
+    }
+    return s;
+  });
 
 </script>
 
@@ -2105,7 +2464,8 @@
   data-page-element="true"
   data-page-index={pageIndex}
   class="relative inline-block bg-transparent outline-none rounded-none p-0 my-0"
-  style="transform: rotate({pageTransform.rotation}deg) scale({pageTransform.scaleX}, {pageTransform.scaleY}); transform-origin: center;"
+  style={containerStyle}
+  onpointerdown={handlePagePointerDown}
   onclick={handleContainerClick}
   onkeydown={(e) => {
     if (e.target !== e.currentTarget) return;
@@ -2122,21 +2482,22 @@
   aria-label="PDF Page {pageIndex + 1}"
 >
   <div
-    class="relative bg-white shadow-md border border-border/80 overflow-hidden rounded-none"
-    style="width: {Math.round(widthPts * visualScale)}px; height: {Math.round(heightPts * visualScale)}px; contain: layout style paint;"
+    class="relative bg-white border border-border/80 overflow-hidden rounded-none"
+    style="width: {Math.round(widthPts * visualScale)}px; height: {Math.round(heightPts * visualScale)}px;"
   >
     <div 
       bind:this={canvasContainerEl} 
-      style="transform-origin: top left; transform: scale({visualScale / renderScale});"
+      class="relative z-10 pointer-events-none"
+      style="transform-origin: top left; transform: scale({visualScale / renderScale}); will-change: transform;"
     ></div>
 
     {#each pageAgentHighlights as hl (hl.id)}
       <div
-        class="pointer-events-none absolute inset-0 z-40 rounded border-2 border-purple-500 bg-purple-500/10 transition-opacity duration-1000 animate-pulse"
+        class="pointer-events-none absolute inset-0 z-40 rounded border border-selection bg-selection/10 transition-opacity duration-1000 animate-pulse"
         aria-hidden="true"
       >
-        <div class="absolute top-2 right-2 flex items-center gap-1.5 rounded bg-purple-600 px-2 py-0.5 text-[11px] font-medium text-white shadow-md">
-          <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+        <div class="absolute top-2 right-2 flex items-center gap-1.5 rounded bg-selection px-2 py-0.5 text-[11px] font-medium text-white">
+          <span class="h-1.5 w-1.5 rounded-full bg-white animate-ping"></span>
           AI Edit: {hl.description}
         </div>
       </div>
