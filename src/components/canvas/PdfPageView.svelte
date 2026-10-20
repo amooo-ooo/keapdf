@@ -4,7 +4,7 @@
   import { CheckSquare, Circle, ChevronDown, PenTool, ScanText, Loader2 } from 'lucide-svelte';
   import { getUnifiedPageCharacters, findUnifiedCharacterAt, findClosestUnifiedCharacter, calculateUnifiedHighlightRects } from '../../services/pdf/unified-text-provider';
   import { ocrResultToSpans } from '../../services/ocr/ocr-span-converter';
-  import { useEditorStore, getFileBuffer } from '../../stores/editor.svelte';
+  import { useEditorStore, getFileBuffer, setFileBuffer } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useSelection } from '../../stores/selection.svelte';
   import { useCanvasStore } from '../../stores/canvas.svelte';
@@ -14,10 +14,19 @@
   import { collectEraserCandidates, resolveUpperZCandidate, type LastErasedState } from '../../services/eraser/eraser-engine';
   import type { CanvasElement } from '../../stores/canvas-types';
   import { extractBaseFontFamily } from '../../services/pdf/font-charset-index';
+  import { isBoldFontName, isItalicFontName } from '../../core/pdfium-helpers';
   import { getCssFontFamily } from '../../services/font-loader';
   import { sanitizePdfText, parseColor } from '../../services/pdf/utils';
   import { computeLineLayoutStyle, computeSpanFallbackLayoutStyle } from '../../services/pdf/text-layer-layout';
+  import {
+    formatScaledCssLetterSpacing,
+    formatScaledCssWordSpacing,
+    computeHalfLeadingTopOffsetPts,
+    computeInterLineExtraGapPts,
+    parseLetterSpacingToPoints,
+  } from '../../core/typography-metrics';
   import CropOverlay from './CropOverlay.svelte';
+  import DigitalSignaturePlacementOverlay from './DigitalSignaturePlacementOverlay.svelte';
   import {
     isInspectorControlTarget,
     setActiveEditorSelection,
@@ -29,15 +38,17 @@
     findBestMatchingOrigLine,
     resolveInlineKeyAction,
   } from '../../utils/text-range-utils';
+  import { decomposeSpansIntoWordSpans } from '../../utils/selection-utils';
   import CanvasElementLayer from './CanvasElementLayer.svelte';
   import SelectionOverlay from './SelectionOverlay.svelte';
+  import PdfFormLayer from './PdfFormLayer.svelte';
   import type { HandlePosition, PathElement } from '../../stores/canvas-types';
   import { SetPageTransformCommand, RotatePageCommand, AddElementCommand, CompoundCommand } from '../../commands';
-  import { screenToPageCoords } from '../../utils/geometry';
+  import { screenToPageCoords, doRectanglesIntersect } from '../../utils/geometry';
   import { useElementRegistry } from '../../core/element-registry';
   import { useToolRegistry } from '../../core/tool-registry';
   import { useWebMcpStore } from '../../stores/webmcp.svelte';
-  import { useFeatureFlagStore } from '../../core/feature-flags';
+  import { useFeatureFlagStore, tryUseFeatureFlagStore } from '../../core/feature-flags';
 
   void [RotatePageCommand, CheckSquare, Circle, ChevronDown, PenTool];
 
@@ -70,7 +81,16 @@
       return null;
     }
   }
-  const featureFlags = resolveFeatureFlags();
+  const featureFlags = tryUseFeatureFlagStore() ?? resolveFeatureFlags();
+
+  // Evaluates whether page-level optical character recognition capabilities are active
+  const canRecognizePage = $derived(
+    Boolean(
+      featureFlags?.isEnabled('ocr') &&
+      featureFlags?.isEnabled('ocr.recognize') &&
+      featureFlags?.isEnabled('page-actions.ocr')
+    )
+  );
 
   const pageAgentHighlights = $derived(
     webMcpStore?.transientHighlights.filter((h) => h.pageIndex === pageIndex) || []
@@ -83,17 +103,108 @@
   let editableShapeSpans = $state.raw<EditableShapeSpan[]>([]);
   let editableFormFieldSpans = $state.raw<EditableFormFieldSpan[]>([]);
   let pageCharacters = $state.raw<PageCharacter[]>([]);
+  let isMarqueeActive = $state(false);
+  let marqueeStart = $state<{ x: number; y: number } | null>(null);
+  let marqueeCurrent = $state<{ x: number; y: number } | null>(null);
+  let marqueeAdditive = $state(false);
+  let justFinishedMarquee = $state(false);
+
+  const marqueeRect = $derived.by(() => {
+    if (!marqueeStart || !marqueeCurrent) return null;
+    return {
+      x: Math.min(marqueeStart.x, marqueeCurrent.x),
+      y: Math.min(marqueeStart.y, marqueeCurrent.y),
+      width: Math.abs(marqueeCurrent.x - marqueeStart.x),
+      height: Math.abs(marqueeCurrent.y - marqueeStart.y),
+    };
+  });
 
   function sortByAreaDescending<T extends { width: number; height: number }>(items: T[]): T[] {
     return items.slice().sort((a, b) => (b.width * b.height) - (a.width * a.height));
   }
 
+  const effectiveTextSpans = $derived.by(() => {
+    if (store.selectMode === 'precise') {
+      return decomposeSpansIntoWordSpans(editableSpans);
+    }
+    return editableSpans;
+  });
+
   const allSpans = $derived([
-    ...editableImageSpans,
-    ...editableShapeSpans,
-    ...editableSpans,
+    ...sortByAreaDescending<EditableSpan>([...editableImageSpans, ...editableShapeSpans]),
+    ...effectiveTextSpans,
     ...editableFormFieldSpans,
   ]);
+
+  function doesShapeOverlapTextLine(shape: EditableShapeSpan): boolean {
+    const sRight = shape.left + shape.width;
+    const sBottom = shape.top + shape.height;
+    for (const tSpan of editableSpans) {
+      if (
+        tSpan.left >= sRight ||
+        tSpan.left + tSpan.width <= shape.left ||
+        tSpan.top >= sBottom ||
+        tSpan.top + tSpan.height <= shape.top
+      ) {
+        continue;
+      }
+      if (tSpan.lines && tSpan.lines.length > 0) {
+        for (const line of tSpan.lines) {
+          if (line.left < sRight && line.right > shape.left && line.top < sBottom && line.bottom > shape.top) {
+            return true;
+          }
+        }
+      } else {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function getSpanZIndexClass(span: EditableSpan): string {
+    if (store.selectedSpan?.id === span.id || (store.isSpanSelected ? store.isSpanSelected(span.id) : false)) return 'z-20';
+    if (typeof span.zIndex === 'number') return `z-[${span.zIndex}]`;
+    if (span.type === 'form-field') return 'z-[17]';
+    if (store.activeTool === 'text' && span.type === 'text') return 'z-[16]';
+
+    const isAnnot = 'pdfAnnotIndex' in span && typeof span.pdfAnnotIndex === 'number' && span.pdfAnnotIndex >= 0;
+    const isHighlight =
+      (span.type === 'shape' && span.isHighlight) ||
+      ('annotSubtype' in span &&
+        (span.annotSubtype === 'Highlight' ||
+          span.annotSubtype === 'Underline' ||
+          span.annotSubtype === 'Squiggly' ||
+          span.annotSubtype === 'StrikeOut'));
+    const isRedaction = 'annotSubtype' in span && span.annotSubtype === 'Redact';
+
+    if (span.type === 'shape') {
+      const isLargeBackground =
+        widthPts > 0 && heightPts > 0 && (span.width * span.height) >= (widthPts * heightPts * 0.45);
+      if (isLargeBackground) {
+        return 'z-[1]';
+      }
+      if (isRedaction) {
+        return 'z-[16]';
+      }
+      if (isHighlight || doesShapeOverlapTextLine(span)) {
+        return 'z-[12]';
+      }
+      return 'z-[16]';
+    }
+
+    if (span.type === 'image') {
+      const isFullPageScan =
+        widthPts > 0 && heightPts > 0 && (span.width * span.height) >= (widthPts * heightPts * 0.5);
+      return isFullPageScan ? 'z-[1]' : 'z-[16]';
+    }
+
+    if (isAnnot) {
+      return 'z-[16]';
+    }
+
+    if (span.type === 'text') return 'z-[15]';
+    return 'z-[1]';
+  }
 
   function getInitialDimensions(): { widthPts: number; heightPts: number } {
     try {
@@ -109,7 +220,8 @@
   const initialDims = getInitialDimensions();
   let widthPts = $state(initialDims.widthPts);
   let heightPts = $state(initialDims.heightPts);
-  let isVisible = $state(false);
+  // svelte-ignore state_referenced_locally
+  let isVisible = $state(pageIndex === store.currentPageIndex);
 
   let cachedVersion = -1;
   let cachedPageVersion = -1;
@@ -134,18 +246,23 @@
 
   $effect(() => {
     const currentZoom = store.zoom;
-    clearTimeout(zoomTimeout);
-    zoomTimeout = setTimeout(() => {
+    if (!store.isZooming) {
+      clearTimeout(zoomTimeout);
       renderScale = currentZoom;
-    }, 150);
+    } else {
+      clearTimeout(zoomTimeout);
+      zoomTimeout = setTimeout(() => {
+        renderScale = currentZoom;
+      }, 150);
+    }
 
     return () => {
       clearTimeout(zoomTimeout);
     };
   });
 
-  const showTextLayer = $derived(store.isReadOnly && !store.showOrganizerView && isVisible);
-  const showOverlays = $derived(!store.isReadOnly && !store.showOrganizerView && (store.activeTool === 'select' || store.activeTool === 'text' || store.activeTool === 'highlight' || store.activeTool === 'pen' || store.activeTool === 'redact' || store.activeTool === 'note' || store.activeTool === 'eraser') && isVisible);
+  const showTextLayer = $derived((store.isReadOnly || store.selectMode === 'text') && !store.showOrganizerView && isVisible);
+  const showOverlays = $derived(!store.isReadOnly && store.selectMode !== 'text' && !store.showOrganizerView && (store.activeTool === 'select' || store.activeTool === 'text' || store.activeTool === 'highlight' || store.activeTool === 'pen' || store.activeTool === 'redact' || store.activeTool === 'note' || store.activeTool === 'eraser') && isVisible);
 
   const unifiedCharacters = $derived(
     (store.activeTool === 'highlight' || store.activeTool === 'redact' || store.activeTool === 'pen') && isVisible
@@ -167,14 +284,62 @@
       const line = lines[lineIdx];
       const lineDiv = document.createElement('div');
       lineDiv.className = 'inline-edit-line';
+      lineDiv.dataset.lineIdx = `${lineIdx}`;
       const lFontSize = line.fontSize || span.fontSize;
       lineDiv.dataset.fontSize = `${lFontSize}`;
       lineDiv.style.fontSize = `${lFontSize * renderScale}px`;
-      if (line.lineHeight) {
-        lineDiv.dataset.lineHeight = `${line.lineHeight}`;
-        lineDiv.style.lineHeight = `${(line.lineHeight * renderScale).toFixed(2)}px`;
+      lineDiv.style.textAlign = span.textAlign || 'left';
+      lineDiv.style.whiteSpace = 'pre';
+      const lFontFamily = line.fontFamily || span.fontFamily;
+      const lRawFontFamily = line.rawFontFamily || span.rawFontFamily;
+      const lMatchedFontFamily = line.matchedFontFamily || span.matchedFontFamily;
+      if (lFontFamily) lineDiv.dataset.fontFamily = lFontFamily;
+      if (lRawFontFamily) lineDiv.dataset.rawFontFamily = lRawFontFamily;
+      if (lMatchedFontFamily) lineDiv.dataset.matchedFontFamily = lMatchedFontFamily;
+      lineDiv.style.fontFamily = getCssFontFamily(lFontFamily || lRawFontFamily || lMatchedFontFamily, extractBaseFontFamily);
+      const isLineBold = line.fontWeight
+        ? line.fontWeight === 'bold'
+        : isBoldFontName(lRawFontFamily || lFontFamily);
+      const isLineItalic = line.fontStyle
+        ? line.fontStyle === 'italic'
+        : isItalicFontName(lRawFontFamily || lFontFamily);
+      lineDiv.dataset.fontWeight = isLineBold ? 'bold' : 'normal';
+      lineDiv.dataset.fontStyle = isLineItalic ? 'italic' : 'normal';
+      lineDiv.style.fontWeight = isLineBold ? 'bold' : 'normal';
+      lineDiv.style.fontStyle = isLineItalic ? 'italic' : 'normal';
+      const lCol = line.color || span.color;
+      if (lCol) {
+        const alpha = lCol.a !== undefined ? (lCol.a <= 1 ? lCol.a : lCol.a / 255) : 1;
+        lineDiv.style.color = `rgba(${lCol.r}, ${lCol.g}, ${lCol.b}, ${alpha})`;
+      }
+      const lineLh = line.lineHeight || span.lineHeight;
+      if (lineLh) {
+        lineDiv.dataset.lineHeight = `${lineLh}`;
+        lineDiv.style.lineHeight = `${(lineLh * renderScale).toFixed(2)}px`;
+        lineDiv.style.height = `${(lineLh * renderScale).toFixed(2)}px`;
       } else {
         lineDiv.style.lineHeight = '1.25';
+      }
+      if (lineIdx > 0) {
+        const extraGapPts = computeInterLineExtraGapPts(lines[lineIdx - 1], line, span.lineHeight);
+        if (Math.abs(extraGapPts) > 0.02) {
+          lineDiv.dataset.marginTop = `${extraGapPts}`;
+          lineDiv.style.marginTop = `${(extraGapPts * renderScale).toFixed(2)}px`;
+        }
+      }
+      const lineLs = line.letterSpacing || span.letterSpacing;
+      if (lineLs && lineLs !== 'normal') {
+        lineDiv.dataset.letterSpacing = lineLs;
+        lineDiv.style.letterSpacing = formatScaledCssLetterSpacing(lineLs, lFontSize, renderScale);
+      } else {
+        lineDiv.style.letterSpacing = 'normal';
+      }
+      const lineWs = line.wordSpacing ?? span.wordSpacing;
+      if (lineWs !== undefined && Math.abs(lineWs) >= 0.05) {
+        lineDiv.dataset.wordSpacing = `${lineWs}`;
+        lineDiv.style.wordSpacing = formatScaledCssWordSpacing(lineWs, renderScale);
+      } else {
+        lineDiv.style.wordSpacing = 'normal';
       }
 
       // Render bullet prefix as a non-editable decorator on the first line (or any line with a bullet prefix)
@@ -186,14 +351,15 @@
         bulletSpan.style.userSelect = 'none';
         bulletSpan.style.pointerEvents = 'none';
         bulletSpan.style.display = 'inline-block';
+        bulletSpan.style.lineHeight = '1';
         const bFs = line.bulletWord.fontSize || line.fontSize || span.fontSize;
         bulletSpan.dataset.fontSize = `${bFs}`;
         bulletSpan.style.fontSize = `${bFs * renderScale}px`;
-        bulletSpan.style.fontFamily = getCssFontFamily(line.bulletWord.rawFontFamily || line.bulletWord.matchedFontFamily || line.rawFontFamily || line.matchedFontFamily || span.rawFontFamily || span.matchedFontFamily || span.fontFamily, extractBaseFontFamily);
-        const isBold = (line.bulletWord.rawFontFamily || '').toLowerCase().includes('bold') || line.bulletWord.fontWeight === 'bold';
-        const isItalic = (line.bulletWord.rawFontFamily || '').toLowerCase().includes('italic') || line.bulletWord.fontStyle === 'italic';
-        if (isBold) bulletSpan.style.fontWeight = 'bold';
-        if (isItalic) bulletSpan.style.fontStyle = 'italic';
+        bulletSpan.style.fontFamily = getCssFontFamily(line.bulletWord.fontFamily || line.bulletWord.rawFontFamily || line.bulletWord.matchedFontFamily || line.fontFamily || line.rawFontFamily || line.matchedFontFamily || span.fontFamily || span.rawFontFamily || span.matchedFontFamily, extractBaseFontFamily);
+        const isBold = line.bulletWord.fontWeight ? line.bulletWord.fontWeight === 'bold' : isBoldFontName(line.bulletWord.rawFontFamily || line.bulletWord.fontFamily);
+        const isItalic = line.bulletWord.fontStyle ? line.bulletWord.fontStyle === 'italic' : isItalicFontName(line.bulletWord.rawFontFamily || line.bulletWord.fontFamily);
+        bulletSpan.style.fontWeight = isBold ? 'bold' : 'normal';
+        bulletSpan.style.fontStyle = isItalic ? 'italic' : 'normal';
         const bCol = line.bulletWord.color || line.color || span.color;
         if (bCol) {
           const alpha = bCol.a !== undefined ? (bCol.a <= 1 ? bCol.a : bCol.a / 255) : 1;
@@ -211,7 +377,7 @@
         // Wrapped line inside a bullet list item: indent to align with text after bullet
         lineDiv.dataset.paddingLeft = `${bulletIndent}`;
         lineDiv.style.paddingLeft = `${(bulletIndent * renderScale).toFixed(2)}px`;
-      } else {
+      } else if ((span.textAlign || 'left') === 'left') {
         const relativeIndent = Math.max(0, line.left - span.left);
         if (relativeIndent > 1.0) {
           lineDiv.dataset.paddingLeft = `${relativeIndent}`;
@@ -222,47 +388,94 @@
       if (line.words && line.words.length > 0) {
         for (let wIdx = 0; wIdx < line.words.length; wIdx++) {
           const word = line.words[wIdx];
+          const isWordUnderline = Boolean(word.underline ?? line.underline ?? span.underline);
+          const isWordStrike = Boolean(word.strikethrough ?? line.strikethrough ?? span.strikethrough);
+
           if (wIdx > 0) {
             const prev = line.words[wIdx - 1];
+            const prevUnderline = Boolean(prev.underline ?? line.underline ?? span.underline);
+            const prevStrike = Boolean(prev.strikethrough ?? line.strikethrough ?? span.strikethrough);
             const gap = word.left - prev.right;
-            if (word.hasPrecedingSpace || gap >= Math.min(prev.fontSize, word.fontSize) * 0.12 || gap >= 0.5) {
-              lineDiv.appendChild(document.createTextNode(' '));
+            const hasSpaceBetween =
+              word.hasPrecedingSpace !== undefined
+                ? Boolean(word.hasPrecedingSpace)
+                : gap >= Math.min(prev.fontSize, word.fontSize) * 0.18;
+            if (hasSpaceBetween) {
+              const sharedUnderline = prevUnderline && isWordUnderline;
+              const sharedStrike = prevStrike && isWordStrike;
+              if (sharedUnderline || sharedStrike) {
+                const spaceSpan = document.createElement('span');
+                spaceSpan.style.lineHeight = '1';
+                spaceSpan.style.textDecoration = resolveTextDecoration(sharedUnderline, sharedStrike);
+                spaceSpan.textContent = ' ';
+                lineDiv.appendChild(spaceSpan);
+              } else {
+                lineDiv.appendChild(document.createTextNode(' '));
+              }
             }
           }
           const wordSpan = document.createElement('span');
+          wordSpan.dataset.wordIdx = `${wIdx}`;
           const wFs = word.fontSize || line.fontSize || span.fontSize;
           wordSpan.dataset.fontSize = `${wFs}`;
+          const canonicalWordFont = word.fontFamily || line.fontFamily || span.fontFamily;
+          if (canonicalWordFont) {
+            wordSpan.dataset.fontFamily = canonicalWordFont;
+          }
+          const rawWordFont = word.rawFontFamily || line.rawFontFamily || span.rawFontFamily;
+          if (rawWordFont) {
+            wordSpan.dataset.rawFontFamily = rawWordFont;
+          }
+          const matchedWordFont = word.matchedFontFamily || line.matchedFontFamily || span.matchedFontFamily;
+          if (matchedWordFont) {
+            wordSpan.dataset.matchedFontFamily = matchedWordFont;
+          }
           if (word.hasPrecedingSpace) {
             wordSpan.dataset.hasPrecedingSpace = 'true';
           }
+          const wordLs = word.letterSpacing || line.letterSpacing || span.letterSpacing;
+          if (wordLs && wordLs !== 'normal') {
+            wordSpan.dataset.letterSpacing = wordLs;
+            wordSpan.style.letterSpacing = formatScaledCssLetterSpacing(wordLs, wFs, renderScale);
+          }
           wordSpan.style.fontSize = `${wFs * renderScale}px`;
-          wordSpan.style.fontFamily = getCssFontFamily(word.rawFontFamily || word.matchedFontFamily || line.rawFontFamily || line.matchedFontFamily || span.rawFontFamily || span.matchedFontFamily || span.fontFamily, extractBaseFontFamily);
-          const isBold = (word.rawFontFamily || line.rawFontFamily || '').toLowerCase().includes('bold') || word.fontWeight === 'bold';
-          const isItalic = (word.rawFontFamily || line.rawFontFamily || '').toLowerCase().includes('italic') || word.fontStyle === 'italic';
-          if (isBold) wordSpan.style.fontWeight = 'bold';
-          if (isItalic) wordSpan.style.fontStyle = 'italic';
+          wordSpan.style.lineHeight = '1';
+          wordSpan.style.fontFamily = getCssFontFamily(word.fontFamily || word.rawFontFamily || word.matchedFontFamily || line.fontFamily || line.rawFontFamily || line.matchedFontFamily || span.fontFamily || span.rawFontFamily || span.matchedFontFamily, extractBaseFontFamily);
+          const isBold = word.fontWeight ? word.fontWeight === 'bold' : isBoldFontName(word.rawFontFamily || word.fontFamily || line.rawFontFamily);
+          const isItalic = word.fontStyle ? word.fontStyle === 'italic' : isItalicFontName(word.rawFontFamily || word.fontFamily || line.rawFontFamily);
+          wordSpan.dataset.fontWeight = isBold ? 'bold' : 'normal';
+          wordSpan.dataset.fontStyle = isItalic ? 'italic' : 'normal';
+          wordSpan.style.fontWeight = isBold ? 'bold' : 'normal';
+          wordSpan.style.fontStyle = isItalic ? 'italic' : 'normal';
           if (word.color) {
             const col = word.color;
             const alpha = col.a !== undefined ? (col.a <= 1 ? col.a : col.a / 255) : 1;
             wordSpan.style.color = `rgba(${col.r}, ${col.g}, ${col.b}, ${alpha})`;
           }
-          if (word.underline || word.strikethrough) {
-            wordSpan.style.textDecoration = resolveTextDecoration(word.underline, word.strikethrough);
-          }
-          if (word.backgroundColor) {
-            wordSpan.style.backgroundColor = word.backgroundColor;
-          }
+          wordSpan.style.textDecoration = resolveTextDecoration(isWordUnderline, isWordStrike);
+          wordSpan.style.backgroundColor = word.backgroundColor || 'transparent';
           wordSpan.textContent = word.text;
           lineDiv.appendChild(wordSpan);
         }
       } else {
-        lineDiv.appendChild(document.createTextNode(line.text));
+        const isLineUnderline = Boolean(line.underline ?? span.underline);
+        const isLineStrike = Boolean(line.strikethrough ?? span.strikethrough);
+        if (isLineUnderline || isLineStrike) {
+          const textSpan = document.createElement('span');
+          textSpan.style.lineHeight = '1';
+          textSpan.style.textDecoration = resolveTextDecoration(isLineUnderline, isLineStrike);
+          textSpan.textContent = line.text;
+          lineDiv.appendChild(textSpan);
+        } else {
+          lineDiv.appendChild(document.createTextNode(line.text));
+        }
       }
       node.appendChild(lineDiv);
     }
   }
 
   let inlineEditorEl = $state<HTMLDivElement | null>(null);
+  let isInternalInlineTyping = false;
 
   function handleInlineSelectionUpdate(target: HTMLElement): void {
     if (!store.inlineEdit) return;
@@ -283,9 +496,13 @@
     const edit = store.inlineEdit;
     if (edit && edit.span.pageIndex === pageIndex && inlineEditorEl && !isSubmittingInlineEdit) {
       const styledLines = edit.styledLines;
+      const _spanLineHeight = edit.span.lineHeight;
+      const _spanLetterSpacing = edit.span.letterSpacing;
+      void _spanLineHeight;
+      void _spanLetterSpacing;
       const activeSel = getActiveEditorSelection();
       if (styledLines && styledLines.length > 0 && activeSel && activeSel.mode === 'pdf' && activeSel.targetId === edit.span.id) {
-        if (document.activeElement !== inlineEditorEl && !inlineEditorEl.contains(document.activeElement)) {
+        if (!isInternalInlineTyping) {
           populateInlineLines(inlineEditorEl, styledLines, edit.span);
           setSelectionCharOffsets(inlineEditorEl, activeSel.start, activeSel.end);
           inlineEditorEl.focus({ preventScroll: true });
@@ -297,20 +514,44 @@
 
   $effect(() => {
     const currentScale = renderScale;
+    const currentAlign = store.inlineEdit?.span.textAlign || 'left';
+    const currentSpanLh = store.inlineEdit?.span.lineHeight;
+    const currentSpanLs = store.inlineEdit?.span.letterSpacing;
+    const currentSpanWs = store.inlineEdit?.span.wordSpacing;
     if (inlineEditorEl && store.inlineEdit && store.inlineEdit.span.pageIndex === pageIndex) {
+      const spanFs = store.inlineEdit.span.fontSize;
+      inlineEditorEl.style.textAlign = currentAlign;
+      inlineEditorEl.style.lineHeight = currentSpanLh ? `${(currentSpanLh * currentScale).toFixed(2)}px` : '1.25';
+      inlineEditorEl.style.letterSpacing = formatScaledCssLetterSpacing(currentSpanLs, spanFs, currentScale);
+      inlineEditorEl.style.wordSpacing = formatScaledCssWordSpacing(currentSpanWs, currentScale);
       const lineEls = inlineEditorEl.querySelectorAll<HTMLElement>('.inline-edit-line');
-      lineEls.forEach((lEl) => {
+      const isBulletSpan = Boolean(store.inlineEdit.span.hasBulletPrefix && store.inlineEdit.span.bulletWord);
+      lineEls.forEach((lEl, lIdx) => {
+        lEl.style.textAlign = currentAlign;
         const lineFs = lEl.dataset.fontSize ? parseFloat(lEl.dataset.fontSize) : null;
         if (lineFs) {
           lEl.style.fontSize = `${lineFs * currentScale}px`;
         }
-        const lineH = lEl.dataset.lineHeight ? parseFloat(lEl.dataset.lineHeight) : null;
+        const lineH = lEl.dataset.lineHeight ? parseFloat(lEl.dataset.lineHeight) : currentSpanLh;
         if (lineH) {
           lEl.style.lineHeight = `${(lineH * currentScale).toFixed(2)}px`;
+          lEl.style.height = `${(lineH * currentScale).toFixed(2)}px`;
         }
+        const mTop = lEl.dataset.marginTop ? parseFloat(lEl.dataset.marginTop) : 0;
+        if (!isNaN(mTop) && Math.abs(mTop) > 0.02) {
+          lEl.style.marginTop = `${(mTop * currentScale).toFixed(2)}px`;
+        } else {
+          lEl.style.marginTop = '0px';
+        }
+        const lineLs = lEl.dataset.letterSpacing || currentSpanLs;
+        lEl.style.letterSpacing = formatScaledCssLetterSpacing(lineLs, lineFs || spanFs, currentScale);
+        const lineWs = lEl.dataset.wordSpacing ? parseFloat(lEl.dataset.wordSpacing) : currentSpanWs;
+        lEl.style.wordSpacing = formatScaledCssWordSpacing(lineWs, currentScale);
         const padLeft = lEl.dataset.paddingLeft ? parseFloat(lEl.dataset.paddingLeft) : null;
-        if (padLeft) {
+        if (padLeft && (currentAlign === 'left' || (isBulletSpan && lIdx > 0))) {
           lEl.style.paddingLeft = `${(padLeft * currentScale).toFixed(2)}px`;
+        } else {
+          lEl.style.paddingLeft = '0px';
         }
       });
 
@@ -319,6 +560,9 @@
         const fs = parseFloat(sEl.dataset.fontSize!);
         if (!isNaN(fs) && fs > 0) {
           sEl.style.fontSize = `${fs * currentScale}px`;
+        }
+        if (sEl.dataset.letterSpacing) {
+          sEl.style.letterSpacing = formatScaledCssLetterSpacing(sEl.dataset.letterSpacing, fs || spanFs, currentScale);
         }
         if (sEl.dataset.marginRight) {
           const mr = parseFloat(sEl.dataset.marginRight);
@@ -499,6 +743,9 @@
 
     const lines: TextLine[] = [];
     const textPieces: string[] = [];
+    let cumulativeTop = span.top;
+    let cumulativeBaselineY = span.baselineY;
+    let prevExtractedLineLh = span.lineHeight ?? span.fontSize * 1.25;
 
     rawLineNodeGroups.forEach((childNodes, lineIdx) => {
       let lineText = '';
@@ -514,10 +761,53 @@
       lineText = sanitizePdfText(lineText).replace(/[\r\n]+/g, ' ').trim();
       textPieces.push(lineText);
 
+      const parentLineEl =
+        childNodes.length > 0 &&
+        childNodes[0].parentElement instanceof HTMLElement &&
+        childNodes[0].parentElement !== node
+          ? childNodes[0].parentElement
+          : null;
+      const domLineIdx = parentLineEl?.dataset.lineIdx !== undefined
+        ? parseInt(parentLineEl.dataset.lineIdx, 10)
+        : NaN;
+
       const isSameLineCount = Boolean(span.lines && rawLineNodeGroups.length === span.lines.length);
       const origLine = isSameLineCount
         ? span.lines![lineIdx]
-        : (findBestMatchingOrigLine(lineText, span.lines, lineIdx) || span.lines?.[Math.min(lineIdx, (span.lines?.length || 1) - 1)]);
+        : ((!isNaN(domLineIdx) && span.lines?.[domLineIdx]) ||
+            findBestMatchingOrigLine(lineText, span.lines, lineIdx) ||
+            span.lines?.[Math.min(lineIdx, (span.lines?.length || 1) - 1)]);
+
+      const domLineLh = parentLineEl?.dataset.lineHeight ? parseFloat(parentLineEl.dataset.lineHeight) : undefined;
+      const domLineLs = parentLineEl?.dataset.letterSpacing || undefined;
+      const domLineWs = parentLineEl?.dataset.wordSpacing ? parseFloat(parentLineEl.dataset.wordSpacing) : undefined;
+      const domMarginTop = parentLineEl?.dataset.marginTop ? parseFloat(parentLineEl.dataset.marginTop) : 0;
+      const extraGapPts = !isNaN(domMarginTop) && Math.abs(domMarginTop) > 0.05 ? domMarginTop : 0;
+      const lH = (domLineLh && !isNaN(domLineLh) ? domLineLh : undefined) ?? origLine?.lineHeight ?? span.lineHeight ?? (span.fontSize * 1.25);
+
+      let lineTop: number;
+      let lineBaselineY: number;
+      if (isSameLineCount && origLine?.top !== undefined && origLine?.baselineY !== undefined) {
+        lineTop = origLine.top;
+        lineBaselineY = origLine.baselineY;
+      } else if (lineIdx === 0) {
+        lineTop = origLine?.top ?? span.top;
+        lineBaselineY = origLine?.baselineY ?? span.baselineY;
+      } else {
+        const stepPts = 0.5 * prevExtractedLineLh + 0.5 * lH + extraGapPts;
+        lineTop = cumulativeTop + stepPts;
+        lineBaselineY = cumulativeBaselineY - stepPts;
+      }
+      const lineBottom = isSameLineCount && origLine?.bottom !== undefined ? origLine.bottom : lineTop + lH;
+      cumulativeTop = lineTop;
+      cumulativeBaselineY = lineBaselineY;
+      prevExtractedLineLh = lH;
+
+      const domLineFontFamily = parentLineEl?.dataset.fontFamily || undefined;
+      const domLineRawFontFamily = parentLineEl?.dataset.rawFontFamily || undefined;
+      const domLineMatchedFontFamily = parentLineEl?.dataset.matchedFontFamily || undefined;
+      const domLineFontWeight = (parentLineEl?.dataset.fontWeight as 'bold' | 'normal' | undefined) || undefined;
+      const domLineFontStyle = (parentLineEl?.dataset.fontStyle as 'italic' | 'normal' | undefined) || undefined;
 
       const words: TextWord[] = [];
       let pendingTextNodeSpace = false;
@@ -537,7 +827,8 @@
           const trimmed = rawTxt.trim();
           if (trimmed.length > 0) {
             const tokens = trimmed.split(/([\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+)/);
-            const lineFs = origLine?.fontSize ?? span.fontSize;
+            const adjWord = words.length > 0 ? words[words.length - 1] : origLine?.words?.[0];
+            const lineFs = adjWord?.fontSize ?? origLine?.fontSize ?? span.fontSize;
             const approxCharW = lineFs * 0.52;
             for (const token of tokens) {
               if (!token) continue;
@@ -548,28 +839,34 @@
               const cleanToken = sanitizePdfText(token);
               if (cleanToken.length === 0) continue;
               const prevWord = words.length > 0 ? words[words.length - 1] : null;
+              const refWord = prevWord ?? origLine?.words?.[0];
               const hasPrecedingSpace = pendingTextNodeSpace || (words.length > 0);
               const spaceOffset = hasPrecedingSpace ? lineFs * 0.25 : 0;
               const wLeft = prevWord ? prevWord.right + spaceOffset : (isBulletSpan && lineIdx === 0 ? firstLineTextLeft : (origLine?.left ?? span.left));
               const wWidth = cleanToken.length * approxCharW;
+              const fallbackWordLs = refWord?.letterSpacing ?? domLineLs ?? origLine?.letterSpacing ?? span.letterSpacing;
               words.push({
                 text: cleanToken,
                 left: wLeft,
-                top: origLine?.top ?? span.top,
+                top: lineTop,
                 right: wLeft + wWidth,
-                bottom: origLine?.bottom ?? (span.top + span.height),
+                bottom: lineBottom,
                 width: wWidth,
                 height: origLine?.height ?? lineFs,
                 fontSize: lineFs,
-                baselineY: origLine?.baselineY ?? span.baselineY,
+                baselineY: lineBaselineY,
                 charStartIndex: 0,
                 charCount: cleanToken.length,
-                fontFamily: origLine?.fontFamily ?? span.fontFamily,
-                rawFontFamily: origLine?.rawFontFamily ?? span.rawFontFamily,
-                matchedFontFamily: origLine?.matchedFontFamily ?? span.matchedFontFamily,
-                color: origLine?.color ?? span.color,
-                fontWeight: origLine?.fontWeight ?? span.fontWeight,
-                fontStyle: origLine?.fontStyle ?? span.fontStyle,
+                fontFamily: refWord?.fontFamily ?? domLineFontFamily ?? origLine?.fontFamily ?? span.fontFamily,
+                rawFontFamily: refWord?.rawFontFamily ?? domLineRawFontFamily ?? origLine?.rawFontFamily ?? span.rawFontFamily,
+                matchedFontFamily: refWord?.matchedFontFamily ?? domLineMatchedFontFamily ?? origLine?.matchedFontFamily ?? span.matchedFontFamily,
+                color: refWord?.color ?? origLine?.color ?? span.color,
+                fontWeight: refWord?.fontWeight ?? domLineFontWeight ?? origLine?.fontWeight ?? span.fontWeight,
+                fontStyle: refWord?.fontStyle ?? domLineFontStyle ?? origLine?.fontStyle ?? span.fontStyle,
+                ...(fallbackWordLs ? { letterSpacing: fallbackWordLs, letterSpacingPts: parseLetterSpacingToPoints(fallbackWordLs, lineFs) } : {}),
+                underline: (refWord?.underline ?? origLine?.underline ?? span.underline) ? true : undefined,
+                strikethrough: (refWord?.strikethrough ?? origLine?.strikethrough ?? span.strikethrough) ? true : undefined,
+                backgroundColor: refWord?.backgroundColor ?? origLine?.backgroundColor,
                 hasPrecedingSpace,
               });
               pendingTextNodeSpace = false;
@@ -586,7 +883,7 @@
           const nodeBg = spanEl.style.backgroundColor;
           const hasValidBg = Boolean(nodeBg && nodeBg !== 'transparent');
           const isCleared = nodeBg === 'transparent';
-          
+
           let parsedColor: ColorRgba | undefined = undefined;
           if (spanEl.style.color) {
             try {
@@ -596,14 +893,24 @@
               // keep existing
             }
           }
-          
-          let fw = spanEl.style.fontWeight === 'bold' || spanEl.style.fontWeight === '700' || spanEl.tagName === 'B' || spanEl.tagName === 'STRONG' ? 'bold' : (spanEl.style.fontWeight === 'normal' || spanEl.style.fontWeight === '400' ? 'normal' : undefined);
-          let fs = spanEl.style.fontStyle === 'italic' || spanEl.tagName === 'I' || spanEl.tagName === 'EM' ? 'italic' : (spanEl.style.fontStyle === 'normal' ? 'normal' : undefined);
-          
+
+          const domFwAttr = spanEl.dataset.fontWeight as 'bold' | 'normal' | undefined;
+          const domFsAttr = spanEl.dataset.fontStyle as 'italic' | 'normal' | undefined;
+          const fw = spanEl.style.fontWeight === 'bold' || spanEl.style.fontWeight === '700' || spanEl.tagName === 'B' || spanEl.tagName === 'STRONG'
+            ? 'bold'
+            : (spanEl.style.fontWeight === 'normal' || spanEl.style.fontWeight === '400' ? 'normal' : domFwAttr);
+          const fs = spanEl.style.fontStyle === 'italic' || spanEl.tagName === 'I' || spanEl.tagName === 'EM'
+            ? 'italic'
+            : (spanEl.style.fontStyle === 'normal' ? 'normal' : domFsAttr);
+
           const rawFSize = spanEl.dataset.fontSize ? parseFloat(spanEl.dataset.fontSize) : (origLine?.fontSize ?? span.fontSize);
           const fSize = !isNaN(rawFSize) && rawFSize > 0 ? rawFSize : (origLine?.fontSize ?? span.fontSize);
-          const elementFontFamily = spanEl.dataset.fontFamily || (spanEl.style.fontFamily ? spanEl.style.fontFamily.replace(/["']/g, '') : undefined);
-          
+          const elementFontFamily = spanEl.dataset.fontFamily || undefined;
+          const elementRawFontFamily = spanEl.dataset.rawFontFamily || undefined;
+          const elementMatchedFontFamily = spanEl.dataset.matchedFontFamily || undefined;
+          const elementLetterSpacing = spanEl.dataset.letterSpacing || undefined;
+          const domWordIdx = spanEl.dataset.wordIdx !== undefined ? parseInt(spanEl.dataset.wordIdx, 10) : NaN;
+
           let hasPrecedingSpaceGlobal = pendingTextNodeSpace;
           if (!hasPrecedingSpaceGlobal) {
             let prevNode = spanEl.previousSibling;
@@ -628,15 +935,15 @@
           if (!hasPrecedingSpaceGlobal && spanEl.dataset.hasPrecedingSpace === 'true') {
             hasPrecedingSpaceGlobal = true;
           }
-          
+
           if (/[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]$/.test(rawTextContent)) {
             pendingTextNodeSpace = true;
           } else {
             pendingTextNodeSpace = false;
           }
-          
+
           const tokens = rawTextContent.split(/([\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+)/);
-          
+
           for (let i = 0; i < tokens.length; i++) {
             const token = tokens[i];
             if (!token) continue;
@@ -646,21 +953,16 @@
             }
             const wordText = sanitizePdfText(token);
             if (wordText.length === 0) continue;
-            
+
             const candidateWord = origLine?.words?.[words.length];
-            let origWord = candidateWord && candidateWord.text === wordText
-              ? candidateWord
-              : origLine?.words?.find((w) => w.text === wordText);
-            if (!origWord && span.lines) {
-              for (const otherLine of span.lines) {
-                const match = otherLine.words?.find((w) => w.text === wordText);
-                if (match) {
-                  origWord = match;
-                  break;
-                }
-              }
-            }
-            
+            const indexedWord = !isNaN(domWordIdx) ? origLine?.words?.[domWordIdx] : undefined;
+            const origWord = !isNaN(domWordIdx)
+              ? (indexedWord && indexedWord.text === wordText ? indexedWord : undefined)
+              : (candidateWord && candidateWord.text === wordText
+                  ? candidateWord
+                  : origLine?.words?.find((w) => w.text === wordText));
+            const styleRefWord = indexedWord ?? origWord ?? candidateWord ?? (words.length > 0 ? words[words.length - 1] : origLine?.words?.[0]);
+
             let hasPrecedingSpace = hasPrecedingSpaceGlobal;
             if (!hasPrecedingSpace && origWord && Boolean(origWord.hasPrecedingSpace)) {
               hasPrecedingSpace = true;
@@ -668,12 +970,13 @@
             if (!hasPrecedingSpace && words.length > 0 && i === 0 && UNICODE_LEADING_WS_REGEX.test(rawTextContent)) {
               hasPrecedingSpace = true;
             }
-            
-            const bgCol = isCleared ? undefined : (hasValidBg ? nodeBg : origWord?.backgroundColor);
-            const finalColor = parsedColor ?? origWord?.color ?? span.color;
-            const finalFw = fw ?? origWord?.fontWeight ?? (span.fontWeight || 'normal');
-            const finalFs = fs ?? origWord?.fontStyle ?? (span.fontStyle || 'normal');
-            
+
+            const bgCol = isCleared ? undefined : (hasValidBg ? nodeBg : styleRefWord?.backgroundColor);
+            const finalColor = parsedColor ?? styleRefWord?.color ?? origLine?.color ?? span.color;
+            const finalFw = fw ?? styleRefWord?.fontWeight ?? domLineFontWeight ?? origLine?.fontWeight ?? (span.fontWeight || 'normal');
+            const finalFs = fs ?? styleRefWord?.fontStyle ?? domLineFontStyle ?? origLine?.fontStyle ?? (span.fontStyle || 'normal');
+            const finalLs = elementLetterSpacing ?? styleRefWord?.letterSpacing ?? domLineLs ?? origLine?.letterSpacing ?? span.letterSpacing;
+
             const approxCharWidth = fSize * 0.52;
             const wordWidth = origWord?.width && origWord.width > 0 ? origWord.width : wordText.length * approxCharWidth;
             const prevWord = words.length > 0 ? words[words.length - 1] : null;
@@ -687,27 +990,41 @@
               wordLeft = isBulletSpan && lineIdx === 0 ? firstLineTextLeft : (origLine?.left ?? span.left);
             }
             const wordRight = wordLeft + wordWidth;
-            
+
+            const resolvedWordFontFamily = elementFontFamily || styleRefWord?.fontFamily || domLineFontFamily || origLine?.fontFamily || span.fontFamily;
+            const isExplicitFontOverride = Boolean(
+              elementFontFamily &&
+              styleRefWord?.fontFamily &&
+              elementFontFamily !== styleRefWord.fontFamily
+            );
+            const resolvedWordRawFont = isExplicitFontOverride
+              ? elementFontFamily
+              : (elementRawFontFamily || styleRefWord?.rawFontFamily || domLineRawFontFamily || origLine?.rawFontFamily || elementFontFamily || span.rawFontFamily);
+            const resolvedWordMatchedFont = isExplicitFontOverride
+              ? elementFontFamily
+              : (elementMatchedFontFamily || styleRefWord?.matchedFontFamily || domLineMatchedFontFamily || origLine?.matchedFontFamily || elementFontFamily || span.matchedFontFamily);
+
             words.push({
               text: wordText,
               left: wordLeft,
-              top: origWord?.top ?? span.top,
+              top: isSameLineCount && origWord?.top !== undefined ? origWord.top : lineTop,
               right: wordRight,
-              bottom: origWord?.bottom ?? (span.top + span.height),
+              bottom: isSameLineCount && origWord?.bottom !== undefined ? origWord.bottom : lineBottom,
               width: wordWidth,
-              height: origWord?.height ?? fSize,
+              height: origWord?.height ?? origLine?.height ?? fSize,
               fontSize: fSize,
-              baselineY: origWord?.baselineY ?? span.baselineY,
+              baselineY: isSameLineCount && origWord?.baselineY !== undefined ? origWord.baselineY : lineBaselineY,
               charStartIndex: 0,
               charCount: wordText.length,
-              fontFamily: elementFontFamily || origWord?.fontFamily || span.fontFamily,
-              rawFontFamily: origWord?.rawFontFamily ?? span.rawFontFamily,
-              matchedFontFamily: origWord?.matchedFontFamily ?? span.matchedFontFamily,
+              fontFamily: resolvedWordFontFamily,
+              rawFontFamily: resolvedWordRawFont,
+              matchedFontFamily: resolvedWordMatchedFont,
               color: finalColor,
               fontWeight: finalFw,
               fontStyle: finalFs,
-              underline: isUnderline ? true : undefined,
-              strikethrough: isStrike ? true : undefined,
+              ...(finalLs ? { letterSpacing: finalLs, letterSpacingPts: parseLetterSpacingToPoints(finalLs, fSize) } : {}),
+              underline: Boolean(isUnderline),
+              strikethrough: Boolean(isStrike),
               backgroundColor: bgCol,
               hasPrecedingSpace,
             });
