@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
   import { Check, X } from 'lucide-svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import { useEditorStore } from '../../stores/editor.svelte';
@@ -86,12 +85,14 @@
     pendingUpdate = null;
   }
 
-  onDestroy(() => {
-    if (activeDragCleanup) {
-      activeDragCleanup();
-      activeDragCleanup = null;
-    }
-    cancelPendingUpdate();
+  $effect(() => {
+    return () => {
+      if (activeDragCleanup) {
+        activeDragCleanup();
+        activeDragCleanup = null;
+      }
+      cancelPendingUpdate();
+    };
   });
 
   function handleCropFreeDragStart(e: PointerEvent): void {
@@ -305,7 +306,7 @@
 
 {#if isPageCropping && activeCropMargins}
   <div
-    class="absolute inset-0 z-50 pointer-events-auto select-none overflow-visible"
+    class="absolute inset-0 z-[100] pointer-events-auto select-none overflow-visible"
     style="width: {pageWidthPx}px; height: {pageHeightPx}px;"
   >
     <!-- Darkened shrouds covering uncropped page margins with darker outline on excluded sections (no drop shadow) -->
@@ -379,15 +380,15 @@
 
       <!-- Floating Dimension and Action Badge -->
       <div
-        class="absolute {cropTopPx > 42 ? '-top-10' : 'top-2.5'} left-1/2 -translate-x-1/2 bg-card/95 text-foreground backdrop-blur-md border border-border/80 shadow-lg rounded-2xl px-2 py-1 pointer-events-auto whitespace-nowrap flex items-center gap-2 z-50 select-none"
+        class="absolute {cropTopPx > 42 ? '-top-10' : 'top-2.5'} left-1/2 -translate-x-1/2 bg-card/95 text-foreground backdrop-blur-md border border-border/80 rounded-2xl px-2 py-1 pointer-events-auto whitespace-nowrap flex items-center gap-2 z-50 select-none"
       >
-        <span class="text-[11px] font-sans px-2.5 py-1 font-medium text-muted-foreground tabular-nums">
+        <span class="text-[11px] font-sans px-2.5 py-1 font-medium text-muted-foreground">
           {Math.round(cropWidthPts)} × {Math.round(cropHeightPts)} pt
         </span>
         <Button
           size="sm"
           variant="default"
-          class="h-6 text-[11px] px-2.5 rounded-xl flex items-center gap-1 font-medium shadow-2xs"
+          class="h-6 text-[11px] px-2.5 rounded-xl flex items-center gap-1 font-medium"
           onclick={(e) => {
             e.stopPropagation();
             if (store.activeCrop) {
@@ -412,28 +413,28 @@
 
       <!-- 4 Corner Handles (Figma style solid white with selection border, no drop shadow) -->
       <div
-        class="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-selection rounded-[1px] cursor-nwse-resize z-40 pointer-events-auto"
+        class="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border border-selection rounded-[1px] cursor-nwse-resize z-40 pointer-events-auto"
         onpointerdown={(e) => handleCropResizeStart(e, 'top-left')}
         role="button"
         tabindex="0"
         aria-label="Resize crop top-left"
       ></div>
       <div
-        class="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-selection rounded-[1px] cursor-nesw-resize z-40 pointer-events-auto"
+        class="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border border-selection rounded-[1px] cursor-nesw-resize z-40 pointer-events-auto"
         onpointerdown={(e) => handleCropResizeStart(e, 'top-right')}
         role="button"
         tabindex="0"
         aria-label="Resize crop top-right"
       ></div>
       <div
-        class="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-selection rounded-[1px] cursor-nesw-resize z-40 pointer-events-auto"
+        class="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border border-selection rounded-[1px] cursor-nesw-resize z-40 pointer-events-auto"
         onpointerdown={(e) => handleCropResizeStart(e, 'bottom-left')}
         role="button"
         tabindex="0"
         aria-label="Resize crop bottom-left"
       ></div>
       <div
-        class="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-selection rounded-[1px] cursor-nwse-resize z-40 pointer-events-auto"
+        class="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border border-selection rounded-[1px] cursor-nwse-resize z-40 pointer-events-auto"
         onpointerdown={(e) => handleCropResizeStart(e, 'bottom-right')}
         role="button"
         tabindex="0"
