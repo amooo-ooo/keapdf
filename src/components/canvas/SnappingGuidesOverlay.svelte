@@ -111,7 +111,7 @@
             ? ((guide.start + guide.end) / 2) * zoom
             : guide.coordinate * zoom}
         <div
-          class="guide-pill-badge absolute -translate-x-1/2 -translate-y-1/2 bg-snap-guide text-snap-guide-foreground font-sans font-medium rounded-full px-1.5 py-0.5 text-[10px] whitespace-nowrap shadow-xs pointer-events-none border border-white/20 dark:border-white/10"
+          class="guide-pill-badge absolute -translate-x-1/2 -translate-y-1/2 bg-snap-guide text-snap-guide-foreground font-sans font-medium rounded-full px-1.5 py-0.5 text-[10px] whitespace-nowrap pointer-events-none border border-white/20 dark:border-white/10"
           style="left: {midX.toFixed(1)}px; top: {midY.toFixed(1)}px;"
         >
           {guide.label}
