@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useCanvasActions } from '../../stores/canvas-actions';
@@ -11,6 +10,10 @@
     FormFieldVariant,
     ElementDropPayload,
   } from '../../stores/canvas-types';
+  import {
+    resolveTextPresetPayload,
+    type TextStylePresetId,
+  } from '../../services/pdf/operations/document-typography';
   import SidebarSection from '../common/SidebarSection.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import {
@@ -22,6 +25,8 @@
     Minus,
     ArrowRight,
     Heading,
+    Heading1,
+    Heading2,
     FileText,
     FormInput,
     CheckSquare,
@@ -123,8 +128,10 @@
     }
   });
 
-  onDestroy(() => {
-    cleanupDragBadge();
+  $effect(() => {
+    return () => {
+      cleanupDragBadge();
+    };
   });
 
   function handleDragStart(e: DragEvent, payload: ElementDropPayload): void {
@@ -154,7 +161,7 @@
       const label = payload.label || payload.text || payload.kind;
       activeDragBadge = document.createElement('div');
       activeDragBadge.className =
-        'fixed pointer-events-none z-[99999] px-2.5 py-1 rounded-md bg-background border border-primary/40 text-xs font-medium text-foreground flex items-center gap-1.5 transition-none select-none';
+        'fixed pointer-events-none z-[99999] px-2.5 py-1 rounded-md bg-background border border-border text-xs font-medium text-foreground flex items-center gap-1.5 transition-none select-none';
       activeDragBadge.innerText = label;
       activeDragBadge.style.left = `${e.clientX + 14}px`;
       activeDragBadge.style.top = `${e.clientY + 14}px`;
@@ -190,11 +197,15 @@
       text?: string;
       fontSize?: number;
       fontWeight?: 'normal' | 'bold';
+      fontStyle?: 'normal' | 'italic';
       fontFamily?: string;
+      rawFontFamily?: string;
+      lineHeight?: number;
       width?: number;
       height?: number;
       author?: string;
       color?: string;
+      textAlign?: 'left' | 'center' | 'right';
       src?: string;
       placeholder?: string;
       value?: string;
@@ -215,6 +226,16 @@
     }
     canvasActions.createElement(kind, store.currentPageIndex, centerX, centerY, options);
   }
+
+  function placeTextPreset(presetId: TextStylePresetId): void {
+    const payload = resolveTextPresetPayload(presetId, actions.getDocumentTypography());
+    placeAtCenter('text', payload);
+  }
+
+  function startTextPresetDrag(e: DragEvent, presetId: TextStylePresetId): void {
+    const payload = resolveTextPresetPayload(presetId, actions.getDocumentTypography());
+    handleDragStart(e, payload);
+  }
 </script>
 
 <div class="panel-root">
@@ -226,6 +247,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Add Text Box"
         onclick={() =>
           placeAtCenter('text', { text: 'Type here', fontSize: 14, width: 150, height: 30 })}
         draggable={store.isDocumentLoaded}
@@ -241,8 +263,40 @@
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
       >
-        <Type class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Add Text Box</span>
+        <Type class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Add Text Box">Add Text Box</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.title')}
+      <Button
+        variant="panel"
+        class="w-full"
+        title="Title"
+        onclick={() => placeTextPreset('title')}
+        draggable={store.isDocumentLoaded}
+        ondragstart={(e) => startTextPresetDrag(e, 'title')}
+        ondragend={handleDragEnd}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Heading class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Title">Title</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.subtitle')}
+      <Button
+        variant="panel"
+        class="w-full"
+        title="Subtitle"
+        onclick={() => placeTextPreset('subtitle')}
+        draggable={store.isDocumentLoaded}
+        ondragstart={(e) => startTextPresetDrag(e, 'subtitle')}
+        ondragend={handleDragEnd}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Type class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Subtitle">Subtitle</span>
       </Button>
       {/if}
 
@@ -250,30 +304,31 @@
       <Button
         variant="panel"
         class="w-full"
-        onclick={() =>
-          placeAtCenter('text', {
-            text: 'Heading',
-            fontSize: 22,
-            fontWeight: 'bold',
-            width: 200,
-            height: 36,
-          })}
+        title="Heading"
+        onclick={() => placeTextPreset('heading')}
         draggable={store.isDocumentLoaded}
-        ondragstart={(e) =>
-          handleDragStart(e, {
-            kind: 'text',
-            text: 'Heading',
-            fontSize: 22,
-            fontWeight: 'bold',
-            width: 200,
-            height: 36,
-            label: 'Heading',
-          })}
+        ondragstart={(e) => startTextPresetDrag(e, 'heading')}
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
       >
-        <Heading class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Heading</span>
+        <Heading1 class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Heading">Heading</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.subheading')}
+      <Button
+        variant="panel"
+        class="w-full"
+        title="Subheading"
+        onclick={() => placeTextPreset('subheading')}
+        draggable={store.isDocumentLoaded}
+        ondragstart={(e) => startTextPresetDrag(e, 'subheading')}
+        ondragend={handleDragEnd}
+        disabled={!store.isDocumentLoaded}
+      >
+        <Heading2 class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Subheading">Subheading</span>
       </Button>
       {/if}
 
@@ -281,28 +336,31 @@
       <Button
         variant="panel"
         class="w-full"
-        onclick={() =>
-          placeAtCenter('text', {
-            text: 'Body text paragraph',
-            fontSize: 12,
-            width: 180,
-            height: 28,
-          })}
+        title="Body Text"
+        onclick={() => placeTextPreset('body')}
         draggable={store.isDocumentLoaded}
-        ondragstart={(e) =>
-          handleDragStart(e, {
-            kind: 'text',
-            text: 'Body text paragraph',
-            fontSize: 12,
-            width: 180,
-            height: 28,
-            label: 'Body Text',
-          })}
+        ondragstart={(e) => startTextPresetDrag(e, 'body')}
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
       >
-        <FileText class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Body Text</span>
+        <FileText class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Body Text">Body Text</span>
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('components.caption')}
+      <Button
+        variant="panel"
+        class="w-full"
+        title="Caption"
+        onclick={() => placeTextPreset('caption')}
+        draggable={store.isDocumentLoaded}
+        ondragstart={(e) => startTextPresetDrag(e, 'caption')}
+        ondragend={handleDragEnd}
+        disabled={!store.isDocumentLoaded}
+      >
+        <FileText class="h-3.5 w-3.5 mr-2 text-muted-foreground shrink-0" />
+        <span class="truncate" title="Caption">Caption</span>
       </Button>
       {/if}
 
@@ -318,6 +376,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Text Input"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'text-input',
@@ -337,8 +396,8 @@
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
       >
-        <FormInput class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Text Input</span>
+        <FormInput class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Text Input">Text Input</span>
       </Button>
       {/if}
 
@@ -346,6 +405,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Checkbox"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'checkbox',
@@ -365,8 +425,8 @@
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
       >
-        <CheckSquare class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Checkbox</span>
+        <CheckSquare class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Checkbox">Checkbox</span>
       </Button>
       {/if}
 
@@ -374,6 +434,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Radio Button"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'radio',
@@ -393,8 +454,8 @@
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
       >
-        <CircleDot class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Radio Button</span>
+        <CircleDot class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Radio Button">Radio Button</span>
       </Button>
       {/if}
 
@@ -402,6 +463,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Dropdown"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'dropdown',
@@ -421,8 +483,8 @@
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
       >
-        <ListFilter class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Dropdown</span>
+        <ListFilter class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Dropdown">Dropdown</span>
       </Button>
       {/if}
 
@@ -430,6 +492,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Sign Field"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'signature',
@@ -451,8 +514,8 @@
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
       >
-        <PenTool class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Sign Field</span>
+        <PenTool class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Sign Field">Sign Field</span>
       </Button>
       {/if}
 
@@ -460,6 +523,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Pushbutton"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'button',
@@ -479,8 +543,8 @@
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
       >
-        <RectangleHorizontal class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Pushbutton</span>
+        <RectangleHorizontal class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Pushbutton">Pushbutton</span>
       </Button>
       {/if}
 
@@ -488,6 +552,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Attachment"
         onclick={() =>
           placeAtCenter('form-field', {
             variant: 'attachment',
@@ -508,7 +573,7 @@
         disabled={!store.isDocumentLoaded}
       >
         <Paperclip class="h-3.5 w-3.5 mr-2 text-muted-foreground shrink-0" />
-        <span class="truncate">Attachment</span>
+        <span class="truncate" title="Attachment">Attachment</span>
       </Button>
       {/if}
     </div>
@@ -523,6 +588,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Rectangle"
         onclick={() =>
           placeAtCenter('shape', {
             variant: 'rectangle',
@@ -542,7 +608,7 @@
         disabled={!store.isDocumentLoaded}
       >
         <Square class="h-3.5 w-3.5 mr-2 text-muted-foreground shrink-0" />
-        <span class="truncate">Rectangle</span>
+        <span class="truncate" title="Rectangle">Rectangle</span>
       </Button>
       {/if}
 
@@ -550,6 +616,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Circle"
         onclick={() =>
           placeAtCenter('shape', {
             variant: 'circle',
@@ -569,7 +636,7 @@
         disabled={!store.isDocumentLoaded}
       >
         <Circle class="h-3.5 w-3.5 mr-2 text-muted-foreground shrink-0" />
-        <span class="truncate">Circle</span>
+        <span class="truncate" title="Circle">Circle</span>
       </Button>
       {/if}
 
@@ -577,6 +644,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Line"
         onclick={() =>
           placeAtCenter('shape', {
             variant: 'line',
@@ -596,7 +664,7 @@
         disabled={!store.isDocumentLoaded}
       >
         <Minus class="h-3.5 w-3.5 mr-2 text-muted-foreground shrink-0" />
-        <span class="truncate">Line</span>
+        <span class="truncate" title="Line">Line</span>
       </Button>
       {/if}
 
@@ -604,6 +672,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Arrow"
         onclick={() =>
           placeAtCenter('shape', {
             variant: 'arrow',
@@ -623,7 +692,7 @@
         disabled={!store.isDocumentLoaded}
       >
         <ArrowRight class="h-3.5 w-3.5 mr-2 text-muted-foreground shrink-0" />
-        <span class="truncate">Arrow</span>
+        <span class="truncate" title="Arrow">Arrow</span>
       </Button>
       {/if}
     </div>
@@ -638,11 +707,12 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Import Image"
         onclick={handleImportImage}
         disabled={!store.isDocumentLoaded}
       >
-        <ImagePlus class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Import Image</span>
+        <ImagePlus class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Import Image">Import Image</span>
       </Button>
       {/if}
 
@@ -650,6 +720,7 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Image Placeholder"
         onclick={() =>
           placeAtCenter('image', {
             src: '',
@@ -668,8 +739,8 @@
         ondragend={handleDragEnd}
         disabled={!store.isDocumentLoaded}
       >
-        <ImageIcon class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Image Placeholder</span>
+        <ImageIcon class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Image Placeholder">Image Placeholder</span>
       </Button>
       {/if}
 
@@ -677,11 +748,12 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Embed Video"
         onclick={handleEmbedVideo}
         disabled={!store.isDocumentLoaded}
       >
-        <Video class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Embed Video</span>
+        <Video class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Embed Video">Embed Video</span>
       </Button>
       {/if}
 
@@ -689,11 +761,12 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Embed Audio"
         onclick={handleEmbedAudio}
         disabled={!store.isDocumentLoaded}
       >
-        <Volume2 class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Embed Audio</span>
+        <Volume2 class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Embed Audio">Embed Audio</span>
       </Button>
       {/if}
 
@@ -701,11 +774,12 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Embed 3D"
         onclick={handleEmbed3D}
         disabled={!store.isDocumentLoaded}
       >
-        <Box class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Embed 3D</span>
+        <Box class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Embed 3D">Embed 3D</span>
       </Button>
       {/if}
 
@@ -713,11 +787,12 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Attach File"
         onclick={handleAttachFile}
         disabled={!store.isDocumentLoaded}
       >
-        <Paperclip class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Attach File</span>
+        <Paperclip class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Attach File">Attach File</span>
       </Button>
       {/if}
 
@@ -725,11 +800,12 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Add QR Code or Barcode"
         onclick={handleAddQrBarcode}
         disabled={!store.isDocumentLoaded}
       >
-        <QrCode class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Add QR Code or Barcode</span>
+        <QrCode class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Add QR Code or Barcode">Add QR Code or Barcode</span>
       </Button>
       {/if}
 
@@ -737,11 +813,12 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Add Stamp to PDF"
         onclick={() => triggerTool('Add Stamp to PDF')}
         disabled={!store.isDocumentLoaded}
       >
         <Stamp class="h-3.5 w-3.5 mr-2 text-warning shrink-0" />
-        <span class="truncate">Add Stamp to PDF</span>
+        <span class="truncate" title="Add Stamp to PDF">Add Stamp to PDF</span>
       </Button>
       {/if}
     </div>
@@ -756,11 +833,12 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Add Watermark"
         onclick={() => triggerTool('Add Watermark')}
         disabled={!store.isDocumentLoaded}
       >
-        <Type class="h-3.5 w-3.5 mr-2 text-primary shrink-0" />
-        <span class="truncate">Add Watermark</span>
+        <Type class="h-3.5 w-3.5 mr-2 shrink-0" />
+        <span class="truncate" title="Add Watermark">Add Watermark</span>
       </Button>
       {/if}
 
@@ -768,11 +846,12 @@
       <Button
         variant="panel"
         class="w-full"
+        title="Overlay PDFs"
         onclick={() => triggerTool('Overlay PDFs')}
         disabled={!store.isDocumentLoaded}
       >
         <Layers class="h-3.5 w-3.5 mr-2 text-muted-foreground shrink-0" />
-        <span class="truncate">Overlay PDFs</span>
+        <span class="truncate" title="Overlay PDFs">Overlay PDFs</span>
       </Button>
       {/if}
     </div>
@@ -783,9 +862,9 @@
   <!-- Apply components to document -->
   <div class="p-3 mt-auto">
     <Button
-      variant="default"
+      variant="secondary"
       size="sm"
-      class="w-full text-xs shadow-xs"
+      class="w-full text-xs"
       onclick={handleApplyComponents}
       disabled={!store.isDocumentLoaded ||
         (canvasStore.elements.length === 0 && !hasPageTransforms)}
