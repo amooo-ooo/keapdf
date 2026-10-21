@@ -36,8 +36,10 @@
 <!-- note: offline connectivity warning banner -->
 {#if !pwaStore.isOnline}
   <aside
+    role="status"
+    aria-live="polite"
     aria-label="Offline status"
-    class="fixed bottom-4 left-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-full text-xs bg-muted/95 border border-border/80 text-foreground shadow-sm backdrop-blur-sm select-none pointer-events-auto transition-all"
+    class="fixed bottom-4 left-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-full text-xs bg-muted/95 border border-border/80 text-foreground backdrop-blur-sm select-none pointer-events-auto transition-[opacity,transform,background-color]"
   >
     <WifiOff class="w-3.5 h-3.5 text-warning shrink-0" />
     <span>Offline mode: Local PDFium engine active</span>
@@ -47,12 +49,14 @@
 <!-- note: update available or offline cache ready prompt -->
 {#if pwaStore.needRefresh || pwaStore.isOfflineReady}
   <aside
+    role="status"
+    aria-live="polite"
     aria-label="Application update"
-    class="fixed bottom-4 right-4 z-50 max-w-sm w-full p-3.5 bg-card/95 border border-border text-card-foreground rounded-xl shadow-lg backdrop-blur-md select-none transition-all animate-in fade-in slide-in-from-bottom-2 duration-200"
+    class="fixed bottom-4 right-4 z-50 max-w-sm w-full p-3.5 bg-card/95 border border-border text-card-foreground rounded-xl backdrop-blur-md select-none transition-[opacity,transform] animate-in fade-in slide-in-from-bottom-2 duration-200"
   >
     <div class="flex items-start gap-3">
       {#if pwaStore.needRefresh}
-        <div class="p-1.5 rounded-lg bg-primary/10 text-primary shrink-0 mt-0.5">
+        <div class="p-1.5 rounded-lg bg-secondary text-foreground border border-border shrink-0 mt-0.5">
           <RefreshCw class="w-4 h-4 animate-spin-slow" />
         </div>
         <div class="flex-1 min-w-0">
@@ -61,7 +65,7 @@
             A new version of Kea PDF is ready. Reload to apply enhancements.
           </p>
           <div class="flex items-center gap-2 mt-2.5">
-            <Button size="sm" class="h-7 text-xs px-3" onclick={handleReload}>
+            <Button variant="secondary" size="sm" class="h-7 text-xs px-3" onclick={handleReload}>
               Reload to Update
             </Button>
             <Button variant="ghost" size="sm" class="h-7 text-xs px-2.5 text-muted-foreground" onclick={handleDismiss}>
@@ -70,7 +74,7 @@
           </div>
         </div>
       {:else if pwaStore.isOfflineReady}
-        <div class="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5">
+        <div class="p-1.5 rounded-lg bg-secondary text-foreground border border-border shrink-0 mt-0.5">
           <CheckCircle2 class="w-4 h-4" />
         </div>
         <div class="flex-1 min-w-0">

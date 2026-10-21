@@ -37,6 +37,7 @@
   let thumbnailSrc = $state<string>('');
   let containerEl: HTMLDivElement | null = $state(null);
   let isInView = $state(false);
+  const isPageValid = $derived(store.isDocumentLoaded && pageIndex >= 0 && pageIndex < store.pageCount);
 
   $effect(() => {
     if (!containerEl) return;
@@ -56,14 +57,16 @@
   });
   
   $effect(() => {
-    // Track page-specific version, file name and page count
+    // Track page-specific version, render version, file name and derived page validity
     void store.fileName;
-    void store.pageCount;
+    void store.renderVersion;
     void store.pageVersions[pageIndex];
     
-    if (!isInView || !store.isDocumentLoaded || pageIndex < 0 || pageIndex >= store.pageCount) {
+    if (!isInView || !isPageValid) {
       if (thumbnailSrc) {
-        URL.revokeObjectURL(thumbnailSrc);
+        if (thumbnailSrc.startsWith('blob:')) {
+          URL.revokeObjectURL(thumbnailSrc);
+        }
         thumbnailSrc = '';
       }
       return;
@@ -75,15 +78,26 @@
       if (controller.signal.aborted) return;
       try {
         const { canvas } = actions.service.document.getPage(pageIndex).render(scale, { applyDpr: false });
+        if (thumbnailSrc && typeof canvas.toDataURL === 'function') {
+          const previousSrc = thumbnailSrc;
+          thumbnailSrc = canvas.toDataURL('image/jpeg', 0.6);
+          canvas.width = 0;
+          canvas.height = 0;
+          if (previousSrc.startsWith('blob:')) {
+            URL.revokeObjectURL(previousSrc);
+          }
+          return;
+        }
         canvas.toBlob(
           (blob) => {
             canvas.width = 0;
             canvas.height = 0;
             if (controller.signal.aborted || !blob) return;
-            if (thumbnailSrc) {
-              URL.revokeObjectURL(thumbnailSrc);
-            }
+            const previousSrc = thumbnailSrc;
             thumbnailSrc = URL.createObjectURL(blob);
+            if (previousSrc) {
+              URL.revokeObjectURL(previousSrc);
+            }
           },
           'image/jpeg',
           0.6
@@ -95,6 +109,11 @@
 
     return () => {
       controller.abort();
+    };
+  });
+
+  $effect(() => {
+    return () => {
       if (thumbnailSrc) {
         URL.revokeObjectURL(thumbnailSrc);
         thumbnailSrc = '';
@@ -108,7 +127,7 @@
     <img
       src={thumbnailSrc}
       alt={`Page ${pageIndex + 1}`}
-      class={className}
+      class="img-subtle-outline {className}"
     />
   {:else}
     <div class="animate-pulse bg-muted/40 border border-border/40 w-full h-full {className}"></div>

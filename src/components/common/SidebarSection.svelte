@@ -52,23 +52,24 @@
       role="button"
       tabindex="0"
       aria-expanded={isExpanded}
+      aria-label={title}
     >
       <div class="flex items-center gap-1.5 min-w-0">
-        <span class="sidebar-section-title truncate">{title}</span>
+        <span class="sidebar-section-title truncate" title={title}>{title}</span>
       </div>
 
       <div class="flex items-center gap-1">
         {@render headerActions?.()}
         {#if isExpanded}
-          <ChevronDown class="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+          <ChevronDown class="h-3.5 w-3.5 text-muted-foreground shrink-0 transition-transform duration-200" />
         {:else}
-          <ChevronRight class="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+          <ChevronRight class="h-3.5 w-3.5 text-muted-foreground shrink-0 transition-transform duration-200" />
         {/if}
       </div>
     </div>
   {:else}
     <div class={cn(sidebarSectionHeaderVariants({ collapsible: false }), headerClass)}>
-      <span class="sidebar-section-title truncate">{title}</span>
+      <span class="sidebar-section-title truncate" title={title}>{title}</span>
       {#if headerActions}
         <div class="flex items-center gap-1">
           {@render headerActions()}

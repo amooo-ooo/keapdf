@@ -84,7 +84,7 @@
 
 <div class="relative flex flex-col">
   {#if isDragTarget && globalDropPosition === 'top'}
-    <div class="absolute -top-1 left-0 right-0 h-1 bg-primary z-10 rounded-full pointer-events-none"></div>
+    <div class="absolute -top-1 left-0 right-0 h-1 bg-foreground z-10 rounded-full pointer-events-none"></div>
   {/if}
 
   <div
@@ -127,7 +127,7 @@
         
         if (indices.length > 1) {
           const ghost = document.createElement('div');
-          ghost.className = 'bg-primary text-primary-foreground text-xs font-medium px-2.5 py-1.5 rounded-full z-50 absolute -top-[1000px] left-0 pointer-events-none whitespace-nowrap';
+          ghost.className = 'bg-secondary text-secondary-foreground border border-border text-xs font-medium px-2.5 py-1.5 rounded-full z-50 absolute -top-[1000px] left-0 pointer-events-none whitespace-nowrap';
           ghost.textContent = `${indices.length} items`;
           document.body.appendChild(ghost);
           e.dataTransfer.setDragImage(ghost, 15, 15);
@@ -266,6 +266,6 @@
   </div>
 
   {#if isDragTarget && globalDropPosition === 'bottom'}
-    <div class="absolute -bottom-1 left-0 right-0 h-1 bg-primary z-10 rounded-full pointer-events-none"></div>
+    <div class="absolute -bottom-1 left-0 right-0 h-1 bg-foreground z-10 rounded-full pointer-events-none"></div>
   {/if}
 </div>
