@@ -2,8 +2,9 @@
   import { useCanvasStore } from '../../../stores/canvas.svelte';
   import { useCanvasActions } from '../../../stores/canvas-actions';
   import { useEditorStore } from '../../../stores/editor.svelte';
+  import { useEditorActions } from '../../../stores/editor-actions';
+  import type { EditableFormFieldSpan } from '../../../core/types';
   import type { FormFieldElement, FormFieldVariant } from '../../../stores/canvas-types';
-  import type { ElementPanelProps } from '../../../core/element-registry';
   import SidebarSection from '../../common/SidebarSection.svelte';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
@@ -17,17 +18,59 @@
   import { getDisplayFontName } from '../../../services/font-loader';
   import { setInspectorInteracting } from '../../../utils/text-range-utils';
 
-  let { element }: ElementPanelProps<FormFieldElement> = $props();
+  let { element = undefined }: { element?: FormFieldElement } = $props();
 
   const canvasStore = useCanvasStore();
   const canvasActions = useCanvasActions();
   const editorStore = useEditorStore();
+  const editorActions = useEditorActions();
 
   const isReadOnlyMode = $derived(editorStore.isReadOnly);
 
-  const formEl = $derived(
-    element ?? (canvasStore.selectedElement?.kind === 'form-field' ? (canvasStore.selectedElement as FormFieldElement) : null)
-  );
+  const formEl = $derived.by((): FormFieldElement | null => {
+    if (element) return element;
+    if (canvasStore.selectedElement?.kind === 'form-field') {
+      return canvasStore.selectedElement as FormFieldElement;
+    }
+    if (editorStore.selectedSpan?.type === 'form-field') {
+      const span = editorStore.selectedSpan as EditableFormFieldSpan;
+      return {
+        id: span.id,
+        kind: 'form-field' as const,
+        pageIndex: span.pageIndex,
+        variant: span.variant,
+        sourceFieldName: span.fieldName,
+        value: typeof span.value === 'string' ? span.value : span.value !== undefined ? String(span.value) : undefined,
+        readOnly: Boolean(span.readOnly),
+        required: Boolean(span.required),
+        fontFamily: span.fontFamily || 'Helvetica',
+        fontSize: span.fontSize || 12,
+        color: span.color || '#000000',
+        backgroundColor: span.backgroundColor || 'transparent',
+        borderColor: span.borderColor || '#3b82f6',
+        borderWidth: span.borderWidth ?? 1,
+        borderStyle: span.borderStyle || 'solid',
+        borderRadius: span.borderRadius,
+        textAlign: span.textAlign || 'left',
+        options: span.options || [],
+        label: span.label || '',
+        placeholder: span.placeholder || '',
+        multiline: Boolean(span.multiline),
+        password: Boolean(span.password),
+        x: span.left,
+        y: span.top,
+        width: span.width,
+        height: span.height,
+        rotation: span.rotation ?? 0,
+        locked: false,
+        visible: true,
+        flipX: false,
+        flipY: false,
+        originalSpan: span,
+      };
+    }
+    return null;
+  });
 
   const STANDARD_FONTS = [
     { value: 'Helvetica', label: 'Inter (Sans-Serif)' },
@@ -78,23 +121,37 @@
     { label: 'Red', color: '#ef4444', bg: 'bg-red-500', border: 'border-red-600' },
   ];
 
-  function updateProp(propName: keyof FormFieldElement, value: unknown): void {
+  async function updateProps(updates: Partial<FormFieldElement>): Promise<void> {
     if (isReadOnlyMode || !editorStore.canEditValues) return;
-    const targetId = formEl?.id ?? canvasStore.selectedElementId;
-    if (targetId) {
-      canvasActions.updateElementProperties(targetId, { [propName]: value });
+    if (canvasStore.selectedElement?.locked) return;
+    let targetId = canvasStore.selectedElementId;
+    if (editorStore.selectedSpan?.type === 'form-field' && (!targetId || editorStore.selectedSpans.length > 0)) {
+      targetId = (editorStore.selectedSpans.length > 1 || Boolean(targetId))
+        ? ((await editorActions.extractSelectedSpansToCanvas(editorStore.selectedSpan, canvasStore)).primaryElementId ?? canvasStore.selectedElementId)
+        : ((await editorActions.extractObjectToCanvas('form-field', editorStore.selectedSpan, canvasStore)) ?? null);
     }
+    if (targetId) {
+      if (canvasStore.selectedElementIds.length > 1) {
+        canvasActions.updateSelectedElementsProperties(updates as Record<string, unknown>, { kind: 'form-field' });
+      } else {
+        canvasActions.updateElementProperties(targetId, updates as Record<string, unknown>);
+      }
+    }
+  }
+
+  async function updateProp(propName: keyof FormFieldElement, value: unknown): Promise<void> {
+    await updateProps({ [propName]: value } as Partial<FormFieldElement>);
   }
 
   function handleStringChange(e: Event, propName: keyof FormFieldElement): void {
     const target = e.target as HTMLInputElement;
-    updateProp(propName, target.value);
+    void updateProp(propName, target.value);
   }
 
   function handleNumberChange(e: Event, propName: keyof FormFieldElement): void {
     const target = e.target as HTMLInputElement;
     const val = parseFloat(target.value);
-    updateProp(propName, Number.isNaN(val) ? 0 : val);
+    void updateProp(propName, Number.isNaN(val) ? 0 : val);
   }
 
   let optionsText = $state('');
@@ -111,7 +168,7 @@
 
   function commitOptions(): void {
     const opts = optionsText.split(',').map(s => s.trim()).filter(Boolean);
-    updateProp('options', opts);
+    void updateProp('options', opts);
   }
 </script>
 
@@ -150,10 +207,10 @@
             value={formEl.sourceFieldName ?? ''} 
             oninput={(e) => handleStringChange(e, 'sourceFieldName')}
             placeholder="e.g. radio_group_1"
-            class="h-8 text-xs w-full" 
+            class="h-8 text-xs w-full"
             disabled={isReadOnlyMode}
+            aria-label="Group Name"
           />
-          <span class="text-[10px] text-muted-foreground">Radio buttons sharing this group name are mutually exclusive.</span>
         </div>
 
         <!-- Option Label -->
@@ -166,6 +223,7 @@
             placeholder="e.g. Option 1"
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Option Label"
           />
         </div>
 
@@ -182,6 +240,7 @@
             placeholder="e.g. option_1"
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Export Value"
           />
         </div>
 
@@ -191,20 +250,28 @@
             <Switch
               checked={formEl.value === 'true' || (Boolean(formEl.options?.[0]) && formEl.value === formEl.options?.[0])}
               disabled={formEl.readOnly || isReadOnlyMode || !editorStore.canEditValues}
-              onCheckedChange={(checked) => {
+              onCheckedChange={async (checked) => {
                 const activeVal = formEl.options?.[0] || 'true';
-                updateProp('value', checked ? activeVal : 'false');
+                let targetId = canvasStore.selectedElementId;
+                if (!targetId && editorStore.selectedSpan?.type === 'form-field') {
+                  targetId = (await editorActions.extractObjectToCanvas('form-field', editorStore.selectedSpan, canvasStore)) ?? null;
+                }
+                if (!targetId) return;
+                const batchEntries: Array<{ id: string; updates: Record<string, unknown> }> = [
+                  { id: targetId, updates: { value: checked ? activeVal : 'false' } },
+                ];
                 if (checked && (formEl.sourceFieldName || formEl.label)) {
                   const groupName = formEl.sourceFieldName || formEl.label;
                   for (const other of canvasStore.elements) {
-                    if (other.id !== formEl.id && other.kind === 'form-field' && (other as FormFieldElement).variant === 'radio') {
+                    if (other.id !== targetId && other.kind === 'form-field' && (other as FormFieldElement).variant === 'radio') {
                       const otherRadio = other as FormFieldElement;
                       if ((otherRadio.sourceFieldName || otherRadio.label) === groupName && otherRadio.pageIndex === formEl.pageIndex) {
-                        canvasActions.updateElementProperties(otherRadio.id, { value: 'false' });
+                        batchEntries.push({ id: otherRadio.id, updates: { value: 'false' } });
                       }
                     }
                   }
                 }
+                canvasActions.batchUpdateElementsProperties(batchEntries);
               }}
               aria-label="Selected by Default"
             />
@@ -221,6 +288,7 @@
             oninput={(e) => handleStringChange(e, 'label')}
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Field Name"
           />
         </div>
 
@@ -246,6 +314,7 @@
             oninput={(e) => handleStringChange(e, 'label')}
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Field Name"
           />
         </div>
 
@@ -261,6 +330,7 @@
             placeholder="Option 1, Option 2, Option 3..."
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Options"
           />
         </div>
 
@@ -274,6 +344,7 @@
             placeholder="Initial selected value..."
             class="field-input w-full" 
             disabled={formEl.readOnly || isReadOnlyMode || !editorStore.canEditValues}
+            aria-label="Default Value"
           />
         </div>
 
@@ -286,6 +357,7 @@
             oninput={(e) => handleStringChange(e, 'placeholder')}
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Placeholder"
           />
         </div>
 
@@ -299,6 +371,7 @@
             oninput={(e) => handleStringChange(e, 'label')}
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Field Name"
           />
         </div>
 
@@ -312,6 +385,7 @@
             placeholder="Initial or current value..."
             class="field-input w-full" 
             disabled={formEl.readOnly || isReadOnlyMode || !editorStore.canEditValues}
+            aria-label="Default Value"
           />
         </div>
 
@@ -324,6 +398,7 @@
             oninput={(e) => handleStringChange(e, 'placeholder')}
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Placeholder"
           />
         </div>
 
@@ -362,6 +437,7 @@
             placeholder="e.g. Signature1"
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Field Name"
           />
         </div>
 
@@ -372,12 +448,13 @@
             type="text" 
             value={formEl.placeholder || formEl.label || ''} 
             oninput={(e) => {
-              handleStringChange(e, 'placeholder');
-              handleStringChange(e, 'label');
+              const val = (e.target as HTMLInputElement).value;
+              void updateProps({ placeholder: val, label: val });
             }}
             placeholder="e.g. Sign here"
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Signer Prompt"
           />
         </div>
 
@@ -392,6 +469,7 @@
             placeholder="e.g. Submit"
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Button Label"
           />
         </div>
 
@@ -405,6 +483,7 @@
             placeholder="e.g. btn_submit"
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Field Name"
           />
         </div>
 
@@ -418,9 +497,36 @@
             oninput={(e) => handleStringChange(e, 'label')}
             class="field-input w-full" 
             disabled={isReadOnlyMode}
+            aria-label="Field Name"
           />
         </div>
       {/if}
+
+      <!-- Validation & Access Flags -->
+      <div class="flex flex-col gap-1.5 pt-1 border-t border-border/50">
+        <ControlRow label="Required Field" size="sm">
+          <Switch
+            checked={Boolean(formEl.required)}
+            disabled={isReadOnlyMode}
+            onCheckedChange={(checked) => updateProp('required', checked)}
+            aria-label="Required Field"
+          />
+        </ControlRow>
+        <ControlRow label="Read Only" size="sm">
+          {#snippet labelSnippet()}
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="text-xs font-medium text-foreground/90 truncate">Read Only</span>
+              <Lock class="w-3 h-3 {formEl.readOnly ? 'text-foreground font-medium' : 'text-muted-foreground opacity-50'}" />
+            </div>
+          {/snippet}
+          <Switch
+            checked={Boolean(formEl.readOnly)}
+            disabled={isReadOnlyMode}
+            onCheckedChange={(checked) => updateProp('readOnly', checked)}
+            aria-label="Read Only"
+          />
+        </ControlRow>
+      </div>
     </div>
   </SidebarSection>
 
@@ -462,6 +568,7 @@
             min="6"
             max="72"
             disabled={isReadOnlyMode}
+            aria-label="Font Size"
           />
         </div>
 
@@ -565,6 +672,7 @@
             min="0"
             max="12"
             disabled={isReadOnlyMode}
+            aria-label="Border Width"
           />
         </div>
         <div class="field-group-sm">
@@ -577,6 +685,7 @@
             min="0"
             max="24"
             disabled={isReadOnlyMode}
+            aria-label="Corner Radius"
           />
         </div>
       </div>
@@ -603,34 +712,6 @@
           </Select.Content>
         </Select.Root>
       </div>
-    </div>
-  </SidebarSection>
-
-  <!-- Validation & Flags -->
-  <SidebarSection title="Validation & State" borderBottom={true} collapsible={true} defaultExpanded={true}>
-    <div class="flex flex-col gap-1.5 pt-0.5">
-      <ControlRow label="Required Field" size="sm">
-        <Switch
-          checked={Boolean(formEl.required)}
-          disabled={isReadOnlyMode}
-          onCheckedChange={(checked) => updateProp('required', checked)}
-          aria-label="Required Field"
-        />
-      </ControlRow>
-      <ControlRow label="Read Only" size="sm">
-        {#snippet labelSnippet()}
-          <div class="flex items-center gap-1.5 min-w-0">
-            <span class="text-xs font-medium text-foreground/90 truncate">Read Only</span>
-            <Lock class="w-3 h-3 {formEl.readOnly ? 'text-primary' : 'text-muted-foreground opacity-50'}" />
-          </div>
-        {/snippet}
-        <Switch
-          checked={Boolean(formEl.readOnly)}
-          disabled={isReadOnlyMode}
-          onCheckedChange={(checked) => updateProp('readOnly', checked)}
-          aria-label="Read Only"
-        />
-      </ControlRow>
     </div>
   </SidebarSection>
 {/if}
