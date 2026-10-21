@@ -1,16 +1,11 @@
 <script lang="ts">
   import { fade } from 'svelte/transition';
   import { useEditorStore } from '../../stores/editor.svelte';
-  import { onDestroy } from 'svelte';
 
   const store = useEditorStore();
 
   let visible = $state(false);
   let timeoutId: ReturnType<typeof setTimeout>;
-
-  onDestroy(() => {
-    if (timeoutId) clearTimeout(timeoutId);
-  });
 
   // Show indicator whenever the page index changes
   $effect(() => {
@@ -50,8 +45,10 @@
 >
   {#if visible && store.isDocumentLoaded}
     <div
+      role="status"
+      aria-live="polite"
       transition:fade={{ duration: 200 }}
-      class="text-muted-foreground text-xs font-medium tracking-wide tabular-nums pointer-events-none select-none"
+      class="text-muted-foreground text-xs font-medium tracking-wide pointer-events-none select-none"
     >
       Page {store.currentPageIndex + 1} of {store.pageCount}
     </div>
