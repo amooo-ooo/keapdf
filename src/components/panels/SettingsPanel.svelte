@@ -1,10 +1,14 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import type { DocumentMetadata, DocumentMetadataUpdate } from '../../core/types';
+  import type { SignatureValidationResult } from '../../services/pdf/operations/signature-ops';
   import { useEditorStore, getFileBuffer } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useFeatureFlagStore } from '../../core/feature-flags';
   import { formatByteSize } from '../../services/pdf/operations/metadata-ops';
+  import { getSavedSignatures, getSavedDigitalSignatures } from '../../services/signature-storage';
   import SidebarSection from '../common/SidebarSection.svelte';
+  import SecurityComplianceSection from '../dialogs/SecurityComplianceSection.svelte';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -17,7 +21,6 @@
     Wrench,
     Code2,
     Unlock,
-    FileText,
     ListTree,
     ChevronDown,
     ChevronRight,
@@ -26,6 +29,12 @@
     Loader2,
     Palette,
     Eye,
+    Copy,
+    Plus,
+    PenTool,
+    CheckCircle2,
+    Clock,
+    Users,
   } from 'lucide-svelte';
 
   const store = useEditorStore();
@@ -34,17 +43,43 @@
 
   type EditableStandardField = 'title' | 'author' | 'subject' | 'creator' | 'producer' | 'keywords';
 
+  const STANDARD_METADATA_KEYS: readonly EditableStandardField[] = [
+    'title',
+    'author',
+    'subject',
+    'creator',
+    'producer',
+    'keywords',
+  ];
+
+  const STANDARD_METADATA_KEY_SET = new Set<string>([
+    ...STANDARD_METADATA_KEYS,
+    'creationdate',
+    'moddate',
+    'trapped',
+  ]);
+
   let metadata = $state<DocumentMetadata | null>(null);
+  let signatureResults = $state<SignatureValidationResult[]>([]);
+  let isValidatingSignatures = $state(false);
+  let savedCount = $state(0);
+  let savedCertCount = $state(0);
   let userPassword = $state('');
   let ownerPassword = $state('');
   let showAllFields = $state(false);
 
   let editingKey = $state<string | null>(null);
   let editingInitialValue = '';
+  let editingInitialKey = '';
+
+  let selectedMetadataKeys = $state<string[]>([]);
+  let lastSelectedMetadataKey = $state<string | null>(null);
+  let isActivelyTypingInKey = $state(false);
 
   let isApplyingSecurity = $state(false);
   let isRemovingSecurity = $state(false);
   let isUnlockingForms = $state(false);
+  let isRawDictCopied = $state(false);
   let securityMessage = $state<string | null>(null);
   let securityError = $state<string | null>(null);
 
@@ -78,9 +113,210 @@
     return '-';
   });
 
+  interface CustomFieldItem {
+    id: string;
+    key: string;
+    value: string;
+    persistedKey?: string;
+    persistedValue?: string;
+  }
+
+  let customFieldEntries = $state<CustomFieldItem[]>([]);
+  let nextCustomRowId = 1;
+  let hasInitialisedCustomFields = false;
+
+  function buildInitialCustomFields(meta: DocumentMetadata | null): CustomFieldItem[] {
+    if (!meta) return [];
+    const map = new Map<string, string>();
+    if (meta.customMetadata) {
+      for (const [k, v] of Object.entries(meta.customMetadata)) {
+        map.set(k, v || '');
+      }
+    }
+    if (meta.allEntries) {
+      for (const entry of meta.allEntries) {
+        if (!entry.isStandard && !map.has(entry.key)) {
+          map.set(entry.key, entry.value || '');
+        }
+      }
+    }
+    const sortedKeys = Array.from(map.keys()).sort((a, b) => a.localeCompare(b));
+    return sortedKeys.map((key) => {
+      const value = map.get(key) ?? '';
+      return {
+        id: `custom-row-${nextCustomRowId++}`,
+        key,
+        value,
+        persistedKey: key,
+        persistedValue: value,
+      };
+    });
+  }
+
+  function reconcileCustomFieldsFromMetadata(meta: DocumentMetadata | null): void {
+    if (!meta) {
+      customFieldEntries = [];
+      hasInitialisedCustomFields = false;
+      return;
+    }
+    if (!hasInitialisedCustomFields) {
+      customFieldEntries = buildInitialCustomFields(meta);
+      hasInitialisedCustomFields = true;
+      return;
+    }
+
+    const incoming = new Map<string, string>();
+    if (meta.customMetadata) {
+      for (const [k, v] of Object.entries(meta.customMetadata)) {
+        incoming.set(k, v || '');
+      }
+    }
+    if (meta.allEntries) {
+      for (const entry of meta.allEntries) {
+        if (!entry.isStandard && !incoming.has(entry.key)) {
+          incoming.set(entry.key, entry.value || '');
+        }
+      }
+    }
+
+    const updated: CustomFieldItem[] = [];
+    const seen = new Set<string>();
+    for (const existing of customFieldEntries) {
+      if (incoming.has(existing.key)) {
+        const val = incoming.get(existing.key) ?? '';
+        updated.push({
+          ...existing,
+          value: val,
+          persistedKey: existing.key,
+          persistedValue: val,
+        });
+        seen.add(existing.key);
+      } else if (existing.persistedKey === undefined) {
+        updated.push(existing);
+        seen.add(existing.key);
+      }
+    }
+    for (const [k, val] of incoming.entries()) {
+      if (!seen.has(k)) {
+        updated.push({
+          id: `custom-row-${nextCustomRowId++}`,
+          key: k,
+          value: val,
+          persistedKey: k,
+          persistedValue: val,
+        });
+      }
+    }
+    customFieldEntries = updated;
+  }
+
+  function syncMetadataCustomRecord(): Record<string, string> {
+    const record: Record<string, string> = {};
+    for (const entry of customFieldEntries) {
+      if (entry.key) {
+        record[entry.key] = entry.value;
+      }
+    }
+    if (metadata) {
+      metadata.customMetadata = record;
+      const standardEntries = (metadata.allEntries || []).filter((e) => e.isStandard);
+      const customEntries = customFieldEntries.map((entry) => ({
+        key: entry.key,
+        rawKey: `/${entry.key}`,
+        value: entry.value,
+        isStandard: false,
+      }));
+      metadata.allEntries = [...standardEntries, ...customEntries];
+    }
+    return record;
+  }
+
+  const totalMetadataCount = $derived.by<number>(() => {
+    return 6 + customFieldEntries.length;
+  });
+
+  const visibleCustomEntries = $derived.by<CustomFieldItem[]>(() => {
+    if (totalMetadataCount <= 8 || showAllFields) {
+      return customFieldEntries;
+    }
+    const customLimit = Math.max(0, 8 - 6);
+    return customFieldEntries.slice(0, customLimit);
+  });
+
+  const selectableMetadataKeys = $derived.by<string[]>(() => {
+    return visibleCustomEntries.map((entry) => entry.key);
+  });
+
+  let lastLoadedKey = '';
+  let lastLoadedFileId: string | null = null;
+  let isFetchingMetadata = false;
+  let pendingMetadataRefresh = false;
+  let pendingSignatureLoad = false;
+  let isComponentMounted = true;
+  let metadataUpdateChain: Promise<void> = Promise.resolve();
+
   $effect(() => {
-    if (store.isDocumentLoaded) {
-      void store.renderVersion;
+    isComponentMounted = true;
+    return () => {
+      isComponentMounted = false;
+    };
+  });
+
+  $effect(() => {
+    // note: re-evaluate signature count when e-sign or cert-sign dialog opens or closes
+    void store.showEsignDialog;
+    void store.showCertSignDialog;
+    savedCount = getSavedSignatures().length;
+    savedCertCount = getSavedDigitalSignatures().length;
+  });
+
+  $effect(() => {
+    const isLoaded = store.isDocumentLoaded;
+    const fileId = store.activeWorkspaceFileId;
+    const version = store.renderVersion;
+
+    untrack(() => {
+      if (!isLoaded) {
+        lastLoadedKey = '';
+        lastLoadedFileId = null;
+        metadata = null;
+        signatureResults = [];
+        customFieldEntries = [];
+        hasInitialisedCustomFields = false;
+        selectedMetadataKeys = [];
+        lastSelectedMetadataKey = null;
+        isActivelyTypingInKey = false;
+        return;
+      }
+
+      if (fileId !== lastLoadedFileId) {
+        lastLoadedFileId = fileId;
+        customFieldEntries = [];
+        hasInitialisedCustomFields = false;
+        selectedMetadataKeys = [];
+        lastSelectedMetadataKey = null;
+        isActivelyTypingInKey = false;
+      }
+
+      const currentKey = `${fileId}:${version}`;
+      if (currentKey === lastLoadedKey) {
+        return;
+      }
+      lastLoadedKey = currentKey;
+
+      void refreshMetadataAndSignatures();
+    });
+  });
+
+  async function refreshMetadataAndSignatures(): Promise<void> {
+    if (!store.isDocumentLoaded || !isComponentMounted) return;
+    if (isFetchingMetadata) {
+      pendingMetadataRefresh = true;
+      return;
+    }
+    isFetchingMetadata = true;
+
+    try {
       if (!metadata) {
         try {
           metadata = actions.service.document.getMetadata();
@@ -88,18 +324,186 @@
           metadata = null;
         }
       }
-      actions
-        .getExtendedDocumentMetadata()
-        .then((meta) => {
-          metadata = meta;
-        })
-        .catch(() => {
-          // Fallback
-        });
-    } else {
-      metadata = null;
+
+      try {
+        const extended = await actions.getExtendedDocumentMetadata();
+        if (isComponentMounted) {
+          metadata = extended;
+          reconcileCustomFieldsFromMetadata(extended);
+        }
+      } catch {
+        if (isComponentMounted && metadata && !hasInitialisedCustomFields) {
+          reconcileCustomFieldsFromMetadata(metadata);
+        }
+      }
+
+      if (isComponentMounted) {
+        await loadSignatures();
+      }
+    } finally {
+      isFetchingMetadata = false;
+      if (pendingMetadataRefresh && isComponentMounted && store.isDocumentLoaded) {
+        pendingMetadataRefresh = false;
+        void refreshMetadataAndSignatures();
+      }
     }
-  });
+  }
+
+  async function loadSignatures(): Promise<void> {
+    if (!store.isDocumentLoaded || !isComponentMounted) return;
+    if (isValidatingSignatures) {
+      pendingSignatureLoad = true;
+      return;
+    }
+
+    isValidatingSignatures = true;
+    try {
+      const results = await actions.validateActiveDocumentSignatures();
+      if (isComponentMounted) {
+        signatureResults = results;
+      }
+    } catch {
+      if (isComponentMounted) {
+        signatureResults = [];
+      }
+    } finally {
+      if (isComponentMounted) {
+        isValidatingSignatures = false;
+        if (pendingSignatureLoad && store.isDocumentLoaded) {
+          pendingSignatureLoad = false;
+          void loadSignatures();
+        }
+      }
+    }
+  }
+
+  async function handleApplySecurity(): Promise<void> {
+    if (!userPassword && !ownerPassword) return;
+    isApplyingSecurity = true;
+    securityMessage = null;
+    securityError = null;
+    try {
+      await actions.applyPasswordSecurity(userPassword, ownerPassword);
+      userPassword = '';
+      ownerPassword = '';
+      securityMessage = 'Password protection successfully applied.';
+      metadata = actions.service.document.getMetadata();
+    } catch (err) {
+      securityError = err instanceof Error ? err.message : 'Failed to apply password security.';
+    } finally {
+      isApplyingSecurity = false;
+    }
+  }
+
+  async function handleRemoveSecurity(): Promise<void> {
+    isRemovingSecurity = true;
+    securityMessage = null;
+    securityError = null;
+    try {
+      await actions.removePasswordSecurity(ownerPassword || undefined);
+      ownerPassword = '';
+      securityMessage = 'Document security removed successfully.';
+      metadata = actions.service.document.getMetadata();
+    } catch (err) {
+      securityError = err instanceof Error ? err.message : 'Failed to remove security.';
+    } finally {
+      isRemovingSecurity = false;
+    }
+  }
+
+  async function handleUnlockForms(): Promise<void> {
+    isUnlockingForms = true;
+    securityMessage = null;
+    securityError = null;
+    try {
+      const res = await actions.unlockForms();
+      if (res.fieldsUnlockedCount > 0 || res.annotationsUnlockedCount > 0) {
+        securityMessage = `Unlocked ${res.fieldsUnlockedCount} form fields (${res.annotationsUnlockedCount} widgets).`;
+      } else {
+        securityMessage = 'All form fields are already editable.';
+      }
+    } catch (err) {
+      securityError = err instanceof Error ? err.message : 'Failed to unlock form fields.';
+    } finally {
+      isUnlockingForms = false;
+    }
+  }
+
+  async function enqueueMetadataUpdate(updates: DocumentMetadataUpdate): Promise<void> {
+    const runUpdate = async (): Promise<void> => {
+      try {
+        await actions.updateDocumentMetadata(updates);
+        lastLoadedKey = `${store.activeWorkspaceFileId}:${store.renderVersion}`;
+      } catch (err) {
+        console.error('Failed to update document metadata:', err);
+      }
+    };
+    const nextPromise = metadataUpdateChain.then(runUpdate, runUpdate);
+    metadataUpdateChain = nextPromise;
+    return nextPromise;
+  }
+
+  function sanitizeCustomMetadataKey(raw: string): string {
+    return raw.replace(/^\//, '').replace(/[\r\n\t]+/g, ' ').trim();
+  }
+
+  function generateNextCustomMetadataKey(): string {
+    const existingLower = new Set<string>(STANDARD_METADATA_KEY_SET);
+    for (const item of customFieldEntries) {
+      existingLower.add(item.key.toLowerCase());
+    }
+    let index = 1;
+    while (existingLower.has(`customtag${index}`)) {
+      index += 1;
+    }
+    return `CustomTag${index}`;
+  }
+
+  function selectElementContents(el: HTMLElement): void {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function handleAddMetadataTag(): void {
+    if (!featureFlags.isEnabled('settings.metadata.add')) return;
+    if (!metadata || store.isReadOnly) return;
+
+    const nextKey = generateNextCustomMetadataKey();
+    const rowId = `custom-row-${nextCustomRowId++}`;
+    customFieldEntries = [
+      ...customFieldEntries,
+      {
+        id: rowId,
+        key: nextKey,
+        value: '',
+        persistedKey: undefined,
+        persistedValue: undefined,
+      },
+    ];
+    showAllFields = true;
+    selectedMetadataKeys = [nextKey];
+    lastSelectedMetadataKey = nextKey;
+    isActivelyTypingInKey = false;
+
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        if (!isComponentMounted || typeof document === 'undefined') return;
+        const keyEl = document.querySelector<HTMLElement>(
+          `[data-metadata-custom-key="${CSS.escape(nextKey)}"]`
+        );
+        if (keyEl) {
+          keyEl.focus();
+          selectElementContents(keyEl);
+          isActivelyTypingInKey = false;
+        }
+      });
+    }
+  }
 
   function getStandardFieldValue(field: EditableStandardField): string {
     if (!metadata) return '';
@@ -114,6 +518,7 @@
     const el = event.currentTarget as HTMLElement;
     editingKey = field;
     editingInitialValue = getStandardFieldValue(field);
+    isActivelyTypingInKey = false;
     if (el.textContent?.trim() === '-') {
       el.textContent = '';
     }
@@ -140,14 +545,116 @@
       [field]: value,
     };
     metadata[field] = value;
-
-    try {
-      await actions.updateDocumentMetadata(updates);
-      metadata = await actions.getExtendedDocumentMetadata();
-    } catch (err) {
-      console.error(`Failed to update metadata field ${field}:`, err);
-      metadata = await actions.getExtendedDocumentMetadata().catch(() => metadata);
+    if (field === 'keywords') {
+      metadata.keywordsArray = value
+        ? value
+            .split(/[,;]+/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
     }
+
+    await enqueueMetadataUpdate(updates);
+  }
+
+  function handleCustomKeyFocus(key: string, event: FocusEvent): void {
+    if (store.isReadOnly) {
+      (event.currentTarget as HTMLElement).blur();
+      return;
+    }
+    editingKey = `custom-key:${key}`;
+    editingInitialKey = key;
+    if (!selectedMetadataKeys.includes(key)) {
+      selectedMetadataKeys = [key];
+      lastSelectedMetadataKey = key;
+    }
+  }
+
+  async function handleCustomKeyBlur(key: string, event: FocusEvent): Promise<void> {
+    const el = event.currentTarget as HTMLElement;
+    const rawKey = el.textContent?.trim() ?? '';
+    const sanitizedKey = sanitizeCustomMetadataKey(rawKey);
+    const initialKey = editingInitialKey || key;
+    editingKey = null;
+    isActivelyTypingInKey = false;
+
+    if (!sanitizedKey) {
+      el.textContent = initialKey;
+      return;
+    }
+
+    if (
+      sanitizedKey !== initialKey &&
+      (STANDARD_METADATA_KEY_SET.has(sanitizedKey.toLowerCase()) ||
+        customFieldEntries.some((entry) => entry.key === sanitizedKey))
+    ) {
+      el.textContent = initialKey;
+      return;
+    }
+
+    el.textContent = sanitizedKey;
+
+    const row = customFieldEntries.find((entry) => entry.key === initialKey);
+    const isUnpersistedRow = row && row.persistedKey === undefined;
+
+    if (sanitizedKey !== initialKey || isUnpersistedRow) {
+      await saveCustomKey(
+        initialKey,
+        sanitizedKey,
+        event.relatedTarget as HTMLElement | null
+      );
+    }
+  }
+
+  async function saveCustomKey(
+    oldKey: string,
+    newKey: string,
+    relatedTarget: HTMLElement | null = null
+  ): Promise<void> {
+    if (!metadata || store.isReadOnly) return;
+
+    const idx = customFieldEntries.findIndex((entry) => entry.key === oldKey);
+    if (idx === -1) return;
+
+    const targetRow = customFieldEntries[idx];
+    const oldPersistedKey = targetRow.persistedKey;
+
+    customFieldEntries[idx] = {
+      ...targetRow,
+      key: newKey,
+    };
+
+    if (editingKey === `custom:${oldKey}`) {
+      editingKey = `custom:${newKey}`;
+    }
+
+    if (selectedMetadataKeys.includes(oldKey)) {
+      selectedMetadataKeys = selectedMetadataKeys.map((k) => (k === oldKey ? newKey : k));
+    }
+    if (lastSelectedMetadataKey === oldKey) {
+      lastSelectedMetadataKey = newKey;
+    }
+
+    const isMovingToSameRowValue =
+      relatedTarget?.getAttribute('data-metadata-row-id') === targetRow.id;
+    if (isMovingToSameRowValue) {
+      return;
+    }
+
+    const nextCustom = syncMetadataCustomRecord();
+    const removeKeys =
+      oldPersistedKey && oldPersistedKey !== newKey ? [oldPersistedKey] : undefined;
+
+    customFieldEntries[idx] = {
+      ...customFieldEntries[idx],
+      persistedKey: newKey,
+      persistedValue: customFieldEntries[idx].value,
+    };
+
+    await enqueueMetadataUpdate({
+      customMetadata: nextCustom,
+      removeKeys,
+    });
   }
 
   function handleCustomFocus(key: string, event: FocusEvent): void {
@@ -157,7 +664,11 @@
     }
     const el = event.currentTarget as HTMLElement;
     editingKey = `custom:${key}`;
-    editingInitialValue = metadata?.customMetadata?.[key] ?? '';
+    editingInitialValue =
+      customFieldEntries.find((d) => d.key === key)?.value ??
+      metadata?.customMetadata?.[key] ??
+      '';
+    isActivelyTypingInKey = false;
     if (el.textContent?.trim() === '-') {
       el.textContent = '';
     }
@@ -173,27 +684,146 @@
       el.textContent = '-';
     }
 
-    if (value !== initial) {
+    const row = customFieldEntries.find((entry) => entry.key === key);
+    const hasUnpersistedChange =
+      row !== undefined && (row.persistedKey !== row.key || row.persistedValue !== value);
+
+    if (value !== initial || hasUnpersistedChange) {
       await saveCustomField(key, value);
     }
   }
 
   async function saveCustomField(key: string, value: string): Promise<void> {
     if (!metadata || store.isReadOnly) return;
-    const customMetadata: Record<string, string> = {
-      ...(metadata.customMetadata || {}),
-      [key]: value,
-    };
-    if (metadata.customMetadata) {
-      metadata.customMetadata[key] = value;
+
+    const idx = customFieldEntries.findIndex((entry) => entry.key === key);
+    let oldPersistedKey: string | undefined;
+    if (idx !== -1) {
+      oldPersistedKey = customFieldEntries[idx].persistedKey;
+      customFieldEntries[idx] = {
+        ...customFieldEntries[idx],
+        value,
+        persistedKey: key,
+        persistedValue: value,
+      };
     }
 
-    try {
-      await actions.updateDocumentMetadata({ customMetadata });
-      metadata = await actions.getExtendedDocumentMetadata();
-    } catch (err) {
-      console.error(`Failed to update custom metadata field ${key}:`, err);
-      metadata = await actions.getExtendedDocumentMetadata().catch(() => metadata);
+    const customMetadata = syncMetadataCustomRecord();
+    const removeKeys =
+      oldPersistedKey && oldPersistedKey !== key ? [oldPersistedKey] : undefined;
+
+    await enqueueMetadataUpdate({
+      customMetadata,
+      removeKeys,
+    });
+  }
+
+  function handleMetadataKeyClick(key: string, event: MouseEvent): void {
+    if (store.isReadOnly) return;
+    isActivelyTypingInKey = false;
+    const isMulti = event.ctrlKey || event.metaKey;
+    const isRange = event.shiftKey;
+
+    if (isRange && lastSelectedMetadataKey) {
+      const keys = selectableMetadataKeys;
+      const startIdx = keys.indexOf(lastSelectedMetadataKey);
+      const endIdx = keys.indexOf(key);
+      if (startIdx !== -1 && endIdx !== -1) {
+        const [from, to] = startIdx <= endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+        selectedMetadataKeys = keys.slice(from, to + 1);
+        return;
+      }
+    }
+
+    if (isMulti) {
+      if (selectedMetadataKeys.includes(key)) {
+        selectedMetadataKeys = selectedMetadataKeys.filter((k) => k !== key);
+      } else {
+        selectedMetadataKeys = [...selectedMetadataKeys, key];
+      }
+      lastSelectedMetadataKey = key;
+      return;
+    }
+
+    selectedMetadataKeys = [key];
+    lastSelectedMetadataKey = key;
+  }
+
+  function focusMetadataKeyElement(key: string): void {
+    if (typeof document === 'undefined') return;
+    const target = document.querySelector<HTMLElement>(
+      `[data-metadata-key="${CSS.escape(key)}"]`
+    );
+    target?.focus();
+  }
+
+  async function deleteSelectedMetadataFields(keysToDelete?: string[]): Promise<void> {
+    if (!featureFlags.isEnabled('settings.metadata.delete')) return;
+    if (!metadata || store.isReadOnly) return;
+
+    const targets = keysToDelete && keysToDelete.length > 0 ? keysToDelete : selectedMetadataKeys;
+    if (targets.length === 0) return;
+
+    const currentVisibleKeys = [...selectableMetadataKeys];
+    const firstTargetIdx = currentVisibleKeys.findIndex((k) => targets.includes(k));
+
+    const updates: DocumentMetadataUpdate = {};
+    const customKeysToRemove: string[] = [];
+    const persistedCustomKeysToRemove: string[] = [];
+
+    for (const key of targets) {
+      if ((STANDARD_METADATA_KEYS as readonly string[]).includes(key)) {
+        const stdKey = key as EditableStandardField;
+        updates[stdKey] = '';
+        metadata[stdKey] = '';
+      } else {
+        customKeysToRemove.push(key);
+        const existingRow = customFieldEntries.find((entry) => entry.key === key);
+        if (existingRow?.persistedKey) {
+          persistedCustomKeysToRemove.push(existingRow.persistedKey);
+        } else if (!existingRow) {
+          persistedCustomKeysToRemove.push(key);
+        }
+      }
+    }
+
+    if (customKeysToRemove.length > 0) {
+      const removeSet = new Set(customKeysToRemove);
+      customFieldEntries = customFieldEntries.filter((entry) => !removeSet.has(entry.key));
+      syncMetadataCustomRecord();
+      if (persistedCustomKeysToRemove.length > 0) {
+        updates.removeKeys = persistedCustomKeysToRemove;
+      }
+    }
+
+    selectedMetadataKeys = selectedMetadataKeys.filter((k) => !targets.includes(k));
+    if (lastSelectedMetadataKey && targets.includes(lastSelectedMetadataKey)) {
+      lastSelectedMetadataKey = selectedMetadataKeys[selectedMetadataKeys.length - 1] ?? null;
+    }
+    editingKey = null;
+    isActivelyTypingInKey = false;
+
+    const remainingKeys = currentVisibleKeys.filter((k) => !targets.includes(k));
+    if (remainingKeys.length > 0 && firstTargetIdx !== -1) {
+      const nextFocusKey =
+        remainingKeys[Math.min(firstTargetIdx, remainingKeys.length - 1)];
+      if (nextFocusKey) {
+        selectedMetadataKeys = [nextFocusKey];
+        lastSelectedMetadataKey = nextFocusKey;
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => {
+            focusMetadataKeyElement(nextFocusKey);
+          });
+        }
+      }
+    }
+
+    if (
+      Object.keys(updates).length > 0 &&
+      (updates.removeKeys !== undefined ||
+        STANDARD_METADATA_KEYS.some((k) => updates[k] !== undefined))
+    ) {
+      await enqueueMetadataUpdate(updates);
     }
   }
 
