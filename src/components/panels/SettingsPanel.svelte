@@ -827,6 +827,108 @@
     }
   }
 
+  function handleCustomKeyKeydown(key: string, event: KeyboardEvent): void {
+    if (store.isReadOnly) {
+      event.preventDefault();
+      return;
+    }
+
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      isActivelyTypingInKey = false;
+      const keys = selectableMetadataKeys;
+      const currentIdx = keys.indexOf(key);
+      if (currentIdx === -1) return;
+      const nextIdx =
+        event.key === 'ArrowDown'
+          ? Math.min(keys.length - 1, currentIdx + 1)
+          : Math.max(0, currentIdx - 1);
+      const nextKey = keys[nextIdx];
+      if (!nextKey) return;
+
+      if (event.shiftKey && lastSelectedMetadataKey) {
+        const anchorIdx = keys.indexOf(lastSelectedMetadataKey);
+        const [from, to] =
+          anchorIdx !== -1 && anchorIdx <= nextIdx
+            ? [anchorIdx, nextIdx]
+            : [nextIdx, anchorIdx !== -1 ? anchorIdx : currentIdx];
+        selectedMetadataKeys = keys.slice(from, to + 1);
+      } else {
+        selectedMetadataKeys = [nextKey];
+        lastSelectedMetadataKey = nextKey;
+      }
+      focusMetadataKeyElement(nextKey);
+      return;
+    }
+
+    if (event.key === 'Backspace' || event.key === 'Delete') {
+      if (!featureFlags.isEnabled('settings.metadata.delete')) return;
+      const el = event.currentTarget as HTMLElement;
+      const currentText = el.textContent?.trim() ?? '';
+      const hasMultiSelection = selectedMetadataKeys.length > 1;
+      const isKeySelected = selectedMetadataKeys.includes(key);
+
+      if (hasMultiSelection || !currentText || (isKeySelected && !isActivelyTypingInKey)) {
+        event.preventDefault();
+        const targets =
+          selectedMetadataKeys.length > 0 && selectedMetadataKeys.includes(key)
+            ? [...selectedMetadataKeys]
+            : [key];
+        void deleteSelectedMetadataFields(targets);
+        return;
+      }
+      return;
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      isActivelyTypingInKey = false;
+      (event.currentTarget as HTMLElement).blur();
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      isActivelyTypingInKey = false;
+      const el = event.currentTarget as HTMLElement;
+      el.textContent = editingInitialKey || key;
+      el.blur();
+      return;
+    }
+
+    if (
+      event.key === 'ArrowLeft' ||
+      event.key === 'ArrowRight' ||
+      event.key === 'Home' ||
+      event.key === 'End' ||
+      (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey)
+    ) {
+      isActivelyTypingInKey = true;
+    }
+  }
+
+  function handleMetadataContainerKeydown(event: KeyboardEvent): void {
+    if (store.isReadOnly || store.leftPanelMode !== 'settings') return;
+    if (event.defaultPrevented) return;
+    if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+    if (!featureFlags.isEnabled('settings.metadata.delete')) return;
+    if (selectedMetadataKeys.length === 0) return;
+
+    const target = event.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable ||
+        target.getAttribute('contenteditable') !== null)
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    void deleteSelectedMetadataFields([...selectedMetadataKeys]);
+  }
+
   function handleKeydown(event: KeyboardEvent): void {
     if (store.isReadOnly) {
       event.preventDefault();
@@ -854,55 +956,47 @@
     document.execCommand('insertText', false, cleanText);
   }
 
-  async function handleApplySecurity(): Promise<void> {
-    if (!userPassword && !ownerPassword) return;
-    isApplyingSecurity = true;
-    securityMessage = null;
-    securityError = null;
-    try {
-      await actions.applyPasswordSecurity(userPassword, ownerPassword);
-      userPassword = '';
-      ownerPassword = '';
-      securityMessage = 'Password protection successfully applied.';
-      metadata = actions.service.document.getMetadata();
-    } catch (err) {
-      securityError = err instanceof Error ? err.message : 'Failed to apply password security.';
-    } finally {
-      isApplyingSecurity = false;
-    }
-  }
+  async function handleCopyRawDictXmp(): Promise<void> {
+    if (!metadata) return;
+    const parts: string[] = [];
 
-  async function handleRemoveSecurity(): Promise<void> {
-    isRemovingSecurity = true;
-    securityMessage = null;
-    securityError = null;
-    try {
-      await actions.removePasswordSecurity(ownerPassword || undefined);
-      ownerPassword = '';
-      securityMessage = 'Document security removed successfully.';
-      metadata = actions.service.document.getMetadata();
-    } catch (err) {
-      securityError = err instanceof Error ? err.message : 'Failed to remove security.';
-    } finally {
-      isRemovingSecurity = false;
-    }
-  }
-
-  async function handleUnlockForms(): Promise<void> {
-    isUnlockingForms = true;
-    securityMessage = null;
-    securityError = null;
-    try {
-      const res = await actions.unlockForms();
-      if (res.fieldsUnlockedCount > 0 || res.annotationsUnlockedCount > 0) {
-        securityMessage = `Unlocked ${res.fieldsUnlockedCount} form fields (${res.annotationsUnlockedCount} widgets).`;
-      } else {
-        securityMessage = 'All form fields are already editable.';
+    const rawDict: Record<string, string> = {};
+    if (metadata.allEntries && metadata.allEntries.length > 0) {
+      for (const entry of metadata.allEntries) {
+        rawDict[entry.rawKey || `/${entry.key}`] = entry.value;
       }
+    } else {
+      if (metadata.title) rawDict['/Title'] = metadata.title;
+      if (metadata.author) rawDict['/Author'] = metadata.author;
+      if (metadata.subject) rawDict['/Subject'] = metadata.subject;
+      if (metadata.keywords) rawDict['/Keywords'] = metadata.keywords;
+      if (metadata.creator) rawDict['/Creator'] = metadata.creator;
+      if (metadata.producer) rawDict['/Producer'] = metadata.producer;
+      if (metadata.creationDate) rawDict['/CreationDate'] = metadata.creationDate;
+      if (metadata.modDate) rawDict['/ModDate'] = metadata.modDate;
+      if (metadata.trapped && metadata.trapped !== 'Unknown') rawDict['/Trapped'] = metadata.trapped;
+      if (metadata.customMetadata) {
+        for (const [k, v] of Object.entries(metadata.customMetadata)) {
+          rawDict[`/${k}`] = v;
+        }
+      }
+    }
+
+    parts.push(`// Raw Info Dictionary\n${JSON.stringify(rawDict, null, 2)}`);
+
+    if (metadata.xmpString) {
+      parts.push(`<!-- XMP Metadata Stream -->\n${metadata.xmpString}`);
+    }
+
+    const payload = parts.join('\n\n');
+    try {
+      await navigator.clipboard.writeText(payload);
+      isRawDictCopied = true;
+      setTimeout(() => {
+        isRawDictCopied = false;
+      }, 2000);
     } catch (err) {
-      securityError = err instanceof Error ? err.message : 'Failed to unlock form fields.';
-    } finally {
-      isUnlockingForms = false;
+      console.warn('Failed to copy raw dictionary and XMP stream:', err);
     }
   }
 
@@ -911,11 +1005,13 @@
   }
 </script>
 
+<svelte:window onkeydown={handleMetadataContainerKeydown} />
+
 <div class="panel-root">
-  <!-- Document info and metadata -->
-  <SidebarSection title="Document Info & Metadata" borderBottom={true}>
+  <!-- note: document info -->
+  <SidebarSection title="Document Info" borderBottom={true}>
     {#if store.isReadOnly}
-      <div class="panel-metric-banner mb-2 flex items-center justify-between py-1.5 px-2 bg-muted/40 rounded-md border border-border/50 text-[11px] text-muted-foreground">
+      <div class="panel-metric-banner flex items-center justify-between py-1.5 px-2 bg-muted/40 rounded-md border border-border/50 text-[11px] text-muted-foreground">
         <div class="flex items-center gap-1.5">
           <Eye class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
           <span>Viewing Mode (Read-only)</span>
@@ -924,7 +1020,94 @@
       </div>
     {/if}
     {#if metadata}
-      <div class="panel-metric-banner mb-2">
+      <div class="panel-metric-banner">
+        <div class="panel-key-value-grid">
+          <div class="panel-key-label">File Name</div>
+          <div class="panel-value-text truncate" title={store.fileName}>
+            {store.fileName}
+          </div>
+
+          <div class="panel-key-label">Size</div>
+          <div class="panel-value-text" title={formattedDocumentSize}>
+            {formattedDocumentSize}
+          </div>
+
+          <div class="panel-key-label">Pages</div>
+          <div class="panel-value-text">
+            {metadata.pageCount || store.pageCount} {(metadata.pageCount || store.pageCount) === 1 ? 'page' : 'pages'}
+          </div>
+
+          <div class="panel-key-label">Specification</div>
+          <div class="panel-value-text">
+            PDF {metadata.pdfVersion || '1.4'}
+          </div>
+
+          <div class="panel-key-label">Created</div>
+          <div class="panel-value-text" title={metadata.creationDateFormatted || '-'}>
+            {metadata.creationDateFormatted || '-'}
+          </div>
+
+          <div class="panel-key-label">Modified</div>
+          <div class="panel-value-text" title={metadata.modDateFormatted || '-'}>
+            {metadata.modDateFormatted || '-'}
+          </div>
+
+          <div class="panel-key-label">Trapped</div>
+          <div class="panel-value-text flex items-center">
+            {#if metadata.trapped === 'True'}
+              <Badge variant="default" class="text-[10px] py-0 leading-none">Trapped</Badge>
+            {:else if metadata.trapped === 'False'}
+              <Badge variant="outline" class="text-[10px] py-0 leading-none">Untrapped</Badge>
+            {:else}
+              <span class="text-muted-foreground">-</span>
+            {/if}
+          </div>
+
+          <div class="panel-key-label">XMP Stream</div>
+          <div class="panel-value-text flex items-center">
+            {#if metadata.hasXmp}
+              <Badge variant="default" class="text-[10px] py-0 leading-none">Embedded Packet</Badge>
+            {:else}
+              <span class="text-muted-foreground">None</span>
+            {/if}
+          </div>
+
+          {#if metadata.keywordsArray && metadata.keywordsArray.length > 0}
+            <div class="panel-key-label">Keywords & Tags</div>
+            <div class="panel-value-text flex flex-wrap items-center gap-1">
+              {#each metadata.keywordsArray as tag}
+                <Badge variant="secondary" class="text-[10px] px-1.5 py-0 leading-none font-sans">
+                  {tag}
+                </Badge>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </div>
+    {:else}
+      <div class="text-xs text-muted-foreground flex items-center gap-1.5">
+        <Info class="h-3.5 w-3.5" /> No document loaded
+      </div>
+    {/if}
+
+    {#if featureFlags.isEnabled('settings.toc')}
+      <div class="panel-action-stack">
+        <Button
+          variant="panel"
+          onclick={() => triggerTool('Edit Table of Contents')}
+          disabled={!store.isDocumentLoaded}
+        >
+          <ListTree class="panel-icon-sm text-muted-foreground" /> Edit Table of Contents
+        </Button>
+      </div>
+    {/if}
+  </SidebarSection>
+
+  <!-- note: metadata -->
+  <SidebarSection title="Metadata" borderBottom={true}>
+    <p class="panel-description">Inspect and edit standard and custom PDF metadata properties.</p>
+    {#if metadata}
+      <div class="panel-metric-banner">
         <div class="panel-key-value-grid">
           <div class="panel-key-label">Title</div>
           <div
@@ -958,11 +1141,6 @@
             onpaste={handlePaste}
           >
             {metadata.author || '-'}
-          </div>
-
-          <div class="panel-key-label">Size</div>
-          <div class="panel-value-text" title={formattedDocumentSize}>
-            {formattedDocumentSize}
           </div>
 
           <div class="panel-key-label">Subject</div>
@@ -1016,73 +1194,70 @@
             {metadata.producer || '-'}
           </div>
 
-          {#if showAllFields}
-            <div class="panel-key-label">Keywords</div>
-            <div
-              class="panel-value-text cursor-text outline-none select-text"
-              contenteditable="plaintext-only"
-              role="textbox"
-              aria-label="Keywords"
-              tabindex={0}
-              spellcheck={false}
-              title={editingKey === 'keywords' ? '' : (metadata.keywords || '-')}
-              onfocus={(e) => handleFocus('keywords', e)}
-              onblur={(e) => handleBlur('keywords', e)}
-              onkeydown={handleKeydown}
-              onpaste={handlePaste}
-            >
-              {metadata.keywords || '-'}
-            </div>
+          <div class="panel-key-label">Keywords</div>
+          <div
+            class="panel-value-text cursor-text outline-none select-text"
+            contenteditable="plaintext-only"
+            role="textbox"
+            aria-label="Keywords"
+            tabindex={0}
+            spellcheck={false}
+            title={editingKey === 'keywords' ? '' : (metadata.keywords || '-')}
+            onfocus={(e) => handleFocus('keywords', e)}
+            onblur={(e) => handleBlur('keywords', e)}
+            onkeydown={handleKeydown}
+            onpaste={handlePaste}
+          >
+            {metadata.keywords || '-'}
+          </div>
 
-            {#if metadata.creationDateFormatted}
-              <div class="panel-key-label">Created</div>
-              <div class="panel-value-text" title={metadata.creationDateFormatted}>
-                {metadata.creationDateFormatted}
+          <!-- note: dynamic custom metadata tags -->
+          {#if visibleCustomEntries.length > 0}
+            {#each visibleCustomEntries as customField (customField.id)}
+              <!-- <Badge variant="secondary" class="text-[8px] px-0.5 py-0 h-3 leading-none font-sans">
+                custom
+              </Badge> -->
+              <div
+                class="panel-key-label rounded-xs px-1 -mx-1 cursor-text outline-none select-text transition-colors {selectedMetadataKeys.includes(customField.key) ? 'bg-secondary text-foreground ring-1 ring-ring' : 'focus-visible:ring-1 focus-visible:ring-ring'}"
+                contenteditable="plaintext-only"
+                role="textbox"
+                aria-label={`Metadata key ${customField.key}`}
+                data-selected={selectedMetadataKeys.includes(customField.key)}
+                tabindex={0}
+                spellcheck={false}
+                data-metadata-key={customField.key}
+                data-metadata-custom-key={customField.key}
+                title={editingKey === `custom-key:${customField.key}` ? '' : customField.key}
+                onclick={(e) => handleMetadataKeyClick(customField.key, e)}
+                onfocus={(e) => handleCustomKeyFocus(customField.key, e)}
+                onblur={(e) => handleCustomKeyBlur(customField.key, e)}
+                onkeydown={(e) => handleCustomKeyKeydown(customField.key, e)}
+                onpaste={handlePaste}
+              >
+                {customField.key}
               </div>
-            {/if}
-
-            {#if metadata.modDateFormatted}
-              <div class="panel-key-label">Modified</div>
-              <div class="panel-value-text" title={metadata.modDateFormatted}>
-                {metadata.modDateFormatted}
+              <div
+                class="panel-value-text rounded-xs px-1 -mx-1 cursor-text outline-none select-text transition-colors {selectedMetadataKeys.includes(customField.key) ? 'bg-secondary/60 text-foreground' : ''}"
+                contenteditable="plaintext-only"
+                role="textbox"
+                aria-label={customField.key}
+                tabindex={0}
+                spellcheck={false}
+                data-metadata-row-id={customField.id}
+                data-metadata-custom-value={customField.key}
+                title={editingKey === `custom:${customField.key}` ? '' : (customField.value || '-')}
+                onfocus={(e) => handleCustomFocus(customField.key, e)}
+                onblur={(e) => handleCustomBlur(customField.key, e)}
+                onkeydown={handleKeydown}
+                onpaste={handlePaste}
+              >
+                {customField.value || '-'}
               </div>
-            {/if}
-
-            {#if metadata.trapped && metadata.trapped !== 'Unknown'}
-              <div class="panel-key-label">Trapped</div>
-              <div class="panel-value-text">{metadata.trapped}</div>
-            {/if}
-
-            <!-- Dynamic Custom Metadata Fields -->
-            {#if metadata.customMetadata && Object.keys(metadata.customMetadata).length > 0}
-              {#each Object.entries(metadata.customMetadata) as [key, val] (key)}
-                <div class="panel-key-label flex items-center gap-1">
-                  <span class="truncate" title={key}>{key}</span>
-                  <Badge variant="secondary" class="text-[8px] px-0.5 py-0 h-3 leading-none font-sans">
-                    custom
-                  </Badge>
-                </div>
-                <div
-                  class="panel-value-text cursor-text outline-none select-text"
-                  contenteditable="plaintext-only"
-                  role="textbox"
-                  aria-label={key}
-                  tabindex={0}
-                  spellcheck={false}
-                  title={editingKey === `custom:${key}` ? '' : (val || '-')}
-                  onfocus={(e) => handleCustomFocus(key, e)}
-                  onblur={(e) => handleCustomBlur(key, e)}
-                  onkeydown={handleKeydown}
-                  onpaste={handlePaste}
-                >
-                  {val || '-'}
-                </div>
-              {/each}
-            {/if}
+            {/each}
           {/if}
         </div>
 
-        {#if metadata.allEntries && metadata.allEntries.length > 5}
+        {#if totalMetadataCount > 8}
           <button
             type="button"
             class="panel-action-link-primary flex items-center gap-1 self-start pt-0.5 rounded-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -1092,65 +1267,57 @@
             {#if showAllFields}
               <ChevronDown class="h-3 w-3" aria-hidden="true" /> Show fewer fields
             {:else}
-              <ChevronRight class="h-3 w-3" aria-hidden="true" /> Show all {metadata.allEntries.length} metadata fields
+              <ChevronRight class="h-3 w-3" aria-hidden="true" /> Show all {totalMetadataCount} metadata fields
             {/if}
           </button>
         {/if}
       </div>
     {:else}
-      <div class="text-xs text-muted-foreground flex items-center gap-1.5 mb-2">
+      <div class="text-xs text-muted-foreground flex items-center gap-1.5">
         <Info class="h-3.5 w-3.5" /> No document loaded
       </div>
     {/if}
 
     <div class="panel-action-stack">
-      {#if featureFlags.isEnabled('document-info')}
-      <Button
-        variant="panel"
-        onclick={() => actions.openDocumentInfoDialog()}
-        disabled={!store.isDocumentLoaded}
-      >
-        <FileText class="panel-icon-sm text-primary" /> Get ALL Info on PDF
-      </Button>
+      {#if featureFlags.isEnabled('settings.metadata.add')}
+        <Button
+          variant="panel"
+          onclick={handleAddMetadataTag}
+          disabled={!store.isDocumentLoaded || store.isReadOnly}
+        >
+          <Plus class="panel-icon-sm" /> Add Metadata Tag
+        </Button>
       {/if}
 
-      {#if featureFlags.isEnabled('settings.toc')}
       <Button
         variant="panel"
-        onclick={() => triggerTool('Edit Table of Contents')}
+        onclick={handleCopyRawDictXmp}
         disabled={!store.isDocumentLoaded}
+        title="Copy raw Info dictionary and XMP stream to clipboard"
       >
-        <ListTree class="panel-icon-sm text-muted-foreground" /> Edit Table of Contents
+        {#if isRawDictCopied}
+          <Check class="panel-icon-sm" /> Copied Raw Dict & XMP
+        {:else}
+          <Copy class="panel-icon-sm" /> Copy Raw Dict & XMP Stream
+        {/if}
       </Button>
-      {/if}
-
-      {#if featureFlags.isEnabled('sanitization')}
-      <Button
-        variant="panel"
-        onclick={() => actions.openSanitizeDialog()}
-        disabled={!store.isDocumentLoaded}
-      >
-        <ShieldCheck class="panel-icon-sm text-primary" /> Sanitise Document
-      </Button>
-      {/if}
     </div>
   </SidebarSection>
 
-
-  <!-- Password protection and security -->
+  <!-- note: password protection and access permissions section -->
   {#if featureFlags.isEnabled('security')}
   <SidebarSection title="Password Security & Access" borderBottom={true}>
-    <p class="panel-description">Set or remove document passwords and permissions.</p>
+    <p class="panel-description">Set or remove document passwords and configure access permissions.</p>
 
     {#if securityMessage}
-      <div class="mb-2 panel-status-pill">
+      <div role="status" class="panel-status-pill">
         <Check class="h-3 w-3 shrink-0" />
         <span>{securityMessage}</span>
       </div>
     {/if}
 
     {#if securityError}
-      <div class="mb-2 panel-error-pill">
+      <div role="alert" class="panel-error-pill">
         <AlertCircle class="h-3 w-3 shrink-0" />
         <span>{securityError}</span>
       </div>
@@ -1162,7 +1329,7 @@
           <div class="panel-card-inset">
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-1.5 text-xs font-medium text-foreground">
-                <Lock class="h-3.5 w-3.5 text-primary" /> Document Protected
+                <Lock class="h-3.5 w-3.5" /> Document Protected
               </div>
               <Badge variant="default" class="text-[10px]">Encrypted</Badge>
             </div>
@@ -1186,7 +1353,7 @@
             <Button
               variant="outline"
               size="sm"
-              class="w-full text-xs h-7 justify-center text-destructive hover:text-destructive mt-1"
+              class="w-full text-xs h-7 justify-center text-foreground hover:text-foreground"
               onclick={handleRemoveSecurity}
               disabled={!store.isDocumentLoaded || isRemovingSecurity || store.isReadOnly}
             >
@@ -1232,16 +1399,28 @@
             {#if isApplyingSecurity}
               <Loader2 class="h-3.5 w-3.5 mr-2 animate-spin" /> Encrypting...
             {:else}
-              <Lock class="h-3.5 w-3.5 mr-2 text-primary" /> Apply Password Security
+              <Lock class="h-3.5 w-3.5 mr-2" /> Apply Password Security
             {/if}
           </Button>
         {/if}
       {/if}
 
-      <div class="panel-action-stack mt-1">
+      <div class="panel-action-stack">
+        {#if featureFlags.isEnabled('security.permissions')}
+        <Button
+          variant="panel"
+          class="w-full"
+          onclick={() => actions.openPermissionsDialog()}
+          disabled={!store.isDocumentLoaded || store.isReadOnly}
+        >
+          <FileKey class="panel-icon-sm text-muted-foreground" /> Permissions
+        </Button>
+        {/if}
+
         {#if featureFlags.isEnabled('security.unlock-forms')}
         <Button
           variant="panel"
+          class="w-full"
           onclick={handleUnlockForms}
           disabled={!store.isDocumentLoaded || isUnlockingForms || store.isReadOnly}
         >
@@ -1252,23 +1431,102 @@
           {/if}
         </Button>
         {/if}
-
-        {#if featureFlags.isEnabled('security.permissions')}
-        <Button
-          variant="panel"
-          onclick={() => actions.openPermissionsDialog()}
-          disabled={!store.isDocumentLoaded || store.isReadOnly}
-        >
-          <FileKey class="panel-icon-sm text-muted-foreground" /> Permissions
-        </Button>
-        {/if}
       </div>
     </div>
   </SidebarSection>
   {/if}
 
-  <!-- Repair and developer tools -->
-  {#if featureFlags.isEnabled('tools')}
+  <!-- note: unified signatures, e-sign actions, and statutory compliance verification -->
+  {#if featureFlags.isEnabled('signatures') || featureFlags.isEnabled('security')}
+  <SidebarSection title="Signatures & Verification" borderBottom={featureFlags.isEnabled('settings.repair-developer-info')}>
+    <p class="panel-description">Digital PKCS#12 certificates, electronic signing, and statutory compliance verification.</p>
+
+    {#if featureFlags.isEnabled('signatures')}
+    <div class="panel-action-stack">
+      {#if featureFlags.isEnabled('signatures.esign')}
+      <Button
+        variant="panel"
+        class="w-full relative"
+        onclick={() => actions.openEsignDialog('signatures')}
+        disabled={!store.isDocumentLoaded || store.isReadOnly}
+      >
+        <PenTool class="panel-icon-sm" /> Add E-Sign
+        {#if savedCount > 0}
+          <span class="ml-auto bg-secondary text-foreground text-[10px] font-semibold px-1 rounded border border-border">
+            {savedCount}
+          </span>
+        {/if}
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('signatures.cert-sign')}
+      <Button
+        variant="panel"
+        class="w-full relative"
+        onclick={() => actions.openCertSignDialog()}
+        disabled={!store.isDocumentLoaded || store.isReadOnly}
+      >
+        <ShieldCheck class="panel-icon-sm" /> Cert Sign
+        {#if featureFlags.isEnabled('signatures.cert-sign.saved') && savedCertCount > 0}
+          <span class="ml-auto bg-secondary text-foreground text-[10px] font-semibold px-1 rounded border border-border">
+            {savedCertCount}
+          </span>
+        {/if}
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('signatures.validate')}
+      <Button
+        variant="panel"
+        class="w-full"
+        onclick={() => actions.openValidateSignaturesDialog()}
+        disabled={!store.isDocumentLoaded}
+      >
+        <CheckCircle2 class="panel-icon-sm" /> Validate
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('signatures.timestamp')}
+      <Button
+        variant="panel"
+        class="w-full"
+        onclick={() => triggerTool('Timestamp PDF')}
+        disabled={!store.isDocumentLoaded || store.isReadOnly}
+      >
+        <Clock class="panel-icon-sm text-muted-foreground" /> Timestamp
+      </Button>
+      {/if}
+
+      {#if featureFlags.isEnabled('signatures.shared')}
+      <Button
+        variant="panel"
+        class="w-full"
+        onclick={() => triggerTool('Shared Signing')}
+        disabled={!store.isDocumentLoaded || store.isReadOnly}
+      >
+        <Users class="panel-icon-sm" /> Shared Signing Workflow
+      </Button>
+      {/if}
+    </div>
+    {/if}
+
+    {#if featureFlags.isEnabled('security')}
+    <SecurityComplianceSection
+      {metadata}
+      {signatureResults}
+      {isValidatingSignatures}
+      showEncryptionBanner={false}
+      showHeader={false}
+      onRefreshSignatures={loadSignatures}
+      onOpenCertSign={() => actions.openCertSignDialog()}
+      onOpenValidateDialog={() => actions.openValidateSignaturesDialog()}
+    />
+    {/if}
+  </SidebarSection>
+  {/if}
+
+  <!-- note: repair and developer tools -->
+  {#if featureFlags.isEnabled('settings.repair-developer-info')}
   <SidebarSection title="Repair & Developer Info" borderBottom={false}>
     <p class="panel-description">Repair damaged PDFs or inspect embedded JavaScript.</p>
 
@@ -1289,7 +1547,7 @@
         onclick={() => triggerTool('Show Embedded JavaScript')}
         disabled={!store.isDocumentLoaded}
       >
-        <Code2 class="panel-icon-sm text-primary" /> Show Embedded JavaScript
+        <Code2 class="panel-icon-sm" /> Show Embedded JavaScript
       </Button>
       {/if}
 
@@ -1298,7 +1556,7 @@
         variant="panel"
         onclick={() => store.openComponentGalleryDialog()}
       >
-        <Palette class="panel-icon-sm text-primary" /> UI Component Gallery
+        <Palette class="panel-icon-sm" /> UI Component Gallery
       </Button>
       {/if}
 
@@ -1318,4 +1576,3 @@
   </SidebarSection>
   {/if}
 </div>
-
