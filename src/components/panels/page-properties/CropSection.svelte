@@ -244,16 +244,10 @@
           <span class="text-muted-foreground">Original:</span>
           <span class="font-sans">{origWidth} x {origHeight} {activeUnit}</span>
         </div>
-        <button
-          type="button"
-          class="flex items-center justify-between font-medium text-primary cursor-pointer hover:underline text-left rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          onclick={() => widthInputEl?.focus()}
-          title="Click to adjust crop width and height"
-          aria-label="Click to adjust crop width and height"
-        >
-          <span>Cropped:</span>
-          <span class="font-sans tabular-nums">{croppedWidth} x {croppedHeight} {activeUnit}</span>
-        </button>
+        <div class="flex items-center justify-between font-medium">
+          <span class="text-muted-foreground">Cropped:</span>
+          <span class="font-sans">{croppedWidth} x {croppedHeight} {activeUnit}</span>
+        </div>
       </div>
 
       <!-- Crop Size Grid (Direct Width & Height) -->
@@ -271,6 +265,7 @@
               onchange={(e) => handleDimensionChange('width', e)}
               onkeydown={(e) => handleDimensionKeydown('width', e)}
               class="field-input font-sans"
+              aria-label="Crop Width"
             />
           </div>
           <div class="field-group">
@@ -283,6 +278,7 @@
               onchange={(e) => handleDimensionChange('height', e)}
               onkeydown={(e) => handleDimensionKeydown('height', e)}
               class="field-input font-sans"
+              aria-label="Crop Height"
             />
           </div>
         </div>
@@ -333,6 +329,7 @@
               onchange={(e) => handleInputChange('top', e)}
               onkeydown={(e) => handleMarginKeydown('top', e)}
               class="field-input"
+              aria-label="Crop Top"
             />
           </div>
           <div class="field-group">
@@ -345,6 +342,7 @@
               onchange={(e) => handleInputChange('bottom', e)}
               onkeydown={(e) => handleMarginKeydown('bottom', e)}
               class="field-input"
+              aria-label="Crop Bottom"
             />
           </div>
           <div class="field-group">
@@ -357,6 +355,7 @@
               onchange={(e) => handleInputChange('left', e)}
               onkeydown={(e) => handleMarginKeydown('left', e)}
               class="field-input"
+              aria-label="Crop Left"
             />
           </div>
           <div class="field-group">
@@ -369,6 +368,7 @@
               onchange={(e) => handleInputChange('right', e)}
               onkeydown={(e) => handleMarginKeydown('right', e)}
               class="field-input"
+              aria-label="Crop Right"
             />
           </div>
         </div>
@@ -376,18 +376,16 @@
 
       <!-- Presets -->
       <div class="field-group">
-        <div class="flex items-center justify-between">
-          <Label class="field-label">Presets</Label>
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-6 px-2 text-xs text-primary hover:text-primary gap-1 cursor-pointer"
-            onclick={handleAutoTrim}
-          >
-            <Sparkles class="w-3.5 h-3.5" /> Auto-Trim
-          </Button>
-        </div>
+        <Label class="field-label">Presets</Label>
         <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
+          <Button
+            variant="outline"
+            class="flex-1 h-8 text-xs"
+            onclick={handleAutoTrim}
+            title="Auto-Trim Page Content"
+          >
+            <Sparkles class="w-3.5 h-3.5 mr-1" /> Auto
+          </Button>
           <Button
             variant="outline"
             class="flex-1 h-8 text-xs"
@@ -438,7 +436,7 @@
               class="flex-1 h-8 text-xs font-normal"
               onclick={() => setScope('all')}
             >
-              All ({store.pageCount})
+              All
             </Button>
             <Button
               variant={activeScope === 'selected' ? 'default' : 'outline'}
@@ -456,7 +454,7 @@
       <div class="flex flex-col gap-2 pt-1">
         <div class="flex items-center gap-2">
           <Button
-            variant="default"
+            variant="secondary"
             class="flex-1 h-8 text-xs font-medium"
             onclick={handleApplyCrop}
           >
@@ -480,7 +478,5 @@
         </Button>
       </div>
     </div>
-  {:else}
-    <div class="text-xs text-muted-foreground">No document loaded</div>
   {/if}
 </SidebarSection>
