@@ -60,6 +60,7 @@
   $effect(() => {
     void store.pageCount;
     void store.currentPageIndex;
+    void store.effectivePageOrder;
     // Break reactive cycle: updateVisibleThumbnails writes visibleThumbnailRange
     // which must not re-trigger this effect
     untrack(() => updateVisibleThumbnails());
@@ -224,7 +225,7 @@
 
 <div
   bind:this={stripEl}
-  class="flex flex-col gap-1 py-1 min-h-full"
+  class="flex flex-col gap-1 min-h-full"
   ondragover={handleStripDragOver}
   ondragleave={handleStripDragLeave}
   ondrop={handleStripDrop}
@@ -232,9 +233,10 @@
   aria-label="Page thumbnail strip"
 >
   {#if store.pageCount <= 30 || (featureFlags && !featureFlags.isEnabled('performance.virtual-rendering'))}
-    {#each Array.from({ length: store.pageCount }, (_, i) => i) as pageIdx (pageIdx)}
+    {#each store.effectivePageOrder as pageIdx, visualSlot (pageIdx)}
       <PageThumbnail
         pageIndex={pageIdx}
+        displayIndex={visualSlot}
         isActive={store.currentPageIndex === pageIdx}
       />
     {/each}
@@ -244,9 +246,10 @@
     {#if topSpacerHeight > 0}
       <div style="height: {topSpacerHeight}px;" aria-hidden="true"></div>
     {/if}
-    {#each Array.from({ length: Math.max(0, visibleThumbnailRange.end - visibleThumbnailRange.start + 1) }, (_, i) => visibleThumbnailRange.start + i) as pageIdx (pageIdx)}
+    {#each store.effectivePageOrder.slice(visibleThumbnailRange.start, visibleThumbnailRange.end + 1) as pageIdx, offset (pageIdx)}
       <PageThumbnail
         pageIndex={pageIdx}
+        displayIndex={visibleThumbnailRange.start + offset}
         isActive={store.currentPageIndex === pageIdx}
       />
     {/each}
