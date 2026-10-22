@@ -7,15 +7,19 @@
 
   interface Props {
     pageIndex: number;
+    displayIndex?: number;
     isActive: boolean;
     onDropFiles?: (fileIds: string[], targetIndex: number) => void;
   }
 
-  let { pageIndex, isActive, onDropFiles }: Props = $props();
+  let { pageIndex, displayIndex, isActive, onDropFiles }: Props = $props();
 
   const store = useEditorStore();
   const actions = useEditorActions();
   const selection = useSelection();
+
+  const optRotation = $derived((store.getOptimisticRotation(pageIndex) + store.getPendingRenderRotation(pageIndex)) % 360);
+  const isOptimisticallyDeleted = $derived(store.isPageOptimisticallyDeleted(pageIndex));
 
   function canDropGroup(sourceGroup: string, indices: number[], payload: Record<string, string>): boolean {
     if (sourceGroup === 'pages') {
@@ -113,13 +117,13 @@
 
 <DraggableListItem
   id={`page_${pageIndex}`}
-  index={pageIndex}
+  index={displayIndex !== undefined ? displayIndex : pageIndex}
   group="pages"
   acceptGroups={['files']}
   canDrop={canDropGroup}
   onDropFromGroup={handleDropFromGroup}
   draggable={store.canReorderPages && !store.isReadOnly}
-  class="group flex items-center gap-2.5 p-1.5 rounded-md cursor-pointer transition-colors text-xs [&>*]:pointer-events-none {selection.isSelected(`page_${pageIndex}`) ? 'bg-primary/10 text-foreground font-medium' : isActive ? 'bg-muted/60 text-foreground font-medium' : 'hover:bg-muted/60 text-foreground font-normal'}"
+  class="group flex items-center gap-2.5 p-1.5 rounded-md cursor-pointer transition-[max-height,margin,padding,opacity,transform,background-color] duration-200 text-xs [&>*]:pointer-events-none outline-none focus-visible:ring-1.5 focus-visible:ring-ring {selection.isSelected(`page_${pageIndex}`) ? 'bg-secondary text-foreground font-medium' : isActive ? 'bg-muted/60 text-foreground font-medium' : 'hover:bg-muted/60 text-foreground font-normal'} {isOptimisticallyDeleted ? 'opacity-30 pointer-events-none max-h-0 -my-1 py-0 scale-95 overflow-hidden transition-[max-height,margin,padding,opacity,transform,background-color] duration-200' : 'max-h-12 opacity-100 transition-[max-height,margin,padding,opacity,transform,background-color] duration-200'}"
   getDragIndices={() => {
     const ids = Array.from(selection.selectedIds);
     const selected = ids
@@ -152,11 +156,14 @@
   role="button"
   tabindex={0}
 >
-  <div class="w-7 h-8.5 flex items-center justify-center shrink-0">
-    <PageThumbnailImage pageIndex={pageIndex} scale={0.25} class="max-w-full max-h-full w-auto h-auto object-contain rounded border border-border/50 bg-white shadow-2xs" />
+  <div 
+    class="w-7 h-8.5 flex items-center justify-center shrink-0"
+    style={optRotation !== 0 ? `transform: rotate(${optRotation}deg);` : undefined}
+  >
+    <PageThumbnailImage pageIndex={pageIndex} scale={0.25} class="max-w-full max-h-full w-auto h-auto object-contain rounded border border-border/50 bg-white" />
   </div>
 
-  <span class="truncate flex-1 text-xs tabular-nums">
-    Page {pageIndex + 1}
+  <span class="truncate flex-1 text-xs" title={`Page ${(displayIndex !== undefined ? displayIndex : pageIndex) + 1}`}>
+    Page {(displayIndex !== undefined ? displayIndex : pageIndex) + 1}
   </span>
 </DraggableListItem>
