@@ -10,8 +10,6 @@
   import { ArrowUp, ArrowDown, Copy, Trash2, Plus, FilePlus2, ImagePlus } from 'lucide-svelte';
   import PageThumbnailImage from '../common/PageThumbnailImage.svelte';
 
-  import { CompoundCommand, RotatePageCommand } from '../../commands';
-
   const editorStore = useEditorStore();
   const actions = useEditorActions();
   const featureFlags = useFeatureFlagStore();
@@ -48,13 +46,7 @@
   async function handleRotateSelected(): Promise<void> {
     if (editorStore.isReadOnly) return;
     const targets = selectedIndices.length > 0 ? selectedIndices : [currentPageIndex];
-    if (targets.length === 1) {
-      actions.rotatePage(targets[0]);
-    } else {
-      const commands = targets.map((idx) => new RotatePageCommand('Rotate Page', idx, 90));
-      await actions.executeCommand(new CompoundCommand('Rotate Pages', commands));
-    }
-    onRefresh();
+    await actions.rotatePage(targets, 90);
   }
 
   async function handleDeleteSelected(): Promise<void> {
@@ -67,19 +59,8 @@
       return;
     }
 
-    if (targets.length === 1) {
-      await actions.deletePage(targets[0]);
-    } else {
-      await actions.executeDocumentMutation('Delete Pages', targets[targets.length - 1], () => {
-        for (const idx of targets) {
-          actions.service.document.deletePage(idx);
-        }
-        editorStore.pageCount = actions.service.document.getPageCount();
-        editorStore.currentPageIndex = Math.max(0, Math.min(editorStore.currentPageIndex, editorStore.pageCount - 1));
-      });
-    }
     selectedIndices = [];
-    onRefresh();
+    await actions.deletePage(targets);
   }
 
   async function handleDuplicateSelected(): Promise<void> {
@@ -89,7 +70,6 @@
     ).sort((a, b) => b - a);
 
     await actions.duplicatePage(targets);
-    onRefresh();
   }
 
   async function handleAddBlankPage(): Promise<void> {
@@ -99,7 +79,6 @@
         ? Math.max(...selectedIndices)
         : currentPageIndex;
     await actions.addBlankPage(targetIdx);
-    onRefresh();
   }
 
   async function handleMovePage(fromIndex: number, direction: 'up' | 'down'): Promise<void> {
@@ -107,7 +86,6 @@
     const toIndex = direction === 'up' ? fromIndex - 1 : fromIndex + 1;
     if (toIndex < 0 || toIndex >= pageCount) return;
     await actions.reorderPages([fromIndex], toIndex);
-    onRefresh();
   }
 
   function handleDragStart(index: number, e: DragEvent): void {
@@ -134,9 +112,9 @@
     e.preventDefault();
     if (editorStore.isReadOnly || !editorStore.canReorderPages) return;
     if (dragSourceIndex !== null && dragSourceIndex !== targetIndex) {
-      await actions.reorderPages([dragSourceIndex], targetIndex);
+      const sourceIdx = dragSourceIndex;
       dragSourceIndex = null;
-      onRefresh();
+      await actions.reorderPages([sourceIdx], targetIndex);
     }
   }
 
@@ -220,15 +198,15 @@
   class="hidden"
 />
 
-<div class="flex flex-col h-full bg-background rounded-lg border shadow-xs overflow-hidden">
+<div class="flex flex-col h-full bg-background rounded-lg border overflow-hidden">
   <div class="flex items-center justify-between p-3 border-b bg-card">
     <div class="flex items-center gap-2">
       <span class="font-semibold text-sm">Page Organizer</span>
-      <Badge variant="outline" class="text-xs tabular-nums">
+      <Badge variant="outline" class="text-xs">
         {pageCount} {pageCount === 1 ? 'page' : 'pages'}
       </Badge>
       {#if selectedIndices.length > 0}
-        <Badge variant="secondary" class="text-xs tabular-nums">
+        <Badge variant="secondary" class="text-xs">
           {selectedIndices.length} selected
         </Badge>
       {/if}
@@ -267,7 +245,7 @@
 
       {#if featureFlags.isEnabled('page-actions.delete')}
       <Button
-        variant="destructive"
+        variant="outline"
         size="sm"
         disabled={pageCount <= 1 || editorStore.isReadOnly || selectedIndices.length === 0}
         onclick={handleDeleteSelected}
@@ -312,28 +290,34 @@
 
   <div class="flex-1 min-h-0 overflow-y-auto p-4">
     <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-      {#each Array.from({ length: pageCount }, (_, i) => i) as index (index)}
+      {#each editorStore.effectivePageOrder as index, visualIdx (index)}
         {@const isSelected = selectedIndices.includes(index)}
         {@const isCurrent = currentPageIndex === index}
+        {@const isOptimisticallyDeleted = editorStore.isPageOptimisticallyDeleted(index)}
+        {@const optRotation = editorStore.getOptimisticRotation(index) + editorStore.getPendingRenderRotation(index)}
 
         <div
-          class="group relative flex flex-col items-center p-2 rounded-lg border bg-card transition-[box-shadow,border-color,background-color] duration-150 hover:shadow-elevation-2 cursor-pointer select-none {isSelected ? 'ring-2 ring-primary border-primary bg-accent/20' : ''} {isCurrent && !isSelected ? 'border-primary/50' : ''}"
+          class="group relative flex flex-col items-center p-2 rounded-lg border bg-card transition-[border-color,background-color,opacity,transform] duration-200 cursor-pointer select-none outline-none focus-visible:ring-2 focus-visible:ring-ring {isSelected ? 'ring-2 ring-ring border-border bg-secondary' : ''} {isCurrent && !isSelected ? 'border-border bg-muted/40 font-medium' : ''} {isOptimisticallyDeleted ? 'opacity-0 scale-75 pointer-events-none' : 'opacity-100 scale-100'}"
           onclick={(e) => toggleSelectPage(index, e)}
           onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleSelectPage(index, e as unknown as MouseEvent); }}
           role="button"
           tabindex="0"
+          aria-label={`Select page ${visualIdx + 1}`}
           draggable={featureFlags.isEnabled('page-actions.reorder') && !editorStore.isReadOnly && editorStore.canReorderPages}
-          ondragstart={(e) => handleDragStart(index, e)}
+          ondragstart={(e) => handleDragStart(visualIdx, e)}
           ondragover={handleDragOver}
-          ondrop={(e) => handleDrop(index, e)}
+          ondrop={(e) => handleDrop(visualIdx, e)}
         >
-          <div class="w-full aspect-[1/1.4] bg-muted rounded overflow-hidden flex items-center justify-center relative shadow-xs">
+          <div 
+            class="w-full aspect-[1/1.4] bg-muted rounded overflow-hidden flex items-center justify-center relative"
+            style={optRotation !== 0 ? `transform: rotate(${optRotation}deg);` : undefined}
+          >
             <PageThumbnailImage pageIndex={index} scale={0.3} class="w-full h-full object-contain" />
           </div>
 
           <div class="flex items-center justify-between w-full mt-2 text-xs">
-            <span class="font-medium text-muted-foreground tabular-nums">
-              Page {index + 1}
+            <span class="font-medium text-muted-foreground">
+              Page {visualIdx + 1}
             </span>
 
             {#if featureFlags.isEnabled('page-actions.reorder')}
@@ -342,8 +326,8 @@
                 variant="ghost"
                 size="icon"
                 class="h-6 w-6"
-                disabled={index === 0 || editorStore.isReadOnly || !editorStore.canReorderPages}
-                onclick={(e) => { e.stopPropagation(); handleMovePage(index, 'up'); }}
+                disabled={visualIdx === 0 || editorStore.isReadOnly || !editorStore.canReorderPages || (!featureFlags.isEnabled('performance.optimistic-actions.mutation-queue') && editorStore.isMutating)}
+                onclick={(e) => { e.stopPropagation(); handleMovePage(visualIdx, 'up'); }}
                 title="Move Up"
                 aria-label="Move page up"
               >
@@ -353,8 +337,8 @@
                 variant="ghost"
                 size="icon"
                 class="h-6 w-6"
-                disabled={index === pageCount - 1 || editorStore.isReadOnly || !editorStore.canReorderPages}
-                onclick={(e) => { e.stopPropagation(); handleMovePage(index, 'down'); }}
+                disabled={visualIdx === pageCount - 1 || editorStore.isReadOnly || !editorStore.canReorderPages || (!featureFlags.isEnabled('performance.optimistic-actions.mutation-queue') && editorStore.isMutating)}
+                onclick={(e) => { e.stopPropagation(); handleMovePage(visualIdx, 'down'); }}
                 title="Move Down"
                 aria-label="Move page down"
               >
