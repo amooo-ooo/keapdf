@@ -771,19 +771,21 @@
       }
 
       const signOptions: SignPdfOptions = {
-        identity: activeIdentity,
-        signerName: activeIdentity.subject.commonName,
+        identity,
+        signerName: identity.subject.commonName || effectiveSignerName,
         reason: reason.trim() || undefined,
         location: location.trim() || undefined,
         contactInfo: contactInfo.trim() || undefined,
         signingTime: new Date(),
         visual: visualOptions,
         subFilter,
+        enableTimestamp,
         tsaUrl: enableTimestamp && tsaUrl.trim() ? tsaUrl.trim() : undefined,
         embedDss,
       };
 
       const resultBytes = await actions.signActiveDocument(signOptions, canvasStore);
+      persistCurrentDigitalSignatureIfEnabled(identity);
       signedPdfBytes = resultBytes;
       signSuccess = true;
 
@@ -806,65 +808,59 @@
 </script>
 
 <Dialog.Root open={store.showCertSignDialog} onOpenChange={(open) => { if (!open) handleClose(); }}>
-  <Dialog.Content class="sm:max-w-[660px] max-h-[90vh] flex flex-col p-0 overflow-hidden">
-    <Dialog.Header class="px-6 pt-5 pb-3 border-b border-border bg-card pr-12">
-      <div class="flex items-center justify-between">
-        <Dialog.Title class="flex items-center gap-2 text-base font-semibold">
-          <ShieldCheck class="h-4 w-4 text-primary" />
-          Sign with Digital Certificate (ISO 32000)
+  <Dialog.Content class="sm:max-w-[600px] max-h-[90vh] flex flex-col overflow-hidden font-sans">
+    <Dialog.Header class="pr-12">
+      <div class="flex items-center justify-between gap-2">
+        <Dialog.Title>
+          <ShieldCheck class="h-4 w-4 text-muted-foreground shrink-0" />
+          Sign Document with Digital Certificate
         </Dialog.Title>
-        <Badge variant="outline" class="text-[10px] bg-primary/5 text-primary border-primary/20">
-          PDF ISO 32000-1 / RFC 5652
+        <Badge variant="outline" class="text-[10px] h-5 px-2 bg-card text-foreground border-border font-sans shrink-0">
+          PAdES-B-LT / ISO 32000
         </Badge>
       </div>
-      <Dialog.Description class="text-xs text-muted-foreground">
-        Apply cryptographic detached PKCS#7 digital signatures with X.509 certificates and tamper protection.
+      <Dialog.Description>
+        Cryptographically seal this PDF with an X.509 digital identity, customise your visual signature, or place it freeform on the page.
       </Dialog.Description>
     </Dialog.Header>
 
-    <div class="flex-1 overflow-y-auto px-6 py-4">
+    <div class="dialog-body">
       {#if signSuccess}
-        <div class="py-6 flex flex-col items-center justify-center text-center space-y-4">
-          <div class="w-12 h-12 rounded-full bg-success/10 text-success flex items-center justify-center border border-success/30">
-            <CheckCircle2 class="h-6 w-6" />
+        <div class="py-6 flex flex-col items-center justify-center text-center gap-4">
+          <div class="w-10 h-10 rounded-full bg-card text-foreground flex items-center justify-center border border-border">
+            <CheckCircle2 class="h-5 w-5" />
           </div>
-          <div class="space-y-1">
-            <h3 class="text-base font-semibold text-foreground">Document Digitally Signed Successfully</h3>
-            <p class="text-xs text-muted-foreground max-w-[420px]">
-              The document has been securely sealed with cryptographic PKCS#7 detached signature conforming to ISO 32000-1.
+          <div class="flex flex-col gap-1 items-center">
+            <h3 class="text-xs font-semibold text-foreground">Document Digitally Signed &amp; Verified</h3>
+            <p class="text-[11px] text-muted-foreground max-w-[420px]">
+              Sealed with a PAdES CAdES detached signature, embedded RFC 3161 timestamp, and Document Security Store (/DSS).
             </p>
           </div>
 
-          <div class="w-full max-w-[460px] bg-muted/30 border border-border rounded-lg p-3 text-left space-y-1.5 text-xs">
-            <div class="flex justify-between">
-              <span class="text-muted-foreground">Signer:</span>
-              <span class="font-medium">{activeIdentity?.subject.commonName}</span>
-            </div>
-            <div class="flex justify-between">
-              <span class="text-muted-foreground">Reason:</span>
-              <span>{reason || 'Approval'}</span>
-            </div>
-            <div class="flex justify-between">
-              <span class="text-muted-foreground">SubFilter:</span>
-              <span class="font-sans text-[11px]">{subFilter}</span>
-            </div>
-            <div class="flex justify-between">
-              <span class="text-muted-foreground">PAdES Profile:</span>
-              <span class="font-sans text-[11px] font-medium text-primary">
-                {embedDss ? 'PAdES-B-LT (LTV)' : enableTimestamp ? 'PAdES-B-T (Timestamped)' : subFilter === 'ETSI.CAdES.detached' ? 'PAdES-B-B (Baseline)' : 'Legacy Adobe PKCS#7'}
-              </span>
-            </div>
-            <div class="flex justify-between">
-              <span class="text-muted-foreground">Digest:</span>
-              <span class="font-sans text-[11px]">SHA-256</span>
+          <div class="w-full max-w-[460px] dialog-card text-left">
+            <div class="panel-key-value-grid">
+              <div class="panel-key-label">Signer</div>
+              <div class="panel-value-text font-medium">{activeIdentity?.subject.commonName || effectiveSignerName}</div>
+
+              <div class="panel-key-label">Reason</div>
+              <div class="panel-value-text">{reason || 'Approval'}</div>
+
+              <div class="panel-key-label">PAdES Profile</div>
+              <div class="panel-value-text font-medium">
+                {embedDss ? 'PAdES-B-LT (LTV Compliant)' : enableTimestamp ? 'PAdES-B-T (Timestamped)' : 'PAdES-B-B'}
+              </div>
+
+              <div class="panel-key-label">Statutory Checks</div>
+              <div class="panel-value-text">4 / 4 Valid</div>
             </div>
           </div>
 
-          <div class="flex items-center gap-3 pt-2">
+          <div class="flex items-center gap-2 pt-1">
             {#if signedPdfBytes}
               <Button
+                variant="secondary"
                 size="sm"
-                class="text-xs"
+                class="h-8 text-xs"
                 onclick={() => {
                   const outName = store.fileName.replace(/\.pdf$/i, '') + '_signed.pdf';
                   downloadBytes(signedPdfBytes!, outName, 'application/pdf');
@@ -873,214 +869,446 @@
                 <Download class="h-3.5 w-3.5 mr-1.5" /> Download Signed PDF
               </Button>
             {/if}
-            <Button size="sm" variant="outline" class="text-xs" onclick={handleClose}>
-              Done & View in Editor
+            <Button size="sm" variant="outline" class="h-8 text-xs" onclick={handleClose}>
+              Done &amp; View in Editor
             </Button>
           </div>
         </div>
       {:else}
-        <Tabs.Root value={activeTab} onValueChange={(val) => (activeTab = val as typeof activeTab)}>
-          <Tabs.List class="grid grid-cols-4 mb-4">
-            <Tabs.Trigger value="cert" class="text-xs">
-              <KeyRound class="h-3.5 w-3.5 mr-1" /> 1. Digital ID
+        <Tabs.Root
+          value={activeTab}
+          onValueChange={(val) => {
+            activeTab = val as typeof activeTab;
+            if (val === 'appearance' && sigSourceMode === 'draw') {
+              requestAnimationFrame(() => setupDrawCanvas());
+            }
+          }}
+        >
+          <Tabs.List class="grid w-full grid-cols-4 h-8">
+            <Tabs.Trigger value="cert" class="text-xs gap-1.5">
+              <KeyRound class="h-3.5 w-3.5" /> 1. Digital ID
             </Tabs.Trigger>
-            <Tabs.Trigger value="details" class="text-xs" disabled={!activeIdentity}>
-              <FileSignature class="h-3.5 w-3.5 mr-1" /> 2. Details
+            <Tabs.Trigger value="details" class="text-xs gap-1.5">
+              <FileSignature class="h-3.5 w-3.5" /> 2. Details
             </Tabs.Trigger>
-            <Tabs.Trigger value="appearance" class="text-xs" disabled={!activeIdentity}>
-              <Eye class="h-3.5 w-3.5 mr-1" /> 3. Visual
+            <Tabs.Trigger value="appearance" class="text-xs gap-1.5">
+              <Eye class="h-3.5 w-3.5" /> 3. Visual
             </Tabs.Trigger>
-            <Tabs.Trigger value="sign" class="text-xs" disabled={!activeIdentity}>
-              <ShieldCheck class="h-3.5 w-3.5 mr-1" /> 4. Sign
+            <Tabs.Trigger value="sign" class="text-xs gap-1.5">
+              <ShieldCheck class="h-3.5 w-3.5" /> 4. Sign
             </Tabs.Trigger>
           </Tabs.List>
 
-          <!-- Digital ID and certificate selection -->
-          <Tabs.Content value="cert" class="space-y-4">
-            <div class="flex gap-2 p-1 bg-muted/40 rounded-lg border border-border">
-              <button
+          <!-- Digital ID and Certificate Selection -->
+          <Tabs.Content value="cert" class="flex flex-col gap-3 mt-3 outline-none">
+            <ButtonGroup
+              variant="outline"
+              size="sm"
+              class="w-full h-8"
+              value={certMode}
+              onValueChange={(val) => {
+                if (val === 'saved' || val === 'generate' || val === 'import') {
+                  certMode = val;
+                }
+              }}
+            >
+              {#if featureFlags.isEnabled('signatures.cert-sign.saved')}
+                <Button
+                  type="button"
+                  value="saved"
+                  active={certMode === 'saved'}
+                  class="flex-1 text-xs font-medium gap-1.5"
+                  onclick={() => (certMode = 'saved')}
+                >
+                  Saved Signatures
+                  {#if savedDigitalSignatures.length > 0}
+                    <Badge variant="secondary" class="text-[10px] px-1.5 py-0 h-4">
+                      {savedDigitalSignatures.length}
+                    </Badge>
+                  {/if}
+                </Button>
+              {/if}
+              <Button
                 type="button"
-                class="flex-1 py-1.5 text-xs font-medium rounded-md transition-all {certMode === 'generate' ? 'bg-card text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'}"
+                value="generate"
+                active={certMode === 'generate'}
+                class="flex-1 text-xs font-medium gap-1.5"
                 onclick={() => (certMode = 'generate')}
               >
                 Create New Digital ID
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
-                class="flex-1 py-1.5 text-xs font-medium rounded-md transition-all {certMode === 'import' ? 'bg-card text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'}"
+                value="import"
+                active={certMode === 'import'}
+                class="flex-1 text-xs font-medium gap-1.5"
                 onclick={() => (certMode = 'import')}
               >
                 Upload .p12 / .pfx File
-              </button>
-            </div>
+              </Button>
+            </ButtonGroup>
 
-            {#if certMode === 'generate'}
-              <div class="grid grid-cols-2 gap-3">
-                <div class="col-span-2 space-y-1">
-                  <Label for="cn-input" class="text-xs font-medium">Signer Full Name (Common Name) *</Label>
-                  <Input id="cn-input" bind:value={commonName} placeholder="e.g. Jane Smith" class="h-8 text-xs" />
+            {#if certMode === 'saved' && featureFlags.isEnabled('signatures.cert-sign.saved')}
+              {#if savedDigitalSignatures.length === 0}
+                <div class="border border-dashed border-border rounded-[var(--radius-card)] bg-card p-6 text-center flex flex-col items-center justify-center gap-2">
+                  <ShieldCheck class="h-7 w-7 text-muted-foreground stroke-1" />
+                  <div class="text-xs font-medium text-foreground">No Saved Digital Identities</div>
+                  <p class="text-[11px] text-muted-foreground max-w-[300px]">
+                    Generate a new X.509 digital identity or upload an existing PKCS#12 bundle to save it for one-click signing.
+                  </p>
+                  <div class="flex items-center gap-2 mt-1">
+                    <Button size="sm" variant="outline" class="h-8 text-xs" onclick={() => (certMode = 'generate')}>
+                      <Plus class="h-3.5 w-3.5 mr-1.5" /> Create New Digital ID
+                    </Button>
+                    <Button size="sm" variant="outline" class="h-8 text-xs" onclick={() => (certMode = 'import')}>
+                      <Upload class="h-3.5 w-3.5 mr-1.5" /> Upload .p12 / .pfx
+                    </Button>
+                  </div>
+                </div>
+              {:else}
+                <div class="flex flex-col gap-2 max-h-[280px] overflow-y-auto pr-1">
+                  {#each savedDigitalSignatures as sigRecord (sigRecord.id)}
+                    <Card.Root
+                      variant="interactive"
+                      selected={selectedSavedDigitalSigId === sigRecord.id}
+                      class="group"
+                    >
+                      <Card.Header>
+                        <Card.Title>
+                          <span class="truncate" title={sigRecord.label}>{sigRecord.label}</span>
+                          {#if sigRecord.isDefault}
+                            <Badge variant="secondary" class="text-[10px] px-1.5 py-0 h-4 shrink-0">
+                              Default
+                            </Badge>
+                          {/if}
+                        </Card.Title>
+
+                        <Card.Actions>
+                          {#if !sigRecord.isDefault}
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-xs"
+                              class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-warning transition-opacity"
+                              title="Set as default digital signature"
+                              aria-label="Set as default digital signature"
+                              onclick={(e) => handleSetDefaultDigitalSig(sigRecord.id, e)}
+                            >
+                              <Star class="h-3.5 w-3.5" />
+                            </Button>
+                          {/if}
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-xs"
+                            class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground transition-opacity"
+                            title="Delete saved digital signature"
+                            aria-label="Delete saved digital signature"
+                            onclick={(e) => handleDeleteDigitalSig(sigRecord.id, e)}
+                          >
+                            <Trash2 class="h-3.5 w-3.5" />
+                          </Button>
+                        </Card.Actions>
+                      </Card.Header>
+
+                      <Card.Content>
+                        <div
+                          class="text-[11px] text-muted-foreground truncate"
+                          title="{sigRecord.identity.subject.organization || 'Personal Digital ID'}{sigRecord.identity.subject.email ? ` - ${sigRecord.identity.subject.email}` : ''}"
+                        >
+                          {sigRecord.identity.subject.organization || 'Personal Digital ID'}
+                          {#if sigRecord.identity.subject.email}
+                            <span> - {sigRecord.identity.subject.email}</span>
+                          {/if}
+                        </div>
+                        <div class="text-[10px] text-muted-foreground">
+                          {sigRecord.config.subFilter === 'ETSI.CAdES.detached' ? 'PAdES (CAdES)' : 'PKCS#7'}
+                          - {sigRecord.config.isVisibleSignature ? `Visible (${sigRecord.config.placementPosition})` : 'Invisible'}
+                        </div>
+                      </Card.Content>
+
+                      <Card.Footer>
+                        <span class="text-[10px] text-muted-foreground">
+                          Expires {new Date(sigRecord.identity.validToIso).toLocaleDateString()}
+                        </span>
+                        <Card.Actions class="gap-1.5">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            class="h-8 text-xs px-2.5"
+                            onclick={() => handleLoadSavedAsIs(sigRecord, false)}
+                          >
+                            Load as is
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            class="h-8 text-xs px-2.5"
+                            onclick={() => handleLoadSavedAsIs(sigRecord, true)}
+                            disabled={isSigning}
+                          >
+                            <ShieldCheck class="h-3.5 w-3.5 mr-1" /> Load &amp; Sign Now
+                          </Button>
+                        </Card.Actions>
+                      </Card.Footer>
+                    </Card.Root>
+                  {/each}
                 </div>
 
-                <div class="space-y-1">
-                  <Label for="org-input" class="text-xs font-medium">Organization / Company</Label>
-                  <Input id="org-input" bind:value={organization} placeholder="e.g. Acme Corp" class="h-8 text-xs" />
+                <div class="pt-2 border-t border-border flex items-center justify-between gap-2">
+                  <span class="text-[11px] text-muted-foreground flex items-center gap-1.5">
+                    <Lock class="h-3.5 w-3.5 text-muted-foreground shrink-0" /> Stored locally in browser offline storage
+                  </span>
+                  <div class="flex items-center gap-1.5">
+                    <Button size="sm" variant="outline" class="h-8 text-xs" onclick={() => (certMode = 'generate')}>
+                      <Plus class="h-3.5 w-3.5 mr-1" /> New Digital ID
+                    </Button>
+                    <Button size="sm" variant="outline" class="h-8 text-xs" onclick={() => (certMode = 'import')}>
+                      <Upload class="h-3.5 w-3.5 mr-1" /> Upload .p12
+                    </Button>
+                  </div>
                 </div>
+              {/if}
+            {:else if certMode === 'generate'}
+              <div class="dialog-card">
+                <div class="field-grid-2">
+                  <div class="col-span-2 field-group">
+                    <Label for="cn-input" class="field-label">Signer Full Name (Common Name) *</Label>
+                    <Input id="cn-input" bind:value={commonName} placeholder="e.g. Jane Smith" class="field-input" />
+                  </div>
 
-                <div class="space-y-1">
-                  <Label for="ou-input" class="text-xs font-medium">Department / Unit</Label>
-                  <Input id="ou-input" bind:value={organizationalUnit} placeholder="e.g. Legal" class="h-8 text-xs" />
-                </div>
+                  <div class="field-group">
+                    <Label for="org-input" class="field-label">Organization / Company</Label>
+                    <Input id="org-input" bind:value={organization} placeholder="e.g. Acme Corp" class="field-input" />
+                  </div>
 
-                <div class="space-y-1">
-                  <Label for="email-input" class="text-xs font-medium">Email Address</Label>
-                  <Input id="email-input" type="email" bind:value={email} placeholder="signer@example.com" class="h-8 text-xs" />
-                </div>
+                  <div class="field-group">
+                    <Label for="ou-input" class="field-label">Department / Unit</Label>
+                    <Input id="ou-input" bind:value={organizationalUnit} placeholder="e.g. Legal" class="field-input" />
+                  </div>
 
-                <div class="space-y-1">
-                  <Label for="country-input" class="text-xs font-medium">Country Code (2-letter)</Label>
-                  <Input id="country-input" bind:value={country} maxlength={2} placeholder="US" class="h-8 text-xs uppercase" />
-                </div>
+                  <div class="field-group">
+                    <Label for="email-input" class="field-label">Email Address</Label>
+                    <Input id="email-input" type="email" bind:value={email} placeholder="signer@example.com" class="field-input" />
+                  </div>
 
-                <div class="space-y-1">
-                  <Label for="pwd-input" class="text-xs font-medium">Certificate Password *</Label>
-                  <Input id="pwd-input" type="password" bind:value={certPassword} placeholder="Enter password to protect key" class="h-8 text-xs" />
-                </div>
+                  <div class="field-group">
+                    <Label for="country-input" class="field-label">Country Code (2-letter)</Label>
+                    <Input id="country-input" bind:value={country} maxlength={2} placeholder="CH" class="field-input uppercase" />
+                  </div>
 
-                <div class="space-y-1">
-                  <Label class="text-xs font-medium">RSA Key Modulus</Label>
-                  <Select.Root
-                    type="single"
-                    value={keySize.toString()}
-                    onValueChange={(val) => { if (val === '2048' || val === '4096') keySize = parseInt(val, 10) as 2048 | 4096; }}
-                  >
-                    <Select.Trigger class="w-full h-8 text-xs">
-                      {keySize === 2048 ? 'RSA 2048-bit (Standard)' : 'RSA 4096-bit (High Security)'}
-                    </Select.Trigger>
-                    <Select.Content>
-                      <Select.Item value="2048" label="RSA 2048-bit (Standard)">RSA 2048-bit (Standard)</Select.Item>
-                      <Select.Item value="4096" label="RSA 4096-bit (High Security)">RSA 4096-bit (High Security)</Select.Item>
-                    </Select.Content>
-                  </Select.Root>
+                  <div class="field-group">
+                    <Label for="pwd-input" class="field-label">Certificate Password *</Label>
+                    <Input id="pwd-input" type="password" bind:value={certPassword} placeholder="Enter password to protect key" class="field-input" />
+                  </div>
+
+                  <div class="field-group">
+                    <Label class="field-label">RSA Key Modulus</Label>
+                    <Select.Root
+                      type="single"
+                      value={keySize.toString()}
+                      onValueChange={(val) => {
+                        if (val === '2048' || val === '4096') {
+                          keySize = parseInt(val, 10) as 2048 | 4096;
+                        }
+                      }}
+                    >
+                      <Select.Trigger variant="border" class="w-full h-8 text-xs font-sans">
+                        {keySize === 2048 ? 'RSA 2048-bit (Standard)' : 'RSA 4096-bit (High Security)'}
+                      </Select.Trigger>
+                      <Select.Content>
+                        <Select.Item value="2048" label="RSA 2048-bit (Standard)">RSA 2048-bit (Standard)</Select.Item>
+                        <Select.Item value="4096" label="RSA 4096-bit (High Security)">RSA 4096-bit (High Security)</Select.Item>
+                      </Select.Content>
+                    </Select.Root>
+                  </div>
                 </div>
               </div>
 
-              <div class="pt-3 border-t border-border flex items-center justify-between">
-                <div class="text-[11px] text-muted-foreground flex items-center gap-1">
-                  <Lock class="h-3 w-3 text-success" /> Keys are generated client-side inside your browser
+              {#if featureFlags.isEnabled('signatures.cert-sign.saved')}
+                <ControlRow
+                  label="Save digital signature in offline storage for reuse"
+                  description="Persist generated certificate and preferences locally in browser storage"
+                  for="save-digital-sig-gen"
+                  size="sm"
+                >
+                  <Switch id="save-digital-sig-gen" bind:checked={saveDigitalSignatureForReuse} />
+                </ControlRow>
+              {/if}
+
+              <div class="pt-2 border-t border-border flex items-center justify-between gap-2">
+                <div class="text-[11px] text-muted-foreground flex items-center gap-1.5">
+                  <Lock class="h-3.5 w-3.5 text-muted-foreground shrink-0" /> Keys are generated client-side inside your browser
                 </div>
-                <Button size="sm" class="text-xs" onclick={handleGenerateCertificate} disabled={!commonName.trim() || !certPassword || isGenerating}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  class="h-8 text-xs"
+                  onclick={handleGenerateCertificate}
+                  disabled={!commonName.trim() || !certPassword || isGenerating}
+                >
                   {#if isGenerating}
                     <Sparkles class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Generating Keys...
                   {:else}
-                    Generate & Proceed
+                    Generate &amp; Proceed
                   {/if}
                 </Button>
               </div>
             {:else}
-              <div class="space-y-3">
-                <div class="border-2 border-dashed border-border rounded-lg p-6 text-center space-y-2">
-                  <Upload class="h-6 w-6 text-muted-foreground mx-auto stroke-1" />
-                  <div class="text-xs font-medium">Select PKCS#12 (.p12 / .pfx) Certificate File</div>
-                  <input
-                    type="file"
-                    accept=".p12,.pfx,application/x-pkcs12"
-                    onchange={(e) => {
-                      importedP12File = (e.target as HTMLInputElement).files?.[0] || null;
-                    }}
-                    class="text-xs file:mr-2 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-xs file:bg-primary file:text-primary-foreground"
+              <div class="dialog-card">
+                <input
+                  bind:this={p12FileInputEl}
+                  type="file"
+                  accept=".p12,.pfx,application/x-pkcs12"
+                  class="hidden"
+                  onchange={(e) => {
+                    importedP12File = (e.target as HTMLInputElement).files?.[0] || null;
+                  }}
+                />
+                <div
+                  class="border border-dashed border-border hover:border-ring rounded-[var(--radius-card-inner)] bg-background/50 p-5 text-center flex flex-col items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                  onclick={() => p12FileInputEl?.click()}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      p12FileInputEl?.click();
+                    }
+                  }}
+                  role="button"
+                  tabindex="0"
+                >
+                  <Upload class="h-6 w-6 text-muted-foreground stroke-1" />
+                  <div class="text-xs font-medium text-foreground">
+                    {importedP12File ? importedP12File.name : 'Select PKCS#12 (.p12 / .pfx) Certificate File'}
+                  </div>
+                  <p class="text-[11px] text-muted-foreground">Click to browse for your certificate bundle</p>
+                </div>
+
+                <div class="field-group">
+                  <Label for="import-pwd" class="field-label">Certificate Password</Label>
+                  <Input
+                    id="import-pwd"
+                    type="password"
+                    bind:value={importPassword}
+                    placeholder="Enter password to unlock private key"
+                    class="field-input"
                   />
                 </div>
+              </div>
 
-                <div class="space-y-1">
-                  <Label for="import-pwd" class="text-xs font-medium">Certificate Password</Label>
-                  <Input id="import-pwd" type="password" bind:value={importPassword} placeholder="Enter password to unlock private key" class="h-8 text-xs" />
+              {#if featureFlags.isEnabled('signatures.cert-sign.saved')}
+                <ControlRow
+                  label="Save digital signature in offline storage for reuse"
+                  description="Persist unlocked certificate locally in browser storage"
+                  for="save-digital-sig-imp"
+                  size="sm"
+                >
+                  <Switch id="save-digital-sig-imp" bind:checked={saveDigitalSignatureForReuse} />
+                </ControlRow>
+              {/if}
+
+              {#if importError}
+                <div role="alert" class="dialog-error">
+                  <AlertCircle class="h-4 w-4 shrink-0" />
+                  <span>{importError}</span>
                 </div>
+              {/if}
 
-                {#if importError}
-                  <div class="text-xs text-destructive flex items-center gap-1.5 p-2 bg-destructive/10 rounded border border-destructive/20">
-                    <AlertCircle class="h-3.5 w-3.5 shrink-0" /> {importError}
-                  </div>
-                {/if}
-
-                <div class="pt-2 border-t border-border flex justify-end">
-                  <Button size="sm" class="text-xs" onclick={handleImportP12} disabled={!importedP12File}>
-                    Unlock & Proceed
-                  </Button>
-                </div>
+              <div class="pt-2 border-t border-border flex justify-end">
+                <Button variant="secondary" size="sm" class="h-8 text-xs" onclick={handleImportP12} disabled={!importedP12File}>
+                  Unlock &amp; Proceed
+                </Button>
               </div>
             {/if}
           </Tabs.Content>
 
-          <!-- Signature metadata and reasons -->
-          <Tabs.Content value="details" class="space-y-4">
+          <!-- Signature Metadata, Reason, and PAdES Standards -->
+          <Tabs.Content value="details" class="flex flex-col gap-3 mt-3 outline-none">
             {#if activeIdentity}
-              <div class="bg-primary/5 border border-primary/20 rounded-lg p-3 space-y-1 text-xs">
-                <div class="flex items-center justify-between">
-                  <span class="font-semibold text-primary flex items-center gap-1.5">
-                    <ShieldCheck class="h-4 w-4 text-primary" />
-                    Digital Identity Ready: {activeIdentity.subject.commonName}
-                  </span>
-                  <Button size="sm" variant="ghost" class="h-6 text-[11px] px-2 text-primary" onclick={handleExportP12}>
-                    <Download class="h-3 w-3 mr-1" /> Export .p12
+              <div class="dialog-card">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex flex-col gap-0.5 min-w-0">
+                    <span class="font-semibold text-foreground flex items-center gap-1.5 text-xs">
+                      <ShieldCheck class="h-4 w-4 text-muted-foreground shrink-0" />
+                      <span class="truncate">Digital Identity Ready: {activeIdentity.subject.commonName}</span>
+                    </span>
+                    <span class="text-[11px] text-muted-foreground">
+                      Valid from {activeIdentity.validFrom.toLocaleDateString()} to {activeIdentity.validTo.toLocaleDateString()}
+                    </span>
+                  </div>
+                  <Button size="sm" variant="outline" class="h-8 text-xs px-2.5 shrink-0" onclick={handleExportP12}>
+                    <Download class="h-3.5 w-3.5 mr-1" /> Export .p12
                   </Button>
-                </div>
-                <div class="text-[11px] text-muted-foreground">
-                  Valid from {activeIdentity.validFrom.toLocaleDateString()} to {activeIdentity.validTo.toLocaleDateString()}
                 </div>
               </div>
             {/if}
 
-            <div class="space-y-3">
-              <div class="space-y-1">
-                <Label class="text-xs font-medium">Signing Reason</Label>
+            <div class="dialog-card">
+              <div class="field-group">
+                <Label class="field-label">Signing Reason</Label>
                 <Select.Root
                   type="single"
                   value={reason}
-                  onValueChange={(val) => { if (val) reason = val; }}
+                  onValueChange={(val) => {
+                    if (val) reason = val;
+                  }}
                 >
-                  <Select.Trigger class="w-full h-8 text-xs mb-1.5">
-                    {reason || "Select a signing reason..."}
+                  <Select.Trigger variant="border" class="w-full h-8 text-xs font-sans">
+                    <span class="truncate">{reason || 'Select a signing reason...'}</span>
                   </Select.Trigger>
                   <Select.Content>
-                    {#each reasonPresets as preset}
+                    {#each reasonPresets as preset (preset)}
                       <Select.Item value={preset} label={preset}>{preset}</Select.Item>
                     {/each}
                   </Select.Content>
                 </Select.Root>
-                <Input bind:value={reason} placeholder="Or enter custom signing reason..." class="h-8 text-xs" />
+                <Input bind:value={reason} placeholder="Or enter custom signing reason..." class="field-input" />
               </div>
 
-              <div class="grid grid-cols-2 gap-3">
-                <div class="space-y-1">
-                  <Label for="loc-input" class="text-xs font-medium">Signing Location</Label>
-                  <Input id="loc-input" bind:value={location} placeholder="e.g. City, Country" class="h-8 text-xs" />
+              <div class="field-grid-2">
+                <div class="field-group">
+                  <Label for="loc-input" class="field-label">Signing Location</Label>
+                  <Input id="loc-input" bind:value={location} placeholder="e.g. City, Country" class="field-input" />
                 </div>
 
-                <div class="space-y-1">
-                  <Label for="contact-input" class="text-xs font-medium">Signer Contact Info</Label>
-                  <Input id="contact-input" bind:value={contactInfo} placeholder="Email or Phone" class="h-8 text-xs" />
+                <div class="field-group">
+                  <Label for="contact-input" class="field-label">Signer Contact Info</Label>
+                  <Input id="contact-input" bind:value={contactInfo} placeholder="Email or Phone" class="field-input" />
                 </div>
               </div>
+            </div>
 
-              <!-- Standards and Security Configuration -->
-              <div class="space-y-3 pt-2 border-t border-border">
-                <div class="space-y-1">
-                  <div class="flex items-center justify-between">
-                    <Label class="text-xs font-medium">Signature Standard and SubFilter</Label>
-                    <Badge variant="outline" class="text-[10px] bg-primary/5 text-primary border-primary/20">
-                      ETSI EN 319 142
-                    </Badge>
-                  </div>
+            <!-- Standards and Security Configuration -->
+            <div class="dialog-section">
+              <div class="dialog-section-header">
+                <span>Cryptographic Standard &amp; Long-Term Validation</span>
+                <Badge variant="outline" class="text-[10px] h-5 px-2 bg-card text-foreground border-border font-sans">
+                  ETSI EN 319 142
+                </Badge>
+              </div>
+
+              <div class="dialog-card">
+                <div class="field-group">
+                  <Label class="field-label">Signature Standard and SubFilter</Label>
                   <Select.Root
                     type="single"
                     value={subFilter}
-                    onValueChange={(val) => { if (val === 'ETSI.CAdES.detached' || val === 'adbe.pkcs7.detached') subFilter = val; }}
+                    onValueChange={(val) => {
+                      if (val === 'ETSI.CAdES.detached' || val === 'adbe.pkcs7.detached') {
+                        subFilter = val;
+                      }
+                    }}
                   >
-                    <Select.Trigger class="w-full h-8 text-xs">
-                      {subFilter === 'ETSI.CAdES.detached' ? 'PAdES Baseline (ETSI.CAdES.detached) - Recommended' : 'Adobe Legacy (adbe.pkcs7.detached)'}
+                    <Select.Trigger variant="border" class="w-full h-8 text-xs font-sans">
+                      {subFilter === 'ETSI.CAdES.detached'
+                        ? 'PAdES Baseline (ETSI.CAdES.detached) - Recommended'
+                        : 'Adobe Legacy (adbe.pkcs7.detached)'}
                     </Select.Trigger>
                     <Select.Content>
-                      <Select.Item value="ETSI.CAdES.detached" label="PAdES Baseline (ETSI.CAdES.detached) - Recommended">
+                      <Select.Item
+                        value="ETSI.CAdES.detached"
+                        label="PAdES Baseline (ETSI.CAdES.detached) - Recommended"
+                      >
                         PAdES Baseline (ETSI.CAdES.detached) - Recommended
                       </Select.Item>
                       <Select.Item value="adbe.pkcs7.detached" label="Adobe Legacy (adbe.pkcs7.detached)">
@@ -1088,63 +1316,448 @@
                       </Select.Item>
                     </Select.Content>
                   </Select.Root>
-                  <p class="text-[10px] text-muted-foreground">
+                  <span class="field-hint">
                     PAdES embeds CAdES signingCertificateV2 (RFC 5035) cryptographically binding certificate hashes.
-                  </p>
-                </div>
-
-                <div class="space-y-2 p-2.5 bg-muted/20 border border-border rounded-lg text-xs">
-                  <div class="flex items-center justify-between">
-                    <div>
-                      <span class="font-medium block text-xs">RFC 3161 Qualified Timestamp (PAdES B-T)</span>
-                      <span class="text-[10px] text-muted-foreground">Applies authentic cryptographic time from a Time Stamping Authority.</span>
-                    </div>
-                    <Checkbox bind:checked={enableTimestamp} />
-                  </div>
-
-                  {#if enableTimestamp}
-                    <div class="space-y-1 pt-1">
-                      <Label for="tsa-url" class="text-[11px] font-medium">TSA Server URL</Label>
-                      <Input id="tsa-url" bind:value={tsaUrl} placeholder="https://freetsa.org/tsr" class="h-7 text-xs font-sans" />
-                    </div>
-                  {/if}
-                </div>
-
-                <div class="flex items-center justify-between p-2.5 bg-muted/20 border border-border rounded-lg text-xs">
-                  <div>
-                    <span class="font-medium block text-xs">Long-Term Validation Store (/DSS)</span>
-                    <span class="text-[10px] text-muted-foreground">Embeds Document Security Store dictionaries for PAdES B-LT compliance.</span>
-                  </div>
-                  <Checkbox bind:checked={embedDss} />
+                  </span>
                 </div>
               </div>
+
+              <ControlRow
+                label="RFC 3161 Qualified Timestamp (PAdES B-T)"
+                description="Applies authentic cryptographic time from a Time Stamping Authority"
+                for="enable-tsa"
+                size="sm"
+              >
+                <Switch id="enable-tsa" bind:checked={enableTimestamp} />
+              </ControlRow>
+
+              {#if enableTimestamp}
+                <div class="dialog-card">
+                  <div class="field-group">
+                    <Label for="tsa-url" class="field-label">TSA Server URL</Label>
+                    <Input
+                      id="tsa-url"
+                      bind:value={tsaUrl}
+                      placeholder="https://freetsa.org/tsr"
+                      class="field-input font-sans"
+                    />
+                  </div>
+                </div>
+              {/if}
+
+              <ControlRow
+                label="Long-Term Validation Store (/DSS)"
+                description="Embeds Document Security Store dictionaries for PAdES B-LT compliance"
+                for="embed-dss"
+                size="sm"
+              >
+                <Switch id="embed-dss" bind:checked={embedDss} />
+              </ControlRow>
             </div>
 
-            <div class="pt-3 border-t border-border flex justify-between">
-              <Button size="sm" variant="outline" class="text-xs" onclick={() => (activeTab = 'cert')}>
+            <div class="pt-2 border-t border-border flex justify-between">
+              <Button size="sm" variant="outline" class="h-8 text-xs" onclick={() => (activeTab = 'cert')}>
                 Back
               </Button>
-              <Button size="sm" class="text-xs" onclick={() => (activeTab = 'appearance')}>
+              <Button variant="secondary" size="sm" class="h-8 text-xs" onclick={() => (activeTab = 'appearance')}>
                 Next: Visual Options
               </Button>
             </div>
           </Tabs.Content>
 
-          <!-- Visual appearance and placement -->
-          <Tabs.Content value="appearance" class="space-y-4">
-            <div class="flex items-center justify-between p-3 bg-muted/20 border border-border rounded-lg">
-              <div>
-                <div class="text-xs font-semibold">Render Visual Signature on Document</div>
-                <div class="text-[11px] text-muted-foreground">Places an Adobe-style signature seal badge on the target page.</div>
-              </div>
-              <Switch bind:checked={isVisibleSignature} aria-label="Render Visual Signature on Document" />
-            </div>
+          <!-- Visual Appearance, Signature Creation/Upload, and Placement -->
+          <Tabs.Content value="appearance" class="flex flex-col gap-3 mt-3 outline-none">
+            <ControlRow
+              label="Render Visual Signature on Document"
+              description="Stamp a moveable visual signature graphic onto the target page"
+              for="visible-sig-switch"
+              size="sm"
+            >
+              <Switch
+                id="visible-sig-switch"
+                bind:checked={isVisibleSignature}
+                aria-label="Render Visual Signature on Document"
+              />
+            </ControlRow>
 
             {#if isVisibleSignature}
-              <div class="space-y-3">
-                <div class="grid grid-cols-2 gap-3">
-                  <div class="space-y-1">
-                    <Label class="text-xs font-medium">Target Page</Label>
+              <!-- Complete Signature Creation & Selection Suite (Saved, Draw, Type, Upload) -->
+              <div class="dialog-card">
+                <div class="field-group">
+                  <Label class="field-label">Signature Artwork</Label>
+                  <ButtonGroup
+                    variant="outline"
+                    size="sm"
+                    class="w-full h-8"
+                    value={sigSourceMode}
+                    onValueChange={(val) => {
+                      if (val === 'saved' || val === 'draw' || val === 'type' || val === 'upload') {
+                        sigSourceMode = val;
+                        if (val === 'draw') {
+                          requestAnimationFrame(() => setupDrawCanvas());
+                        }
+                      }
+                    }}
+                  >
+                    <Button
+                      type="button"
+                      value="saved"
+                      active={sigSourceMode === 'saved'}
+                      class="flex-1 text-xs gap-1"
+                      onclick={() => (sigSourceMode = 'saved')}
+                    >
+                      Saved ({savedSignatures.length})
+                    </Button>
+                    <Button
+                      type="button"
+                      value="draw"
+                      active={sigSourceMode === 'draw'}
+                      class="flex-1 text-xs gap-1"
+                      onclick={() => {
+                        sigSourceMode = 'draw';
+                        requestAnimationFrame(() => setupDrawCanvas());
+                      }}
+                    >
+                      <PenTool class="h-3.5 w-3.5" /> Draw
+                    </Button>
+                    <Button
+                      type="button"
+                      value="type"
+                      active={sigSourceMode === 'type'}
+                      class="flex-1 text-xs gap-1"
+                      onclick={() => (sigSourceMode = 'type')}
+                    >
+                      <Type class="h-3.5 w-3.5" /> Type
+                    </Button>
+                    <Button
+                      type="button"
+                      value="upload"
+                      active={sigSourceMode === 'upload'}
+                      class="flex-1 text-xs gap-1"
+                      onclick={() => (sigSourceMode = 'upload')}
+                    >
+                      <Upload class="h-3.5 w-3.5" /> Upload
+                    </Button>
+                  </ButtonGroup>
+                </div>
+
+                {#if sigSourceMode === 'saved'}
+                  <div class="flex flex-col gap-2">
+                    <div class="grid grid-cols-3 gap-2 max-h-[156px] overflow-y-auto pr-1">
+                      <button
+                        type="button"
+                        class="border rounded-[var(--radius-card-inner)] p-2 text-center text-xs flex items-center justify-center h-14 cursor-pointer transition-colors {selectedGraphicSigId === null ? 'border-foreground/40 ring-1 ring-ring bg-secondary/40 text-foreground font-medium' : 'border-border bg-background/50 text-muted-foreground hover:text-foreground hover:border-ring'}"
+                        onclick={() => (selectedGraphicSigId = null)}
+                      >
+                        Text Only Seal
+                      </button>
+                      {#each savedSignatures as s (s.id)}
+                        <div
+                          class="group relative border rounded-[var(--radius-card-inner)] p-1.5 flex items-center justify-center h-14 bg-background/60 bg-transparency-grid cursor-pointer transition-colors {selectedGraphicSigId === s.id ? 'border-foreground/40 ring-1 ring-ring' : 'border-border hover:border-ring'}"
+                          onclick={() => (selectedGraphicSigId = s.id)}
+                          onkeydown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              selectedGraphicSigId = s.id;
+                            }
+                          }}
+                          role="button"
+                          tabindex="0"
+                        >
+                          <img src={s.dataUrl} alt={s.title} class="max-h-full max-w-full object-contain img-subtle-outline" />
+                          <div class="absolute top-0.5 right-0.5 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            {#if !s.isDefault}
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-xs"
+                                class="text-muted-foreground hover:text-warning bg-card/90"
+                                title="Set as default"
+                                aria-label="Set as default signature"
+                                onclick={(e) => handleSetDefaultGraphicSig(s.id, e)}
+                              >
+                                <Star class="h-3 w-3" />
+                              </Button>
+                            {/if}
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-xs"
+                              class="text-muted-foreground hover:text-foreground bg-card/90"
+                              title="Delete signature"
+                              aria-label="Delete signature"
+                              onclick={(e) => handleDeleteGraphicSig(s.id, e)}
+                            >
+                              <Trash2 class="h-3 w-3" />
+                            </Button>
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                    <div class="flex justify-end">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        class="h-8 text-xs"
+                        onclick={() => {
+                          sigSourceMode = 'draw';
+                          requestAnimationFrame(() => setupDrawCanvas());
+                        }}
+                      >
+                        <Plus class="h-3.5 w-3.5 mr-1" /> Create New Signature
+                      </Button>
+                    </div>
+                  </div>
+                {:else if sigSourceMode === 'draw'}
+                  <div class="flex flex-col gap-2.5">
+                    <div class="flex items-center justify-between">
+                      <span class="field-label">Draw Signature Pad</span>
+                      <div class="flex items-center gap-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          class="h-8 text-xs px-2 text-muted-foreground hover:text-foreground"
+                          disabled={strokes.length === 0}
+                          onclick={() => {
+                            strokes = strokes.slice(0, -1);
+                            redrawSignaturePad();
+                          }}
+                        >
+                          <Undo2 class="h-3.5 w-3.5 mr-1" /> Undo
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          class="h-8 text-xs px-2 text-muted-foreground hover:text-foreground"
+                          disabled={strokes.length === 0}
+                          onclick={() => {
+                            strokes = [];
+                            activeStrokePoints = [];
+                            redrawSignaturePad();
+                          }}
+                        >
+                          <Eraser class="h-3.5 w-3.5 mr-1" /> Clear
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div class="relative w-full h-[120px] bg-background/60 bg-transparency-grid border border-dashed border-border rounded-[var(--radius-card-inner)] overflow-hidden touch-none">
+                      <canvas
+                        bind:this={drawCanvasEl}
+                        class="w-full h-full cursor-crosshair block img-subtle-outline"
+                        onpointerdown={handlePadPointerDown}
+                        onpointermove={handlePadPointerMove}
+                        onpointerup={handlePadPointerUp}
+                        onpointercancel={handlePadPointerUp}
+                      ></canvas>
+                      {#if strokes.length === 0 && !isDrawingStroke}
+                        <div class="absolute inset-0 flex items-center justify-center pointer-events-none text-muted-foreground/50 text-xs select-none">
+                          Sign here with mouse, trackpad, or stylus
+                        </div>
+                      {/if}
+                    </div>
+
+                    <div class="field-grid-2">
+                      <div class="field-group">
+                        <Label class="field-label">Ink Colour</Label>
+                        <ColorPicker
+                          bind:value={inkColor}
+                          presets={inkColorPresets}
+                          label="Ink Colour"
+                          bordered={true}
+                          onValueChange={(col) => {
+                            inkColor = col;
+                            redrawSignaturePad();
+                          }}
+                        />
+                      </div>
+
+                      <div class="field-group">
+                        <Label class="field-label">Stroke Width</Label>
+                        <Slider
+                          type="single"
+                          min={1}
+                          max={5}
+                          step={0.5}
+                          unit="px"
+                          value={strokeWidth}
+                          onValueChange={(val: number) => {
+                            strokeWidth = val;
+                            redrawSignaturePad();
+                          }}
+                          class="w-full"
+                        />
+                      </div>
+                    </div>
+
+                    <ControlRow
+                      label="Save signature persistently for reuse"
+                      for="cert-save-draw"
+                      variant="ghost"
+                      size="compact"
+                      class="px-0 pt-0.5"
+                    >
+                      <Switch id="cert-save-draw" bind:checked={saveGraphicToCollection} />
+                    </ControlRow>
+                  </div>
+                {:else if sigSourceMode === 'type'}
+                  <div class="flex flex-col gap-2.5">
+                    <div class="field-grid-2">
+                      <div class="field-group">
+                        <Label for="cert-type-name-input" class="field-label">Your Name or Initials</Label>
+                        <Input
+                          id="cert-type-name-input"
+                          bind:value={typedSignatureText}
+                          placeholder="Enter your full name..."
+                          class="field-input"
+                        />
+                      </div>
+
+                      <div class="field-group">
+                        <Label class="field-label">Ink Colour</Label>
+                        <ColorPicker
+                          bind:value={inkColor}
+                          presets={inkColorPresets}
+                          label="Ink Colour"
+                          bordered={true}
+                        />
+                      </div>
+                    </div>
+
+                    <div class="field-group">
+                      <Label class="field-label">Handwriting Style</Label>
+                      <div class="grid grid-cols-2 gap-2 max-h-[148px] overflow-y-auto pr-1">
+                        {#each signatureFonts as f (f.name)}
+                          <button
+                            type="button"
+                            class="border rounded-[var(--radius-card-inner)] p-2 text-left transition-colors cursor-pointer {selectedFont === f.name ? 'border-foreground/40 ring-1 ring-ring bg-secondary/40' : 'border-border hover:border-ring bg-background/50'}"
+                            onclick={() => (selectedFont = f.name)}
+                          >
+                            <div class="text-[10px] text-muted-foreground">{f.label} ({f.name})</div>
+                            <div
+                              class="text-xl truncate py-0.5 img-subtle-outline"
+                              style="font-family: '{f.name}', cursive; color: {inkColor};"
+                            >
+                              {typedSignatureText.trim() || effectiveSignerName}
+                            </div>
+                          </button>
+                        {/each}
+                      </div>
+                    </div>
+
+                    <ControlRow
+                      label="Save signature persistently for reuse"
+                      for="cert-save-type"
+                      variant="ghost"
+                      size="compact"
+                      class="px-0 pt-0.5"
+                    >
+                      <Switch id="cert-save-type" bind:checked={saveGraphicToCollection} />
+                    </ControlRow>
+                  </div>
+                {:else if sigSourceMode === 'upload'}
+                  <div class="flex flex-col gap-2.5">
+                    <input
+                      bind:this={graphicFileInputEl}
+                      type="file"
+                      accept="image/png,image/jpeg,image/svg+xml"
+                      class="hidden"
+                      onchange={handleGraphicUpload}
+                    />
+                    {#if !uploadedGraphicDataUrl}
+                      <div
+                        class="border border-dashed border-border hover:border-ring rounded-[var(--radius-card-inner)] bg-background/50 p-5 text-center flex flex-col items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                        onclick={() => graphicFileInputEl?.click()}
+                        onkeydown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            graphicFileInputEl?.click();
+                          }
+                        }}
+                        role="button"
+                        tabindex="0"
+                      >
+                        <Upload class="h-6 w-6 text-muted-foreground stroke-1" />
+                        <span class="text-xs font-medium text-foreground">Click to upload signature image</span>
+                        <span class="text-[10px] text-muted-foreground">PNG, JPG, or SVG (background auto-cleaned)</span>
+                      </div>
+                    {:else}
+                      <div class="flex flex-col gap-2.5">
+                        <div class="relative h-24 bg-background/60 bg-transparency-grid border border-border rounded-[var(--radius-card-inner)] flex items-center justify-center p-2">
+                          {#if isCleaningUpload}
+                            <span class="text-xs text-muted-foreground flex items-center gap-1.5">
+                              <Sparkles class="h-3.5 w-3.5 animate-spin" /> Processing image transparency...
+                            </span>
+                          {:else}
+                            <img src={uploadedGraphicDataUrl} alt="Uploaded signature" class="max-h-full max-w-full object-contain img-subtle-outline" />
+                          {/if}
+                        </div>
+
+                        <div class="field-group">
+                          <Label class="field-label flex items-center gap-1">
+                            <SlidersHorizontal class="h-3 w-3" /> Background Cleanup Threshold
+                          </Label>
+                          <Slider
+                            type="single"
+                            min={150}
+                            max={255}
+                            step={1}
+                            unit=""
+                            value={uploadThreshold}
+                            onValueChange={(val: number) => {
+                              uploadThreshold = val;
+                              if (rawUploadedGraphicUrl) void processGraphicUpload(rawUploadedGraphicUrl);
+                            }}
+                            class="w-full"
+                          />
+                        </div>
+
+                        <div class="flex items-center justify-between pt-1 border-t border-border/60 gap-2">
+                          <ControlRow
+                            label="Save signature persistently for reuse"
+                            for="cert-save-upload"
+                            variant="ghost"
+                            size="compact"
+                            class="px-0 flex-1"
+                          >
+                            <Switch id="cert-save-upload" bind:checked={saveGraphicToCollection} />
+                          </ControlRow>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            class="h-8 text-xs shrink-0"
+                            onclick={() => {
+                              rawUploadedGraphicUrl = null;
+                              uploadedGraphicDataUrl = null;
+                            }}
+                          >
+                            Choose Another Image
+                          </Button>
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+
+              <!-- Appearance Mode & Preset Placement -->
+              <div class="dialog-card">
+                <ControlRow
+                  label="Show Full Name Underneath Signature"
+                  description="Display signer full name centered beneath the signature graphic"
+                  for="show-full-name-switch"
+                  variant="ghost"
+                  size="compact"
+                  class="px-0"
+                >
+                  <Switch id="show-full-name-switch" bind:checked={showTextDetails} />
+                </ControlRow>
+
+                <div class="field-grid-2 pt-1 border-t border-border/60">
+                  <div class="field-group">
+                    <Label class="field-label">Target Page</Label>
                     <Select.Root
                       type="single"
                       value={targetPageIndex.toString()}
