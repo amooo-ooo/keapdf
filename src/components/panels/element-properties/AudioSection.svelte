@@ -7,7 +7,7 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Switch } from '$lib/components/ui/switch/index.js';
-  import { Upload, Globe } from 'lucide-svelte';
+  import { Upload } from 'lucide-svelte';
   import { formatByteSize } from '../../../services/pdf/operations/metadata-ops';
 
   const canvasStore = useCanvasStore();
@@ -76,35 +76,30 @@
           oninput={(e) => updateProp('title', (e.target as HTMLInputElement).value)}
           placeholder="Audio Track"
           class="field-input"
+          aria-label="Audio Title"
         />
       </div>
 
       <div class="field-group">
-        <div class="field-header-row">
-          <Label class="field-label">Web Stream URL</Label>
-          <Globe class="w-3 h-3 text-muted-foreground" />
-        </div>
+        <Label class="field-label">Web Stream URL</Label>
         <Input
           type="url"
           value={audioEl.src.startsWith('blob:') ? '' : audioEl.src}
           oninput={(e) => updateProp('src', (e.target as HTMLInputElement).value)}
           placeholder="https://example.com/audio.mp3"
-          class="field-input text-[11px]"
+          class="field-input"
+          aria-label="Audio Source URL"
         />
-        <span class="text-[10px] text-muted-foreground">
-          Enter online audio URL for direct Chrome PDF viewer playback.
-        </span>
       </div>
 
       {#if audioEl.fileName || audioEl.fileSize}
-        <div class="p-2 rounded bg-muted/40 border border-border text-[11px] flex flex-col gap-1">
+        <div class="p-2.5 rounded-md border border-border bg-card text-xs flex flex-col gap-1">
           <div class="flex items-center justify-between text-muted-foreground">
-            <span class="truncate">{audioEl.fileName || 'Embedded Audio'}</span>
+            <span class="truncate" title={audioEl.fileName || 'Embedded Audio'}>{audioEl.fileName || 'Embedded Audio'}</span>
             {#if audioEl.fileSize}
-              <span class="text-[10px] tabular-nums">{formatByteSize(audioEl.fileSize)}</span>
+              <span>{formatByteSize(audioEl.fileSize)}</span>
             {/if}
           </div>
-          <span class="text-[9px] text-muted-foreground/80">ISO 32000-1 Clause 13.3 Sound Clip</span>
         </div>
       {/if}
 
@@ -113,6 +108,7 @@
         <Switch
           checked={audioEl.controls !== false}
           onCheckedChange={(checked) => updateProp('controls', checked)}
+          aria-label="Show Playback Controls"
         />
       </div>
     </div>

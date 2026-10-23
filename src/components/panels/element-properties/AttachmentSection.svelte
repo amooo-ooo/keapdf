@@ -75,6 +75,7 @@
           oninput={(e) => updateProp('fileName', (e.target as HTMLInputElement).value)}
           placeholder="attachment.pdf"
           class="field-input"
+          aria-label="File Name"
         />
       </div>
 
@@ -86,18 +87,18 @@
           oninput={(e) => updateProp('description', (e.target as HTMLInputElement).value)}
           placeholder="Associated document"
           class="field-input"
+          aria-label="Description"
         />
       </div>
 
       {#if attEl.fileName || attEl.fileSize}
-        <div class="p-2 rounded bg-muted/40 border border-border text-[11px] flex flex-col gap-1">
+        <div class="p-2.5 rounded-md border border-border bg-card text-xs flex flex-col gap-1">
           <div class="flex items-center justify-between text-muted-foreground">
-            <span class="truncate">{attEl.fileName || 'Embedded File'}</span>
+            <span class="truncate" title={attEl.fileName || 'Embedded File'}>{attEl.fileName || 'Embedded File'}</span>
             {#if attEl.fileSize}
-              <span class="text-[10px]">{formatByteSize(attEl.fileSize)}</span>
+              <span>{formatByteSize(attEl.fileSize)}</span>
             {/if}
           </div>
-          <span class="text-[9px] text-muted-foreground/80">ISO 32000-2 Clause 14.13 Associated Files (AF)</span>
         </div>
       {/if}
     </div>

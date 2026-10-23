@@ -84,6 +84,7 @@
           oninput={(e) => updateProp('title', (e.target as HTMLInputElement).value)}
           placeholder="3D Artwork"
           class="field-input"
+          aria-label="Model File Name"
         />
       </div>
 
@@ -115,18 +116,18 @@
           oninput={(e) => updateProp('viewName', (e.target as HTMLInputElement).value)}
           placeholder="Default View"
           class="field-input"
+          aria-label="Initial View Name"
         />
       </div>
 
       {#if threeDEl.fileName || threeDEl.fileSize}
-        <div class="p-2 rounded bg-muted/40 border border-border text-[11px] flex flex-col gap-1">
+        <div class="p-2.5 rounded-md border border-border bg-card text-xs flex flex-col gap-1">
           <div class="flex items-center justify-between text-muted-foreground">
-            <span class="truncate">{threeDEl.fileName || 'Embedded 3D Model'}</span>
+            <span class="truncate" title={threeDEl.fileName || 'Embedded 3D Model'}>{threeDEl.fileName || 'Embedded 3D Model'}</span>
             {#if threeDEl.fileSize}
-              <span class="text-[10px]">{formatByteSize(threeDEl.fileSize)}</span>
+              <span>{formatByteSize(threeDEl.fileSize)}</span>
             {/if}
           </div>
-          <span class="text-[9px] text-muted-foreground/80">ISO 32000-1 Clause 13.6 3D Annotation</span>
         </div>
       {/if}
     </div>

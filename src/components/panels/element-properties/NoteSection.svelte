@@ -5,10 +5,8 @@
   import SidebarSection from '../../common/SidebarSection.svelte';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
-  import { Button } from '$lib/components/ui/button/index.js';
   import { ColorPicker } from '$lib/components/ui/color-picker/index.js';
   import { Textarea } from '$lib/components/ui/textarea/index.js';
-  import { Trash2 } from 'lucide-svelte';
 
   const canvasStore = useCanvasStore();
   const canvasActions = useCanvasActions();
@@ -25,7 +23,11 @@
   function updateProp(propName: string, value: string | boolean): void {
     const selected = canvasStore.selectedElementId;
     if (selected && canvasStore.selectedElement?.kind === 'note') {
-      canvasActions.updateElementProperties(selected, { [propName]: value });
+      if (canvasStore.selectedElementIds.length > 1) {
+        canvasActions.updateSelectedElementsProperties({ [propName]: value }, { kind: 'note' });
+      } else {
+        canvasActions.updateElementProperties(selected, { [propName]: value });
+      }
     }
   }
 
@@ -47,6 +49,7 @@
           oninput={(e) => handleStringChange(e, 'author')}
           class="field-input text-xs"
           placeholder="Author name..."
+          aria-label="Author"
         />
       </div>
 
@@ -67,18 +70,8 @@
           class="text-xs min-h-[72px] resize-y"
           placeholder="Type sticky note comment here..."
           rows={3}
+          aria-label="Comment Text"
         />
-      </div>
-
-      <div class="pt-1 flex justify-end">
-        <Button
-          variant="ghost"
-          size="sm"
-          class="h-7 text-xs text-destructive hover:text-destructive hover:bg-destructive/10 px-2"
-          onclick={() => canvasActions.deleteSelectedElement()}
-        >
-          <Trash2 class="h-3.5 w-3.5 mr-1" /> Delete Note
-        </Button>
       </div>
     </div>
   </SidebarSection>

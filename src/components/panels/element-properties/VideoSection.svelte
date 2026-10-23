@@ -7,7 +7,7 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Switch } from '$lib/components/ui/switch/index.js';
-  import { Upload, Globe } from 'lucide-svelte';
+  import { Upload } from 'lucide-svelte';
   import { formatByteSize } from '../../../services/pdf/operations/metadata-ops';
 
   const canvasStore = useCanvasStore();
@@ -76,35 +76,30 @@
           oninput={(e) => updateProp('title', (e.target as HTMLInputElement).value)}
           placeholder="Video Stream"
           class="field-input"
+          aria-label="Video Title"
         />
       </div>
 
       <div class="field-group">
-        <div class="field-header-row">
-          <Label class="field-label">Web Video URL</Label>
-          <Globe class="w-3 h-3 text-muted-foreground" />
-        </div>
+        <Label class="field-label">Web Video URL</Label>
         <Input
           type="url"
           value={videoEl.src.startsWith('blob:') ? '' : videoEl.src}
           oninput={(e) => updateProp('src', (e.target as HTMLInputElement).value)}
           placeholder="https://example.com/video.mp4"
-          class="field-input text-[11px]"
+          class="field-input"
+          aria-label="Video Source URL"
         />
-        <span class="text-[10px] text-muted-foreground">
-          Enter online video URL for direct Chrome PDF viewer playback.
-        </span>
       </div>
 
       {#if videoEl.fileName || videoEl.fileSize}
-        <div class="p-2 rounded bg-muted/40 border border-border text-[11px] flex flex-col gap-1">
+        <div class="p-2.5 rounded-md border border-border bg-card text-xs flex flex-col gap-1">
           <div class="flex items-center justify-between text-muted-foreground">
-            <span class="truncate">{videoEl.fileName || 'Embedded Video'}</span>
+            <span class="truncate" title={videoEl.fileName || 'Embedded Video'}>{videoEl.fileName || 'Embedded Video'}</span>
             {#if videoEl.fileSize}
-              <span class="text-[10px]">{formatByteSize(videoEl.fileSize)}</span>
+              <span>{formatByteSize(videoEl.fileSize)}</span>
             {/if}
           </div>
-          <span class="text-[9px] text-muted-foreground/80">ISO 32000-1 Clause 13.2 RichMedia Video</span>
         </div>
       {/if}
 
@@ -114,6 +109,7 @@
           <Switch
             checked={videoEl.loop || false}
             onCheckedChange={(checked) => updateProp('loop', checked)}
+            aria-label="Loop Playback"
           />
         </div>
 
@@ -122,6 +118,7 @@
           <Switch
             checked={videoEl.muted || false}
             onCheckedChange={(checked) => updateProp('muted', checked)}
+            aria-label="Mute Audio"
           />
         </div>
       </div>
