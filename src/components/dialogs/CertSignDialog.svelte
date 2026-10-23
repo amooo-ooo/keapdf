@@ -1761,13 +1761,15 @@
                     <Select.Root
                       type="single"
                       value={targetPageIndex.toString()}
-                      onValueChange={(val) => { if (val) targetPageIndex = parseInt(val, 10); }}
+                      onValueChange={(val) => {
+                        if (val) targetPageIndex = parseInt(val, 10);
+                      }}
                     >
-                      <Select.Trigger class="w-full h-8 text-xs">
+                      <Select.Trigger variant="border" class="w-full h-8 text-xs font-sans">
                         Page {targetPageIndex + 1}
                       </Select.Trigger>
                       <Select.Content>
-                        {#each Array.from({ length: store.pageCount }, (_, i) => i) as pIdx}
+                        {#each Array.from({ length: Math.max(1, store.pageCount) }, (_, i) => i) as pIdx (pIdx)}
                           <Select.Item value={pIdx.toString()} label="Page {pIdx + 1}">
                             Page {pIdx + 1}
                           </Select.Item>
@@ -1776,188 +1778,228 @@
                     </Select.Root>
                   </div>
 
-                  <div class="space-y-1">
-                    <Label class="text-xs font-medium">Placement Position</Label>
+                  <div class="field-group">
+                    <Label class="field-label">Placement Position</Label>
                     <Select.Root
                       type="single"
                       value={placementPosition}
-                      onValueChange={(val) => { if (val === 'bottom-right' || val === 'bottom-left' || val === 'center') placementPosition = val; }}
+                      onValueChange={(val) => {
+                        if (
+                          val === 'bottom-right' ||
+                          val === 'bottom-left' ||
+                          val === 'center' ||
+                          val === 'top-right' ||
+                          val === 'top-left'
+                        ) {
+                          placementPosition = val;
+                        }
+                      }}
                     >
-                      <Select.Trigger class="w-full h-8 text-xs">
-                        {placementPosition === 'bottom-right' ? 'Bottom Right of Page' : placementPosition === 'bottom-left' ? 'Bottom Left of Page' : 'Center of Page'}
+                      <Select.Trigger variant="border" class="w-full h-8 text-xs font-sans">
+                        {SIGNATURE_PLACEMENT_PRESETS.find((p) => p.id === placementPosition)?.label ?? 'Bottom Right'}
                       </Select.Trigger>
                       <Select.Content>
-                        <Select.Item value="bottom-right" label="Bottom Right of Page">Bottom Right of Page</Select.Item>
-                        <Select.Item value="bottom-left" label="Bottom Left of Page">Bottom Left of Page</Select.Item>
-                        <Select.Item value="center" label="Center of Page">Center of Page</Select.Item>
+                        {#each SIGNATURE_PLACEMENT_PRESETS as preset (preset.id)}
+                          <Select.Item value={preset.id} label={preset.label}>
+                            {preset.label}
+                          </Select.Item>
+                        {/each}
                       </Select.Content>
                     </Select.Root>
                   </div>
                 </div>
 
-                <div class="flex items-center justify-between p-2.5 bg-muted/20 border border-border rounded-lg">
-                  <div>
-                    <div class="text-xs font-semibold">Include Signer Metadata Text</div>
-                    <div class="text-[11px] text-muted-foreground">Renders common name, signature date, and signing reason beside artwork.</div>
+                <!-- Clean Live Signature Appearance Preview (Signature only OR Signature + Full Name underneath) -->
+                <div class="field-group pt-1">
+                  <div class="flex items-center justify-between">
+                    <Label class="field-label">Live Signature Appearance Preview</Label>
+                    <Badge variant="secondary" class="text-[10px] h-4 px-1.5">
+                      {showTextDetails ? 'Signature + Full Name' : 'Signature Only'}
+                    </Badge>
                   </div>
-                  <Switch bind:checked={showTextDetails} aria-label="Include Signer Metadata Text" />
-                </div>
-
-                {#if savedSignatures.length > 0}
-                  <div class="space-y-1.5">
-                    <Label class="text-xs font-medium">Include Handwritten Signature Artwork (Optional)</Label>
-                    <div class="grid grid-cols-3 gap-2 max-h-[100px] overflow-y-auto">
-                      <button
-                        type="button"
-                        class="border rounded p-2 text-center text-xs flex items-center justify-center {selectedGraphicSigId === null ? 'border-primary bg-primary/5 font-medium' : 'border-border'}"
-                        onclick={() => (selectedGraphicSigId = null)}
-                      >
-                        Text Only Seal
-                      </button>
-                      {#each savedSignatures as s}
-                        <button
-                          type="button"
-                          class="border rounded p-1 flex items-center justify-center h-12 bg-card {selectedGraphicSigId === s.id ? 'border-primary ring-1 ring-primary bg-primary/5' : 'border-border'}"
-                          onclick={() => (selectedGraphicSigId = s.id)}
-                        >
-                          <img src={s.dataUrl} alt={s.title} class="max-h-full max-w-full object-contain" />
-                        </button>
-                      {/each}
-                    </div>
-                  </div>
-                {/if}
-
-                <!-- Live Preview of Visual Signature -->
-                <div class="space-y-1 pt-1">
-                  <Label class="text-xs text-muted-foreground">Live Signature Appearance Preview</Label>
-                  <div class="h-20 bg-sky-50/50 dark:bg-slate-900 border border-blue-400/80 rounded p-2.5 flex items-center gap-3">
-                    {#if selectedGraphicSigId}
-                      {@const chosen = savedSignatures.find((s) => s.id === selectedGraphicSigId)}
-                      {#if chosen}
-                        <div class="w-24 h-full flex items-center justify-center shrink-0 border-r border-blue-200 dark:border-blue-900 pr-2">
-                          <img src={chosen.dataUrl} alt="Signature" class="max-h-full max-w-full object-contain" />
-                        </div>
-                      {/if}
+                  <div class="h-24 bg-background/60 bg-transparency-grid border border-border rounded-[var(--radius-card-inner)] p-3 flex flex-col items-center justify-center gap-1">
+                    {#if previewGraphicDataUrl}
+                      <img
+                        src={previewGraphicDataUrl}
+                        alt="Signature preview"
+                        class="max-w-full object-contain img-subtle-outline {showTextDetails ? 'max-h-12' : 'max-h-16'}"
+                      />
+                    {:else}
+                      <div class="text-xl font-serif italic text-foreground truncate max-w-full">
+                        {effectiveSignerName}
+                      </div>
                     {/if}
                     {#if showTextDetails}
-                      <div class="flex-1 text-[11px] leading-tight space-y-0.5 text-slate-800 dark:text-slate-200">
-                        <div class="text-[10px] text-muted-foreground">Digitally signed by:</div>
-                        <div class="font-bold text-slate-900 dark:text-slate-100">{activeIdentity?.subject.commonName || 'Signer Name'}</div>
-                        <div class="text-[10px] text-muted-foreground truncate">Date: {new Date().toLocaleDateString()} | Reason: {reason || 'Approved'}</div>
-                        {#if location}
-                          <div class="text-[10px] text-muted-foreground truncate">Location: {location}</div>
-                        {/if}
-                      </div>
-                    {:else if !selectedGraphicSigId}
-                      <div class="flex-1 text-[11px] text-muted-foreground italic">
-                        Enable metadata text or select a graphic signature to display on page.
+                      <div class="text-xs font-sans text-foreground/90 truncate max-w-full">
+                        {effectiveSignerName}
                       </div>
                     {/if}
                   </div>
                 </div>
               </div>
             {:else}
-              <div class="p-6 text-center text-xs text-muted-foreground bg-muted/20 rounded-lg border border-border">
-                <EyeOff class="h-6 w-6 mx-auto mb-2 opacity-50" />
-                The digital signature will be embedded in the PDF dictionary stream and AcroForm structure without modifying the visible appearance of the page.
+              <div class="p-6 text-center text-xs text-muted-foreground dialog-card items-center justify-center">
+                <EyeOff class="h-6 w-6 opacity-50" />
+                <p class="max-w-[380px]">
+                  The digital signature will be embedded in the PDF dictionary stream and AcroForm structure without modifying the visible appearance of the page.
+                </p>
               </div>
             {/if}
 
-            <div class="pt-3 border-t border-border flex justify-between">
-              <Button size="sm" variant="outline" class="text-xs" onclick={() => (activeTab = 'details')}>
+            <div class="pt-2 border-t border-border flex justify-between">
+              <Button size="sm" variant="outline" class="h-8 text-xs" onclick={() => (activeTab = 'details')}>
                 Back
               </Button>
-              <Button size="sm" class="text-xs" onclick={() => (activeTab = 'sign')}>
-                Next: Review & Sign
+              <Button variant="secondary" size="sm" class="h-8 text-xs" onclick={() => (activeTab = 'sign')}>
+                Next: Review &amp; Sign
               </Button>
             </div>
           </Tabs.Content>
 
-          <!-- Review and sign summary -->
-          <Tabs.Content value="sign" class="space-y-4">
-            <div class="bg-card border border-border rounded-lg p-4 space-y-3 text-xs">
-              <div class="font-semibold text-foreground flex items-center gap-1.5 pb-2 border-b border-border">
-                <ShieldCheck class="h-4 w-4 text-success" />
+          <!-- Review and Sign Summary -->
+          <Tabs.Content value="sign" class="flex flex-col gap-3 mt-3 outline-none">
+            <div class="dialog-card">
+              <div class="font-semibold text-foreground flex items-center gap-1.5 pb-2 border-b border-border text-xs">
+                <ShieldCheck class="h-4 w-4 text-muted-foreground shrink-0" />
                 ISO 32000 Signature Summary
               </div>
 
-              <div class="grid grid-cols-2 gap-2 text-[11px]">
-                <div>
-                  <span class="text-muted-foreground">Signer:</span>
-                  <div class="font-medium">{activeIdentity?.subject.commonName}</div>
+              <div class="panel-key-value-grid pt-0.5">
+                <div class="panel-key-label">Signer</div>
+                <div class="panel-value-text font-medium">{activeIdentity?.subject.commonName || effectiveSignerName}</div>
+
+                <div class="panel-key-label">Organisation</div>
+                <div class="panel-value-text">{activeIdentity?.subject.organization || organization || 'None'}</div>
+
+                <div class="panel-key-label">Digest Algorithm</div>
+                <div class="panel-value-text font-sans">SHA-256</div>
+
+                <div class="panel-key-label">Signature Standard</div>
+                <div class="panel-value-text font-sans font-medium">{subFilter}</div>
+
+                <div class="panel-key-label">PAdES Profile</div>
+                <div class="panel-value-text font-sans font-medium">
+                  {embedDss
+                    ? 'PAdES-B-LT (LTV)'
+                    : enableTimestamp
+                      ? 'PAdES-B-T'
+                      : subFilter === 'ETSI.CAdES.detached'
+                        ? 'PAdES-B-B'
+                        : 'Legacy Adobe'}
                 </div>
-                <div>
-                  <span class="text-muted-foreground">Organization:</span>
-                  <div>{activeIdentity?.subject.organization || 'None'}</div>
+
+                <div class="panel-key-label">Timestamping</div>
+                <div class="panel-value-text">{enableTimestamp ? 'RFC 3161 TSA Token' : 'Local Declared Time'}</div>
+
+                <div class="panel-key-label">Certificate Chain</div>
+                <div class="panel-value-text">{activeIdentity?.certificateChain?.length || 1} Certificate(s)</div>
+
+                <div class="panel-key-label">Visual Stamp</div>
+                <div class="panel-value-text">
+                  {isVisibleSignature
+                    ? `Page ${targetPageIndex + 1} (${SIGNATURE_PLACEMENT_PRESETS.find((p) => p.id === placementPosition)?.label ?? placementPosition})`
+                    : 'Invisible (Stream only)'}
                 </div>
-                <div>
-                  <span class="text-muted-foreground">Digest Algorithm:</span>
-                  <div class="font-sans">SHA-256</div>
-                </div>
-                <div>
-                  <span class="text-muted-foreground">Signature Standard:</span>
-                  <div class="font-sans font-medium">{subFilter}</div>
-                </div>
-                <div>
-                  <span class="text-muted-foreground">PAdES Profile:</span>
-                  <div class="font-sans font-medium text-primary">
-                    {embedDss ? 'PAdES-B-LT (LTV)' : enableTimestamp ? 'PAdES-B-T' : subFilter === 'ETSI.CAdES.detached' ? 'PAdES-B-B' : 'Legacy Adobe'}
-                  </div>
-                </div>
-                <div>
-                  <span class="text-muted-foreground">Timestamping:</span>
-                  <div>{enableTimestamp ? 'RFC 3161 TSA Token' : 'Local Declared Time'}</div>
-                </div>
-                <div>
-                  <span class="text-muted-foreground">Certificate Chain:</span>
-                  <div>{activeIdentity?.certificateChain?.length || 1} Certificate(s)</div>
-                </div>
-                <div>
-                  <span class="text-muted-foreground">Visual Badge:</span>
-                  <div>{isVisibleSignature ? `Visible on Page ${targetPageIndex + 1}` : 'Invisible (Stream only)'}</div>
-                </div>
-                <div>
-                  <span class="text-muted-foreground">Reason:</span>
-                  <div class="truncate">{reason || 'Approval'}</div>
-                </div>
+
+                <div class="panel-key-label">Reason</div>
+                <div class="panel-value-text truncate" title={reason || 'Approval'}>{reason || 'Approval'}</div>
               </div>
             </div>
 
-            {#if signError}
-              <div class="text-xs text-destructive flex items-center gap-1.5 p-2.5 bg-destructive/10 rounded border border-destructive/20">
-                <AlertCircle class="h-4 w-4 shrink-0" /> {signError}
+            {#if isVisibleSignature}
+              <div class="dialog-card">
+                <div class="flex items-center justify-between">
+                  <span class="field-label">Visual Stamp Preview</span>
+                  <span class="text-[10px] text-muted-foreground">
+                    {showTextDetails ? 'Signature + Full Name' : 'Signature Only'}
+                  </span>
+                </div>
+                <div class="h-20 bg-background/60 bg-transparency-grid border border-border rounded-[var(--radius-card-inner)] p-2.5 flex flex-col items-center justify-center gap-1">
+                  {#if previewGraphicDataUrl}
+                    <img
+                      src={previewGraphicDataUrl}
+                      alt="Signature preview"
+                      class="max-w-full object-contain img-subtle-outline {showTextDetails ? 'max-h-10' : 'max-h-14'}"
+                    />
+                  {:else}
+                    <div class="text-lg font-serif italic text-foreground truncate max-w-full">
+                      {effectiveSignerName}
+                    </div>
+                  {/if}
+                  {#if showTextDetails}
+                    <div class="text-[11px] font-sans text-foreground/90 truncate max-w-full">
+                      {effectiveSignerName}
+                    </div>
+                  {/if}
+                </div>
               </div>
             {/if}
 
-            <div class="pt-3 border-t border-border flex items-center justify-between">
-              <Button size="sm" variant="outline" class="text-xs" onclick={() => (activeTab = 'appearance')}>
+            <div class="pt-2 border-t border-border flex items-center justify-between">
+              <Button size="sm" variant="outline" class="h-8 text-xs" onclick={() => (activeTab = 'appearance')}>
                 Back
               </Button>
-              <div class="flex items-center gap-2">
-                <Button size="sm" variant="outline" class="text-xs" onclick={() => handleExecuteSign(true)} disabled={isSigning}>
-                  <Download class="h-3.5 w-3.5 mr-1" /> Sign & Download
-                </Button>
-                <Button size="sm" class="text-xs bg-success hover:bg-success/90 text-success-foreground" onclick={() => handleExecuteSign(false)} disabled={isSigning}>
-                  {#if isSigning}
-                    <Sparkles class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Signing PDF...
-                  {:else}
-                    <ShieldCheck class="h-3.5 w-3.5 mr-1.5" /> Sign & Apply to Document
-                  {/if}
-                </Button>
-              </div>
+              <span class="text-[11px] text-muted-foreground">
+                Ready to place on PDF or sign immediately
+              </span>
             </div>
           </Tabs.Content>
         </Tabs.Root>
+
+        {#if signError}
+          <div role="alert" class="dialog-error">
+            <AlertCircle class="h-4 w-4 shrink-0" />
+            <span>{signError}</span>
+          </div>
+        {/if}
       {/if}
     </div>
 
-    <Dialog.Footer class="px-6 py-3 border-t border-border bg-card flex justify-between items-center">
-      <div class="text-[11px] text-muted-foreground">
-        Complies with Adobe PPKLite & ISO 32000 specifications.
-      </div>
-      <Button variant="outline" size="sm" class="text-xs" onclick={handleClose}>
+    <Dialog.Footer class="justify-between">
+      <Button variant="outline" size="sm" class="h-8 text-xs" onclick={handleClose}>
         Cancel
       </Button>
+
+      {#if !signSuccess}
+        <div class="flex items-center gap-2">
+          {#if isVisibleSignature && featureFlags.isEnabled('signatures.cert-sign.interactive-placement')}
+            <Button
+              size="sm"
+              variant="outline"
+              class="h-8 text-xs"
+              onclick={handleStartInteractivePlacement}
+              disabled={isSigning || isGenerating}
+              title="Close dialog and drag or resize signature directly on the PDF page"
+            >
+              <Move class="h-3.5 w-3.5 mr-1.5" /> Place on PDF
+            </Button>
+          {/if}
+
+          <Button
+            size="sm"
+            variant="outline"
+            class="h-8 text-xs"
+            onclick={() => handleExecuteSign(true)}
+            disabled={isSigning || isGenerating}
+          >
+            <Download class="h-3.5 w-3.5 mr-1" /> Sign &amp; Download
+          </Button>
+
+          <Button
+            variant="secondary"
+            size="sm"
+            class="h-8 text-xs"
+            onclick={() => handleExecuteSign(false)}
+            disabled={isSigning || isGenerating}
+          >
+            {#if isSigning || isGenerating}
+              <Sparkles class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Signing PDF...
+            {:else}
+              <ShieldCheck class="h-3.5 w-3.5 mr-1.5" /> Sign &amp; Apply to Document
+            {/if}
+          </Button>
+        </div>
+      {/if}
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
