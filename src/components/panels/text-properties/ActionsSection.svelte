@@ -16,7 +16,7 @@
     <Button onclick={onApply} variant="panel">
       <Check class="panel-icon-sm" /> Apply Edit
     </Button>
-    <Button variant="panel-destructive" onclick={onDelete}>
+    <Button variant="panel" onclick={onDelete}>
       <Trash2 class="panel-icon-sm" /> Delete Text
     </Button>
     <Button variant="panel" onclick={onDeselect}>

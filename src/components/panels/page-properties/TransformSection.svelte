@@ -39,11 +39,6 @@
   const visualHeight = $derived(
     Math.round(baseDims.heightPts * (pageTransform.scaleY || 1) * 10) / 10
   );
-
-  const hasScale = $derived(
-    Math.abs((pageTransform.scaleX || 1) - 1) > 0.001 || Math.abs((pageTransform.scaleY || 1) - 1) > 0.001
-  );
-
   function handleDimensionChange(prop: 'width' | 'height', e: Event): void {
     if (store.isReadOnly) return;
     const target = e.target as HTMLInputElement;
@@ -71,19 +66,10 @@
       handleDimensionChange(prop, e);
     }
   }
-
-  function resetScale(): void {
-    if (store.isReadOnly) return;
-    const originTransform = { ...pageTransform };
-    store.updatePageTransform(currentPageIdx, { scaleX: 1, scaleY: 1 });
-    actions.pushCommand(
-      new SetPageTransformCommand('Reset Page Scale', currentPageIdx, originTransform, { ...pageTransform, scaleX: 1, scaleY: 1 })
-    );
-  }
 </script>
 
 {#if store.isDocumentLoaded}
-  <SidebarSection title="Transform" borderBottom={true} collapsible={true} defaultExpanded={true}>
+  <SidebarSection title="Page Transform" borderBottom={true} collapsible={true} defaultExpanded={true}>
     <div class="flex flex-col gap-2.5">
       <!-- Dimensions Grid (Width & Height in points) -->
       {#if featureFlags.isEnabled('page-actions.scale')}
@@ -99,6 +85,7 @@
             min="10"
             step="0.5"
             disabled={store.isCropping || store.isReadOnly}
+            aria-label="Page Width"
           />
         </div>
         <div class="field-group">
@@ -112,27 +99,13 @@
             min="10"
             step="0.5"
             disabled={store.isCropping || store.isReadOnly}
+            aria-label="Page Height"
           />
         </div>
       </div>
-
-      {#if hasScale}
-        <div class="flex items-center justify-between text-xs text-muted-foreground px-0.5">
-          <span class="tabular-nums">Scale: {Math.round((pageTransform.scaleX || 1) * 100)}% × {Math.round((pageTransform.scaleY || 1) * 100)}%</span>
-          <button
-            type="button"
-            class="text-[10px] text-primary hover:underline cursor-pointer rounded-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
-            onclick={resetScale}
-            disabled={store.isReadOnly}
-            aria-label="Reset scale to 100%"
-          >
-            Reset (100%)
-          </button>
-        </div>
-      {/if}
       {/if}
 
-      <div class="field-group">
+      <div class="grid grid-cols-2 gap-2">
         {#if featureFlags.isEnabled('page-actions.rotate')}
         <Button
           variant="panel"

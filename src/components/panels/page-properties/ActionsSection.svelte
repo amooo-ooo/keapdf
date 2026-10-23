@@ -17,7 +17,7 @@
   }
 </script>
 
-<SidebarSection title="Actions" borderBottom={false} collapsible={true} defaultExpanded={true}>
+<SidebarSection title="Page Actions" borderBottom={true} collapsible={true} defaultExpanded={true}>
   <div class="field-group">
     {#if featureFlags.isEnabled('page-actions.add-blank')}
     <Button
@@ -46,11 +46,11 @@
         onclick={() => actions.startCropMode(store.currentPageIndex)}
         disabled={!store.isDocumentLoaded || store.isReadOnly}
       >
-        <Crop class="panel-icon-sm text-primary" /> Crop Page
+        <Crop class="panel-icon-sm" /> Crop Page
       </Button>
     {:else}
       <Button
-        variant="default"
+        variant="panel"
         class="w-full justify-start px-2 h-8 text-xs font-normal"
         onclick={handleApplyCrop}
         disabled={!store.isDocumentLoaded || store.isReadOnly}
@@ -90,7 +90,7 @@
 
     {#if featureFlags.isEnabled('page-actions.delete')}
     <Button
-      variant="panel-destructive"
+      variant="panel"
       onclick={() => actions.deletePage(store.currentPageIndex)}
       disabled={!store.isDocumentLoaded || store.pageCount <= 1 || store.isCropping || store.isReadOnly}
     >

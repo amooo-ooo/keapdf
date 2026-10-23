@@ -19,7 +19,7 @@
   const featureFlags = useFeatureFlagStore();
 </script>
 
-<SidebarSection title="Document" borderBottom={false} collapsible={true} defaultExpanded={true}>
+<SidebarSection title="Document Actions" borderBottom={false} collapsible={true} defaultExpanded={true}>
   <div class="field-group">
 
     {#if featureFlags.isEnabled('ocr') && featureFlags.isEnabled('page-actions.ocr')}
@@ -28,7 +28,7 @@
       onclick={() => actions.openOcrDialog()}
       disabled={!store.isDocumentLoaded || store.isCropping || store.isOcrRunning || store.isReadOnly}
     >
-      <ScanText class="panel-icon-sm text-primary" /> Recognize Text (OCR)
+      <ScanText class="panel-icon-sm" /> Recognize Text (OCR)
     </Button>
     {/if}
 
@@ -58,7 +58,7 @@
       onclick={() => actions.openCompressDialog('recommended')}
       disabled={!store.isDocumentLoaded || store.isCropping || store.isReadOnly}
     >
-      <FileDown class="panel-icon-sm text-primary" /> Compress PDF
+      <FileDown class="panel-icon-sm" /> Compress PDF
     </Button>
     {/if}
 
@@ -85,8 +85,7 @@
 
     {#if featureFlags.isEnabled('page-actions.split')}
     <Button
-      variant="panel-destructive"
-      class="text-destructive"
+      variant="panel"
       onclick={() => { store.splitDialogMode = 'split'; }}
       disabled={!store.isDocumentLoaded || store.isCropping || store.isReadOnly}
     >

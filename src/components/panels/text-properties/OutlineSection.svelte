@@ -4,9 +4,9 @@
   import SidebarSection from '../../common/SidebarSection.svelte';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
-  import { Button } from '$lib/components/ui/button/index.js';
+  import { Button, ButtonGroup } from '$lib/components/ui/button/index.js';
   import * as Select from '$lib/components/ui/select/index.js';
-  import { BookmarkPlus, BookmarkCheck, Trash2, RefreshCw } from 'lucide-svelte';
+  import { BookmarkPlus, Trash2, RefreshCw } from 'lucide-svelte';
   import {
     inferOutlineLevel,
     flattenOutlineTree,
@@ -146,31 +146,65 @@
 </script>
 
 <SidebarSection title="Document Outline" borderBottom={true} collapsible={true} defaultExpanded={true}>
-  <div class="flex flex-col gap-2">
-    <!-- Outline Title -->
-    <div class="flex flex-col gap-1">
+  <div class="grid grid-cols-[1fr_auto] gap-x-1 gap-y-1">
+    <!-- Outline Title with inline action icon buttons -->
+    <div class="col-span-2">
       <Label for="outline-title-input" class="field-label">Outline Title</Label>
+    </div>
+    <div class="min-w-0">
       <Input
         id="outline-title-input"
         type="text"
         bind:value={outlineTitle}
         placeholder="Bookmark title..."
-        class="h-8 text-xs w-full"
+        class="h-8 text-xs w-full min-w-0"
       />
     </div>
-
-    <!-- Target Page Display -->
-    <!-- <div class="flex items-center justify-between text-xs py-0.5">
-      <span class="text-muted-foreground">Target Page</span>
-      <span class="font-sans font-medium text-foreground">
-        Page {targetPageIndex + 1}
-      </span>
-    </div> -->
+    <ButtonGroup variant="ghost" size="sm" class="h-8 shrink-0">
+      {#if isInOutline}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          disabled={isApplying || !outlineTitle.trim()}
+          onclick={handleUpdateOutline}
+          title="Update Heading"
+          aria-label="Update Heading"
+        >
+          <RefreshCw class="h-3.5 w-3.5 {isApplying ? 'animate-spin' : ''}" aria-hidden="true" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          disabled={isApplying}
+          onclick={handleRemoveFromOutline}
+          title="Remove from Outline"
+          aria-label="Remove from Outline"
+        >
+          <Trash2 class="h-3.5 w-3.5" aria-hidden="true" />
+        </Button>
+      {:else}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          disabled={isApplying || !outlineTitle.trim()}
+          onclick={handleAddToOutline}
+          title="Add to Document Outline"
+          aria-label="Add to Document Outline"
+        >
+          {#if isApplying}
+            <RefreshCw class="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+          {:else}
+            <BookmarkPlus class="h-3.5 w-3.5" aria-hidden="true" />
+          {/if}
+        </Button>
+      {/if}
+    </ButtonGroup>
 
     <!-- Hierarchy Level Selection -->
-    <div class="flex flex-col gap-1 mt-0.5">
+    <div class="col-span-2 mt-1">
       <Label class="field-label">Heading Level</Label>
-
+    </div>
+    <div class="min-w-0">
       <Select.Root
         type="single"
         value={String(effectiveLevel)}
@@ -191,56 +225,6 @@
         </Select.Content>
       </Select.Root>
     </div>
-
-    <!-- Status & Action Buttons -->
-    <div class="flex flex-col gap-1.5 pt-1">
-      {#if isInOutline}
-        <div class="flex items-center gap-1.5 text-xs text-primary font-medium py-1 px-2 rounded-md bg-primary/10">
-          <BookmarkCheck class="h-3.5 w-3.5 shrink-0" />
-          <span class="truncate">In Outline (Heading {existingItem?.level})</span>
-        </div>
-
-        <div class="flex items-center gap-1.5 w-full">
-          <Button
-            variant="outline"
-            size="sm"
-            class="flex-1 h-8 text-xs justify-start px-2.5 font-normal"
-            disabled={isApplying || !outlineTitle.trim()}
-            onclick={handleUpdateOutline}
-          >
-            {#if isApplying}
-              <RefreshCw class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Updating...
-            {:else}
-              <RefreshCw class="h-3.5 w-3.5 mr-1.5" /> Update Heading
-            {/if}
-          </Button>
-
-          <Button
-            variant="outline"
-            size="sm"
-            class="h-8 px-2.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10 shrink-0"
-            disabled={isApplying}
-            onclick={handleRemoveFromOutline}
-            title="Remove from Outline"
-          >
-            <Trash2 class="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      {:else}
-        <Button
-          variant="outline"
-          size="sm"
-          class="w-full h-8 text-xs font-medium justify-start px-2.5"
-          disabled={isApplying || !outlineTitle.trim()}
-          onclick={handleAddToOutline}
-        >
-          {#if isApplying}
-            <RefreshCw class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Adding...
-          {:else}
-            <BookmarkPlus class="h-3.5 w-3.5 mr-1.5" /> Add to Document Outline
-          {/if}
-        </Button>
-      {/if}
-    </div>
+    <div></div>
   </div>
 </SidebarSection>
