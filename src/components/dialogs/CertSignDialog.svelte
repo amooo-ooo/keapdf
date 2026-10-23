@@ -1,23 +1,56 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useCanvasStore } from '../../stores/canvas.svelte';
+  import { useFeatureFlagStore } from '../../core/feature-flags';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import * as Tabs from '$lib/components/ui/tabs/index.js';
   import * as Select from '$lib/components/ui/select/index.js';
-  import { Button } from '$lib/components/ui/button/index.js';
+  import * as Card from '$lib/components/ui/card/index.js';
+  import { Button, ButtonGroup } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
-  import { Checkbox } from '$lib/components/ui/checkbox/index.js';
   import { Switch } from '$lib/components/ui/switch/index.js';
+  import { Slider } from '$lib/components/ui/slider/index.js';
+  import { ControlRow } from '$lib/components/ui/control-row/index.js';
+  import { ColorPicker } from '$lib/components/ui/color-picker/index.js';
   import { downloadBytes } from '../../utils/download-utils';
+  import {
+    SIGNATURE_PLACEMENT_PRESETS,
+    resolveSignaturePresetRect,
+    canvasSignatureRectToPdfRect,
+    type SignaturePlacementPreset,
+  } from '../../utils/signature-placement';
   import type {
     DigitalIdentity,
     SignPdfOptions,
   } from '../../services/pdf/operations/signature-ops';
-  import { getSavedSignatures, type SavedSignature } from '../../services/signature-storage';
+  import {
+    getSavedSignatures,
+    saveSignature,
+    deleteSignature,
+    setDefaultSignature,
+    renderDrawnStrokesToDataUrl,
+    renderTypedSignatureToDataUrl,
+    processUploadedSignatureImage,
+    preloadSignatureFonts,
+    type SavedSignature,
+    type DrawPoint,
+  } from '../../services/signature-storage';
+  import {
+    getSavedDigitalSignatures,
+    getDefaultDigitalSignature,
+    saveDigitalSignature,
+    deleteDigitalSignature,
+    setDefaultDigitalSignature,
+    reconstructDigitalIdentity,
+    hydrateDigitalSignaturesFromOfflineCache,
+    type SavedDigitalSignature,
+    type SavedDigitalSignatureConfig,
+    type DigitalSignaturePlacement,
+  } from '../../services/digital-signature-storage';
   import {
     ShieldCheck,
     KeyRound,
@@ -30,21 +63,36 @@
     Sparkles,
     AlertCircle,
     Lock,
+    Star,
+    Trash2,
+    Plus,
+    PenTool,
+    Type,
+    Eraser,
+    Undo2,
+    SlidersHorizontal,
+    Move,
   } from 'lucide-svelte';
 
   const store = useEditorStore();
   const actions = useEditorActions();
   const canvasStore = useCanvasStore();
+  const featureFlags = useFeatureFlagStore();
 
   let activeTab = $state<'cert' | 'details' | 'appearance' | 'sign'>('cert');
-  let certMode = $state<'generate' | 'import'>('generate');
+  let certMode = $state<'saved' | 'generate' | 'import'>('generate');
+
+  // Saved digital signatures state
+  let savedDigitalSignatures = $state<SavedDigitalSignature[]>([]);
+  let selectedSavedDigitalSigId = $state<string | null>(null);
+  let saveDigitalSignatureForReuse = $state(true);
 
   // Certificate generation inputs
   let commonName = $state('Jane Smith');
   let organization = $state('Acme Corporation');
   let organizationalUnit = $state('Legal & Compliance');
   let email = $state('jane.smith@example.com');
-  let country = $state('US');
+  let country = $state('CH');
   let certPassword = $state('Password123!');
   let keySize = $state<2048 | 4096>(2048);
   let validityYears = $state(2);
@@ -53,14 +101,15 @@
   let importedP12File: File | null = $state(null);
   let importPassword = $state('');
   let importError = $state<string | null>(null);
+  let p12FileInputEl: HTMLInputElement | null = $state(null);
 
-  // Active identity
+  // Active cryptographic identity
   let activeIdentity = $state<DigitalIdentity | null>(null);
   let isGenerating = $state(false);
 
   // Signature metadata
   let reason = $state('I am approving this document');
-  let location = $state('Auckland, New Zealand');
+  let location = $state('Zurich, Switzerland');
   let contactInfo = $state('jane.smith@example.com');
   const reasonPresets = [
     'I am approving this document',
@@ -69,68 +118,480 @@
     'I certify the integrity and authenticity of this document',
   ];
 
-  // Visual appearance
+  // Visual appearance and placement
   let isVisibleSignature = $state(true);
   let targetPageIndex = $state(0);
-  let placementPosition = $state<'bottom-right' | 'bottom-left' | 'center'>('bottom-right');
+  let placementPosition = $state<Exclude<SignaturePlacementPreset, 'custom'>>('bottom-right');
   let savedSignatures = $state<SavedSignature[]>([]);
   let selectedGraphicSigId = $state<string | null>(null);
   let showTextDetails = $state(true);
 
-  // Standards and PAdES Configuration
+  // Signature graphic creation state (Saved, Draw, Type, Upload)
+  let sigSourceMode = $state<'saved' | 'draw' | 'type' | 'upload'>('saved');
+  let saveGraphicToCollection = $state(true);
+  let typedSignatureText = $state('Jane Smith');
+  let selectedFont = $state('Caveat');
+  let inkColor = $state('#000000');
+  let strokeWidth = $state(2.5);
+  const signatureFonts = [
+    { name: 'Caveat', label: 'Casual Script' },
+    { name: 'Dancing Script', label: 'Flowing Script' },
+    { name: 'Pacifico', label: 'Bold Cursive' },
+    { name: 'Alex Brush', label: 'Elegant Calligraphy' },
+    { name: 'Great Vibes', label: 'Classic Formal' },
+    { name: 'Allura', label: 'Slender Flourish' },
+  ];
+  const inkColorPresets = [
+    { label: 'Black', color: '#000000' },
+    { label: 'Dark Navy', color: '#1e3a8a' },
+    { label: 'Royal Blue', color: '#2563eb' },
+    { label: 'Dark Grey', color: '#374151' },
+  ];
+
+  // Draw pad state
+  let drawCanvasEl: HTMLCanvasElement | null = $state(null);
+  let isDrawingStroke = $state(false);
+  let strokes = $state<DrawPoint[][]>([]);
+  let activeStrokePoints: DrawPoint[] = [];
+  let cachedCanvasRect: DOMRect | null = null;
+  let activePointerId: number | null = null;
+
+  // Upload graphic state
+  let rawUploadedGraphicUrl = $state<string | null>(null);
+  let uploadedGraphicDataUrl = $state<string | null>(null);
+  let uploadedAspectRatio = $state(3);
+  let uploadThreshold = $state(220);
+  let isCleaningUpload = $state(false);
+  let graphicFileInputEl: HTMLInputElement | null = $state(null);
+
+  // Standards and PAdES configuration (enabled by default for full statutory compliance)
   let subFilter = $state<'ETSI.CAdES.detached' | 'adbe.pkcs7.detached'>('ETSI.CAdES.detached');
-  let enableTimestamp = $state(false);
-  let tsaUrl = $state('https://freetsa.org/tsr');
+  let enableTimestamp = $state(true);
+  let tsaUrl = $state('');
   let embedDss = $state(true);
 
-  // Status
+  // Execution status
   let isSigning = $state(false);
   let signSuccess = $state(false);
   let signedPdfBytes = $state<Uint8Array | null>(null);
   let signError = $state<string | null>(null);
 
-  onMount(() => {
+  const effectiveSignerName = $derived(
+    (activeIdentity?.subject.commonName || commonName || typedSignatureText || 'Signer').trim() ||
+      'Signer'
+  );
+
+  let typedPreviewDataUrl = $state<string | undefined>(undefined);
+
+  $effect(() => {
+    const textToRender = (typedSignatureText.trim() || effectiveSignerName).trim();
+    const font = selectedFont;
+    const color = inkColor;
+    if (sigSourceMode === 'type' && textToRender) {
+      let cancelled = false;
+      void renderTypedSignatureToDataUrl(textToRender, font, color).then((rendered) => {
+        if (!cancelled) {
+          typedPreviewDataUrl = rendered.dataUrl;
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    return undefined;
+  });
+
+  const previewGraphicDataUrl = $derived.by(() => {
+    if (sigSourceMode === 'saved') {
+      if (selectedGraphicSigId === null) return undefined;
+      const found = savedSignatures.find((s) => s.id === selectedGraphicSigId);
+      return found?.dataUrl;
+    }
+    if (sigSourceMode === 'upload' && uploadedGraphicDataUrl) {
+      return uploadedGraphicDataUrl;
+    }
+    if (sigSourceMode === 'draw' && strokes.length > 0) {
+      const rendered = renderDrawnStrokesToDataUrl(strokes, strokeWidth, inkColor);
+      if (rendered) return rendered.dataUrl;
+    }
+    if (sigSourceMode === 'type' && typedPreviewDataUrl) {
+      return typedPreviewDataUrl;
+    }
+    if (selectedGraphicSigId) {
+      const found = savedSignatures.find((s) => s.id === selectedGraphicSigId);
+      if (found) return found.dataUrl;
+    }
+    return undefined;
+  });
+
+  function buildCurrentSignatureConfig(): SavedDigitalSignatureConfig {
+    return {
+      reason: reason.trim() || 'I am approving this document',
+      location: location.trim(),
+      contactInfo: contactInfo.trim(),
+      subFilter,
+      enableTimestamp,
+      tsaUrl: tsaUrl.trim(),
+      embedDss,
+      isVisibleSignature,
+      placementPosition: placementPosition as DigitalSignaturePlacement,
+      selectedGraphicSigId,
+      showTextDetails,
+    };
+  }
+
+  function applySavedDigitalSignatureState(record: SavedDigitalSignature): void {
+    const restored = reconstructDigitalIdentity(record);
+    activeIdentity = restored;
+    selectedSavedDigitalSigId = record.id;
+    commonName = restored.subject.commonName || commonName;
+    typedSignatureText = restored.subject.commonName || typedSignatureText;
+    organization = restored.subject.organization || organization;
+    organizationalUnit = restored.subject.organizationalUnit || organizationalUnit;
+    email = restored.subject.email || email;
+    country = restored.subject.country || country;
+    reason = record.config.reason;
+    location = record.config.location;
+    contactInfo = record.config.contactInfo;
+    subFilter = record.config.subFilter || 'ETSI.CAdES.detached';
+    embedDss = record.config.embedDss ?? true;
+    enableTimestamp = embedDss ? true : Boolean(record.config.enableTimestamp);
+    tsaUrl = record.config.tsaUrl === 'https://freetsa.org/tsr' ? '' : (record.config.tsaUrl || '');
+    isVisibleSignature = record.config.isVisibleSignature;
+    if (
+      record.config.placementPosition === 'bottom-right' ||
+      record.config.placementPosition === 'bottom-left' ||
+      record.config.placementPosition === 'center' ||
+      record.config.placementPosition === 'top-right' ||
+      record.config.placementPosition === 'top-left'
+    ) {
+      placementPosition = record.config.placementPosition;
+    }
+    if (
+      record.config.selectedGraphicSigId === null ||
+      savedSignatures.some((s) => s.id === record.config.selectedGraphicSigId)
+    ) {
+      selectedGraphicSigId = record.config.selectedGraphicSigId;
+    }
+    showTextDetails = record.config.showTextDetails;
+  }
+
+  function refreshSavedDigitalSignatures(applyDefaultMode = false): void {
+    savedDigitalSignatures = getSavedDigitalSignatures();
+    if (featureFlags.isEnabled('signatures.cert-sign.saved') && savedDigitalSignatures.length > 0) {
+      if (applyDefaultMode) {
+        certMode = 'saved';
+        const def = getDefaultDigitalSignature();
+        if (def) {
+          try {
+            applySavedDigitalSignatureState(def);
+          } catch (err) {
+            console.warn('Failed to restore default digital signature:', err);
+          }
+        }
+      }
+    } else if (certMode === 'saved') {
+      certMode = 'generate';
+    }
+  }
+
+  function persistCurrentDigitalSignatureIfEnabled(identity: DigitalIdentity): void {
+    if (!featureFlags.isEnabled('signatures.cert-sign.saved') || !saveDigitalSignatureForReuse) {
+      return;
+    }
+    const saved = saveDigitalSignature({
+      id: selectedSavedDigitalSigId ?? undefined,
+      identity,
+      config: buildCurrentSignatureConfig(),
+      isDefault: true,
+    });
+    savedDigitalSignatures = getSavedDigitalSignatures();
+    selectedSavedDigitalSigId = saved.id;
+    certMode = 'saved';
+  }
+
+  async function handleLoadSavedAsIs(
+    record: SavedDigitalSignature,
+    signImmediately = false
+  ): Promise<void> {
+    signError = null;
+    try {
+      applySavedDigitalSignatureState(record);
+      if (signImmediately) {
+        activeTab = 'sign';
+        await handleExecuteSign(false);
+      } else {
+        activeTab = 'sign';
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to load saved digital signature.';
+      signError = message;
+    }
+  }
+
+  function handleSetDefaultDigitalSig(id: string, e: MouseEvent): void {
+    e.stopPropagation();
+    setDefaultDigitalSignature(id);
+    refreshSavedDigitalSignatures(false);
+  }
+
+  function handleDeleteDigitalSig(id: string, e: MouseEvent): void {
+    e.stopPropagation();
+    deleteDigitalSignature(id);
+    if (selectedSavedDigitalSigId === id) {
+      selectedSavedDigitalSigId = null;
+      activeIdentity = null;
+    }
+    refreshSavedDigitalSignatures(true);
+  }
+
+  function handleDeleteGraphicSig(id: string, e: MouseEvent): void {
+    e.stopPropagation();
+    deleteSignature(id);
     savedSignatures = getSavedSignatures();
-    const def = savedSignatures.find((s) => s.isDefault);
-    if (def) selectedGraphicSigId = def.id;
-    else if (savedSignatures.length > 0) selectedGraphicSigId = savedSignatures[0].id;
-    targetPageIndex = store.currentPageIndex;
+    if (selectedGraphicSigId === id) {
+      selectedGraphicSigId = savedSignatures[0]?.id ?? null;
+    }
+  }
+
+  function handleSetDefaultGraphicSig(id: string, e: MouseEvent): void {
+    e.stopPropagation();
+    setDefaultSignature(id);
+    savedSignatures = getSavedSignatures();
+    selectedGraphicSigId = id;
+  }
+
+  function setupDrawCanvas(): void {
+    if (!drawCanvasEl) return;
+    const rect = drawCanvasEl.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    drawCanvasEl.width = Math.round(rect.width * dpr);
+    drawCanvasEl.height = Math.round(rect.height * dpr);
+    cachedCanvasRect = rect;
+    redrawSignaturePad();
+  }
+
+  function redrawSignaturePad(): void {
+    if (!drawCanvasEl) return;
+    const ctx = drawCanvasEl.getContext('2d');
+    if (!ctx) return;
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    const rect = cachedCanvasRect || drawCanvasEl.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = inkColor;
+    ctx.lineWidth = strokeWidth;
+
+    const allStrokes = activeStrokePoints.length > 0 ? [...strokes, activeStrokePoints] : strokes;
+    for (const stroke of allStrokes) {
+      if (stroke.length === 0) continue;
+      if (stroke.length === 1) {
+        ctx.beginPath();
+        ctx.arc(stroke[0].x, stroke[0].y, strokeWidth / 2, 0, Math.PI * 2);
+        ctx.fillStyle = inkColor;
+        ctx.fill();
+        continue;
+      }
+      ctx.beginPath();
+      ctx.moveTo(stroke[0].x, stroke[0].y);
+      for (let i = 1; i < stroke.length - 1; i++) {
+        const xc = (stroke[i].x + stroke[i + 1].x) / 2;
+        const yc = (stroke[i].y + stroke[i + 1].y) / 2;
+        ctx.quadraticCurveTo(stroke[i].x, stroke[i].y, xc, yc);
+      }
+      const last = stroke[stroke.length - 1];
+      ctx.lineTo(last.x, last.y);
+      ctx.stroke();
+    }
+  }
+
+  function handlePadPointerDown(e: PointerEvent): void {
+    if (!drawCanvasEl) return;
+    try {
+      drawCanvasEl.setPointerCapture(e.pointerId);
+      activePointerId = e.pointerId;
+    } catch {
+      // Ignore pointer capture errors
+    }
+    cachedCanvasRect = drawCanvasEl.getBoundingClientRect();
+    isDrawingStroke = true;
+    activeStrokePoints = [
+      {
+        x: e.clientX - cachedCanvasRect.left,
+        y: e.clientY - cachedCanvasRect.top,
+      },
+    ];
+    redrawSignaturePad();
+  }
+
+  function handlePadPointerMove(e: PointerEvent): void {
+    if (!isDrawingStroke || !drawCanvasEl) return;
+    const rect = cachedCanvasRect || drawCanvasEl.getBoundingClientRect();
+    activeStrokePoints.push({
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    });
+    redrawSignaturePad();
+  }
+
+  function handlePadPointerUp(): void {
+    if (!isDrawingStroke) return;
+    isDrawingStroke = false;
+    if (drawCanvasEl && activePointerId !== null) {
+      try {
+        if (drawCanvasEl.hasPointerCapture(activePointerId)) {
+          drawCanvasEl.releasePointerCapture(activePointerId);
+        }
+      } catch {
+        // Ignore release errors
+      }
+      activePointerId = null;
+    }
+    if (activeStrokePoints.length > 0) {
+      strokes = [...strokes, [...activeStrokePoints]];
+      activeStrokePoints = [];
+    }
+    redrawSignaturePad();
+  }
+
+  async function processGraphicUpload(rawUrl: string): Promise<void> {
+    if (!rawUrl) return;
+    isCleaningUpload = true;
+    try {
+      const cleaned = await processUploadedSignatureImage(rawUrl, uploadThreshold, inkColor);
+      uploadedGraphicDataUrl = cleaned.dataUrl;
+      uploadedAspectRatio = cleaned.aspectRatio;
+    } catch {
+      uploadedGraphicDataUrl = rawUrl;
+    } finally {
+      isCleaningUpload = false;
+    }
+  }
+
+  async function handleGraphicUpload(e: Event): Promise<void> {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const rawUrl = reader.result as string;
+      rawUploadedGraphicUrl = rawUrl;
+      await processGraphicUpload(rawUrl);
+    };
+    reader.readAsDataURL(file);
+    input.value = '';
+  }
+
+  $effect(() => {
+    if (activeTab === 'appearance' && sigSourceMode === 'draw' && drawCanvasEl) {
+      requestAnimationFrame(() => setupDrawCanvas());
+    }
   });
 
   $effect(() => {
     if (store.showCertSignDialog) {
       untrack(() => {
+        preloadSignatureFonts();
         savedSignatures = getSavedSignatures();
+        if (savedSignatures.length > 0) {
+          const def = savedSignatures.find((s) => s.isDefault) ?? savedSignatures[0];
+          selectedGraphicSigId = def.id;
+          sigSourceMode = 'saved';
+        } else {
+          selectedGraphicSigId = null;
+          sigSourceMode = 'type';
+        }
         targetPageIndex = store.currentPageIndex;
         signSuccess = false;
         signedPdfBytes = null;
         signError = null;
+
+        refreshSavedDigitalSignatures(true);
+        if (
+          featureFlags.isEnabled('signatures.cert-sign.saved') &&
+          savedDigitalSignatures.length > 0
+        ) {
+          activeTab = 'cert';
+        } else {
+          activeTab = 'cert';
+          if (featureFlags.isEnabled('signatures.cert-sign.saved')) {
+            void hydrateDigitalSignaturesFromOfflineCache().then((hydrated) => {
+              if (hydrated.length > 0 && savedDigitalSignatures.length === 0) {
+                refreshSavedDigitalSignatures(true);
+              }
+            });
+          }
+        }
       });
     }
   });
 
-  async function handleGenerateCertificate(): Promise<void> {
-    if (!commonName.trim()) return;
+  async function ensureActiveIdentity(): Promise<DigitalIdentity | null> {
+    if (
+      activeIdentity &&
+      certMode === 'saved' &&
+      selectedSavedDigitalSigId !== null
+    ) {
+      return activeIdentity;
+    }
+    if (
+      activeIdentity &&
+      certMode === 'generate' &&
+      activeIdentity.subject.commonName === commonName.trim()
+    ) {
+      return activeIdentity;
+    }
+    if (certMode === 'import') {
+      if (activeIdentity) return activeIdentity;
+      if (importedP12File) {
+        await handleImportP12();
+        return activeIdentity;
+      }
+      signError = 'Please select and unlock a PKCS#12 (.p12 / .pfx) certificate file.';
+      return null;
+    }
+
+    const targetName = commonName.trim() || 'Authorized Signer';
     isGenerating = true;
     try {
-      const { createSelfSignedCertificate } = await import('../../services/pdf/operations/signature-ops');
+      const { createSelfSignedCertificate } = await import(
+        '../../services/pdf/operations/signature-ops'
+      );
       const id = await createSelfSignedCertificate({
-        commonName: commonName.trim(),
+        commonName: targetName,
         organization: organization.trim() || undefined,
         organizationalUnit: organizationalUnit.trim() || undefined,
         email: email.trim() || undefined,
-        country: country.trim() || undefined,
-        password: certPassword,
+        country: country.trim() || 'CH',
+        password: certPassword || 'Password123!',
         keySize,
         validityYears,
       });
       activeIdentity = id;
-      activeTab = 'details';
+      typedSignatureText = id.subject.commonName || typedSignatureText;
+      if (!contactInfo.trim() && email.trim()) {
+        contactInfo = email.trim();
+      }
+      persistCurrentDigitalSignatureIfEnabled(id);
+      return id;
     } catch (err) {
       console.error('Failed to generate digital identity:', err);
       signError = 'Failed to generate RSA certificate keys.';
+      return null;
     } finally {
       isGenerating = false;
+    }
+  }
+
+  async function handleGenerateCertificate(): Promise<void> {
+    const id = await ensureActiveIdentity();
+    if (id) {
+      activeTab = 'details';
     }
   }
 
@@ -141,10 +602,15 @@
       const { parsePkcs12 } = await import('../../services/pdf/operations/signature-ops');
       const buffer = await importedP12File.arrayBuffer();
       const id = parsePkcs12(buffer, importPassword);
+      selectedSavedDigitalSigId = null;
       activeIdentity = id;
+      commonName = id.subject.commonName || commonName;
+      typedSignatureText = id.subject.commonName || typedSignatureText;
+      persistCurrentDigitalSignatureIfEnabled(id);
       activeTab = 'details';
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Invalid PKCS#12 file or incorrect password.';
+      const message =
+        err instanceof Error ? err.message : 'Invalid PKCS#12 file or incorrect password.';
       importError = message;
     }
   }
@@ -155,45 +621,150 @@
     downloadBytes(activeIdentity.p12Bytes, `${cleanName}_digital_id.p12`, 'application/x-pkcs12');
   }
 
-  async function handleExecuteSign(downloadOnly = false): Promise<void> {
-    if (!activeIdentity) return;
-    isSigning = true;
-    signError = null;
-
-    try {
-      let graphicUrl: string | undefined = undefined;
-      if (selectedGraphicSigId) {
-        const found = savedSignatures.find((s) => s.id === selectedGraphicSigId);
-        if (found) graphicUrl = found.dataUrl;
+  async function resolveAndPersistGraphicDataUrl(): Promise<string | undefined> {
+    if (sigSourceMode === 'saved') {
+      if (selectedGraphicSigId === null) return undefined;
+      const found = savedSignatures.find((s) => s.id === selectedGraphicSigId);
+      return found?.dataUrl;
+    }
+    if (sigSourceMode === 'draw' && strokes.length > 0) {
+      const rendered = renderDrawnStrokesToDataUrl(strokes, strokeWidth, inkColor);
+      if (rendered) {
+        if (saveGraphicToCollection) {
+          const saved = saveSignature({
+            title: `${effectiveSignerName} (Drawn)`,
+            type: 'draw',
+            dataUrl: rendered.dataUrl,
+            color: inkColor,
+            aspectRatio: rendered.aspectRatio,
+            isDefault: savedSignatures.length === 0,
+          });
+          savedSignatures = getSavedSignatures();
+          selectedGraphicSigId = saved.id;
+        }
+        return rendered.dataUrl;
       }
+    }
+    if (sigSourceMode === 'upload' && uploadedGraphicDataUrl) {
+      if (saveGraphicToCollection) {
+        const saved = saveSignature({
+          title: `${effectiveSignerName} (Uploaded)`,
+          type: 'upload',
+          dataUrl: uploadedGraphicDataUrl,
+          color: inkColor,
+          aspectRatio: uploadedAspectRatio,
+          isDefault: savedSignatures.length === 0,
+        });
+        savedSignatures = getSavedSignatures();
+        selectedGraphicSigId = saved.id;
+      }
+      return uploadedGraphicDataUrl;
+    }
+    if (sigSourceMode === 'type') {
+      const textToRender = (typedSignatureText.trim() || effectiveSignerName).trim();
+      const rendered = await renderTypedSignatureToDataUrl(
+        textToRender,
+        selectedFont,
+        inkColor
+      );
+      if (rendered) {
+        if (saveGraphicToCollection) {
+          const saved = saveSignature({
+            title: `${textToRender} (${selectedFont})`,
+            type: 'type',
+            dataUrl: rendered.dataUrl,
+            fontFamily: selectedFont,
+            text: textToRender,
+            color: inkColor,
+            aspectRatio: rendered.aspectRatio,
+            isDefault: savedSignatures.length === 0,
+          });
+          savedSignatures = getSavedSignatures();
+          selectedGraphicSigId = saved.id;
+        }
+        return rendered.dataUrl;
+      }
+    }
+    return previewGraphicDataUrl;
+  }
+
+  function resolveTargetPageDimensions(pageIdx: number): { widthPts: number; heightPts: number } {
+    try {
+      if (actions.service.document && store.isDocumentLoaded) {
+        return actions.service.document.getPage(pageIdx).getDimensions();
+      }
+    } catch {
+      // Fallback to standard Letter dimensions
+    }
+    return { widthPts: 612, heightPts: 792 };
+  }
+
+  async function handleStartInteractivePlacement(): Promise<void> {
+    signError = null;
+    const identity = await ensureActiveIdentity();
+    if (!identity) return;
+
+    const graphicUrl = await resolveAndPersistGraphicDataUrl();
+    const dims = resolveTargetPageDimensions(targetPageIndex);
+    const presetRect = resolveSignaturePresetRect(
+      placementPosition,
+      dims.widthPts,
+      dims.heightPts
+    );
+
+    actions.startDigitalSignaturePlacement({
+      pageIndex: targetPageIndex,
+      x: presetRect.x,
+      y: presetRect.y,
+      width: presetRect.width,
+      height: presetRect.height,
+      preset: placementPosition,
+      graphicDataUrl: graphicUrl,
+      showTextDetails,
+      signerName: identity.subject.commonName || effectiveSignerName,
+      signOptions: {
+        identity,
+        signerName: identity.subject.commonName || effectiveSignerName,
+        reason: reason.trim() || undefined,
+        location: location.trim() || undefined,
+        contactInfo: contactInfo.trim() || undefined,
+        signingTime: new Date(),
+        subFilter,
+        enableTimestamp,
+        tsaUrl: enableTimestamp && tsaUrl.trim() ? tsaUrl.trim() : undefined,
+        embedDss,
+      },
+      onSigned: () => {
+        persistCurrentDigitalSignatureIfEnabled(identity);
+      },
+    });
+  }
+
+  async function handleExecuteSign(downloadOnly = false): Promise<void> {
+    signError = null;
+    const identity = await ensureActiveIdentity();
+    if (!identity) return;
+
+    isSigning = true;
+    try {
+      const graphicUrl = await resolveAndPersistGraphicDataUrl();
 
       let visualOptions = undefined;
       if (isVisibleSignature) {
-        let vx = 350;
-        let vy = 60;
-        const vw = 200;
-        const vh = 65;
-
-        try {
-          const dims = actions.service.document.getPage(targetPageIndex).getDimensions();
-          if (placementPosition === 'bottom-right') {
-            vx = Math.max(20, dims.widthPts - vw - 36);
-            vy = 36;
-          } else if (placementPosition === 'bottom-left') {
-            vx = 36;
-            vy = 36;
-          } else {
-            vx = Math.max(20, (dims.widthPts - vw) / 2);
-            vy = Math.max(20, (dims.heightPts - vh) / 2);
-          }
-        } catch {}
+        const dims = resolveTargetPageDimensions(targetPageIndex);
+        const canvasRect = resolveSignaturePresetRect(
+          placementPosition,
+          dims.widthPts,
+          dims.heightPts
+        );
+        const pdfRect = canvasSignatureRectToPdfRect(canvasRect, dims.heightPts);
 
         visualOptions = {
           pageIndex: targetPageIndex,
-          x: vx,
-          y: vy,
-          width: vw,
-          height: vh,
+          x: pdfRect.x,
+          y: pdfRect.y,
+          width: pdfRect.width,
+          height: pdfRect.height,
           graphicDataUrl: graphicUrl,
           showTextDetails,
         };
