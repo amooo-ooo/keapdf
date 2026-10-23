@@ -894,60 +894,80 @@
       updates.lines = updatedLines;
       updates.segments = updatedLines.flatMap((l) => l.segments ?? []);
     } else {
+      const baseSegments = updates.segments ?? activeCanvasElement.segments;
+      const baseLines = updates.lines ?? activeCanvasElement.lines;
       if (partialStyle) {
-        if (activeCanvasElement.segments) {
-          updates.segments = activeCanvasElement.segments.map((s) => ({
+        const fontFamilyOverride = partialStyle.fontFamily
+          ? { fontFamily: partialStyle.fontFamily, rawFontFamily: partialStyle.fontFamily }
+          : {};
+        if (baseSegments) {
+          updates.segments = baseSegments.map((s) => ({
             ...s,
             ...partialStyle,
+            ...fontFamilyOverride,
           }));
         }
-        if (activeCanvasElement.lines) {
-          updates.lines = activeCanvasElement.lines.map((l) => ({
+        if (baseLines) {
+          updates.lines = baseLines.map((l) => ({
             ...l,
+            ...(partialStyle.fontSize !== undefined ? { fontSize: partialStyle.fontSize } : {}),
             ...(partialStyle.underline !== undefined ? { underline: partialStyle.underline } : {}),
             ...(partialStyle.strikethrough !== undefined ? { strikethrough: partialStyle.strikethrough } : {}),
+            ...(partialStyle.letterSpacing !== undefined ? { letterSpacing: partialStyle.letterSpacing } : {}),
             segments: (l.segments ?? []).map((s) => ({
               ...s,
               ...partialStyle,
+              ...fontFamilyOverride,
             })),
           }));
         }
       } else {
-        if (activeCanvasElement.segments) {
-          updates.segments = activeCanvasElement.segments.map((s) => ({
+        if (baseSegments) {
+          updates.segments = baseSegments.map((s) => ({
             ...s,
             fontFamily: editFontFamily,
-            rawFontFamily: undefined,
+            rawFontFamily: editFontFamily,
             fontWeight: editFontWeight,
             fontStyle: editFontStyle,
             underline: editUnderline,
             strikethrough: editStrikethrough,
             color: editColorHex,
             backgroundColor: targetBg,
+            letterSpacing: editLetterSpacing || undefined,
           }));
         }
-        if (activeCanvasElement.lines) {
-          updates.lines = activeCanvasElement.lines.map((l) => ({
+        if (baseLines) {
+          updates.lines = baseLines.map((l) => ({
             ...l,
+            ...(hasExplicitLineHeight ? { lineHeight: parsedLineHeight } : {}),
+            letterSpacing: editLetterSpacing || undefined,
             underline: editUnderline,
             strikethrough: editStrikethrough,
             segments: (l.segments ?? []).map((s) => ({
               ...s,
               fontFamily: editFontFamily,
-              rawFontFamily: undefined,
+              rawFontFamily: editFontFamily,
               fontWeight: editFontWeight,
               fontStyle: editFontStyle,
               underline: editUnderline,
               strikethrough: editStrikethrough,
               color: editColorHex,
               backgroundColor: targetBg,
+              letterSpacing: editLetterSpacing || undefined,
             })),
           }));
         }
       }
     }
 
-    canvasActions.updateElementProperties(id, updates);
+    if (multiModifyEnabled && !isEditing && canvasStore.selectedElementIds.length > 1) {
+      canvasActions.updateSelectedElementsProperties(
+        (item) => (item.id === id ? (updates as Record<string, unknown>) : (buildOtherCanvasTextStyleUpdates(item as TextElement, partialStyle) as Record<string, unknown>)),
+        { kind: 'text' },
+      );
+    } else {
+      canvasActions.updateElementProperties(id, updates);
+    }
   }
 
   function applyPdfChanges(partialStyle?: Partial<TextSegment | TextWord>): void {
@@ -956,8 +976,36 @@
     // When currently inline-editing in PDF mode, update staged lines/words directly without destructive re-render
     if (store.inlineEdit && store.inlineEdit.spanId === activePdfSpan.id) {
       const sel = getActiveEditorSelection();
+      if (partialStyle && 'textAlign' in partialStyle) {
+        const alignVal = (partialStyle as { textAlign?: 'left' | 'center' | 'right' }).textAlign || editTextAlign;
+        store.inlineEdit = {
+          ...store.inlineEdit,
+          span: {
+            ...store.inlineEdit.span,
+            textAlign: alignVal,
+          },
+        };
+        if (store.selectedSpan?.type === 'text') {
+          (store.selectedSpan as EditableTextSpan).textAlign = alignVal;
+        }
+        if (Object.keys(partialStyle).length === 1) {
+          if (sel?.container) {
+            const c = sel.container;
+            const s = sel.start;
+            const e = sel.end;
+            queueMicrotask(() => {
+              c.focus();
+              setSelectionCharOffsets(c, s, e);
+            });
+          }
+          return;
+        }
+      }
+
+      const inlineParsedLh = parseFloat(editLineHeight);
+      const hasInlineExplicitLh = !isNaN(inlineParsedLh) && inlineParsedLh > 0;
       const currentLines = store.inlineEdit.styledLines || activePdfSpan.lines || [];
-      let styleToApply: Partial<TextWord>;
+      let styleToApply: Partial<TextWord> & { lineHeight?: number };
       if (partialStyle) {
         styleToApply = { ...(partialStyle as unknown as Partial<TextWord>) };
         if (typeof (partialStyle as unknown as { color?: unknown })?.color === 'string') {
@@ -966,15 +1014,34 @@
       } else {
         styleToApply = {
           fontFamily: editFontFamily,
+          rawFontFamily: editFontFamily,
+          matchedFontFamily: editFontFamily,
           fontWeight: editFontWeight,
           fontStyle: editFontStyle,
           underline: editUnderline,
           strikethrough: editStrikethrough,
           color: hexToRgba(editColorHex),
           backgroundColor: editBackgroundColor || undefined,
+          letterSpacing: editLetterSpacing || undefined,
+          ...(hasInlineExplicitLh ? { lineHeight: inlineParsedLh } : {}),
         };
         if (!isNaN(editFontSize) && editFontSize > 0) {
           styleToApply.fontSize = editFontSize;
+        }
+        store.inlineEdit = {
+          ...store.inlineEdit,
+          span: {
+            ...store.inlineEdit.span,
+            letterSpacing: editLetterSpacing || undefined,
+            ...(hasInlineExplicitLh ? { lineHeight: inlineParsedLh } : {}),
+          },
+        };
+        if (store.selectedSpan?.type === 'text') {
+          const selSpan = store.selectedSpan as EditableTextSpan;
+          selSpan.letterSpacing = editLetterSpacing || undefined;
+          if (hasInlineExplicitLh) {
+            selSpan.lineHeight = inlineParsedLh;
+          }
         }
       }
 
@@ -1011,6 +1078,7 @@
       : (editBackgroundColor || undefined);
 
     const parsedLineHeight = parseFloat(editLineHeight);
+    const hasExplicitLineHeight = !isNaN(parsedLineHeight) && parsedLineHeight > 0;
     const validFontSize = !isNaN(editFontSize) && editFontSize > 0 ? editFontSize : undefined;
     const isMultiLine = Boolean(
       activePdfSpan.isParagraph ||
@@ -1026,9 +1094,18 @@
         const origLine = isSameCount
           ? activePdfSpan.lines![idx]
           : (findBestMatchingOrigLine(newText, activePdfSpan.lines, idx) || activePdfSpan.lines![Math.min(idx, activePdfSpan.lines!.length - 1)]);
-        const lH = origLine?.lineHeight ?? activePdfSpan.lineHeight ?? (activePdfSpan.fontSize * 1.25);
-        const lTop = isSameCount && origLine?.top !== undefined ? origLine.top : activePdfSpan.top + idx * lH;
-        const lBaseline = isSameCount && origLine?.baselineY !== undefined ? origLine.baselineY : activePdfSpan.baselineY - idx * lH;
+        const lH = hasExplicitLineHeight && !partialStyle
+          ? parsedLineHeight
+          : (origLine?.lineHeight ?? activePdfSpan.lineHeight ?? (activePdfSpan.fontSize * 1.25));
+        const lTop = isSameCount && origLine?.top !== undefined && !hasExplicitLineHeight
+          ? origLine.top
+          : activePdfSpan.top + idx * lH;
+        const lBaseline = isSameCount && origLine?.baselineY !== undefined && !hasExplicitLineHeight
+          ? origLine.baselineY
+          : activePdfSpan.baselineY - idx * lH;
+        const lLetterSpacing = partialStyle
+          ? (partialStyle.letterSpacing ?? origLine?.letterSpacing ?? activePdfSpan.letterSpacing)
+          : (editLetterSpacing || origLine?.letterSpacing);
 
         let words: TextWord[] = [];
         if (origLine?.words && origLine.text === newText) {
@@ -1037,25 +1114,34 @@
               const updatedWord: TextWord = {
                 ...w,
                 fontFamily: partialStyle.fontFamily ?? w.fontFamily,
+                rawFontFamily: partialStyle.fontFamily ? partialStyle.fontFamily : w.rawFontFamily,
+                matchedFontFamily: partialStyle.fontFamily ? partialStyle.fontFamily : w.matchedFontFamily,
                 fontWeight: partialStyle.fontWeight ?? w.fontWeight,
                 fontStyle: partialStyle.fontStyle ?? w.fontStyle,
                 color: partialStyle.color !== undefined
                   ? (typeof partialStyle.color === 'string' ? hexToRgba(partialStyle.color) : (partialStyle.color as unknown as ColorRgba))
                   : w.color,
                 fontSize: partialStyle.fontSize ?? (validFontSize !== undefined && 'fontSize' in partialStyle ? validFontSize : w.fontSize),
-                underline: partialStyle.underline !== undefined ? partialStyle.underline : w.underline,
-                strikethrough: partialStyle.strikethrough !== undefined ? partialStyle.strikethrough : w.strikethrough,
-                backgroundColor: partialStyle.backgroundColor !== undefined ? partialStyle.backgroundColor : w.backgroundColor,
+                underline: 'underline' in partialStyle ? partialStyle.underline : w.underline,
+                strikethrough: 'strikethrough' in partialStyle ? partialStyle.strikethrough : w.strikethrough,
+                backgroundColor: 'backgroundColor' in partialStyle ? partialStyle.backgroundColor : w.backgroundColor,
+                letterSpacing: 'letterSpacing' in partialStyle ? partialStyle.letterSpacing : w.letterSpacing,
               };
               return updatedWord;
             }
             return {
               ...w,
-              fontFamily: editFontFamily,
-              fontWeight: editFontWeight,
-              fontStyle: editFontStyle,
-              color: hexToRgba(editColorHex),
+              fontFamily: w.fontFamily || editFontFamily,
+              rawFontFamily: w.rawFontFamily || w.fontFamily || editFontFamily,
+              matchedFontFamily: w.matchedFontFamily || w.fontFamily || editFontFamily,
+              fontWeight: w.fontWeight || editFontWeight,
+              fontStyle: w.fontStyle || editFontStyle,
+              color: w.color || hexToRgba(editColorHex),
               fontSize: validFontSize ?? w.fontSize,
+              underline: w.underline ?? editUnderline,
+              strikethrough: w.strikethrough ?? editStrikethrough,
+              backgroundColor: w.backgroundColor ?? targetBg,
+              letterSpacing: editLetterSpacing || w.letterSpacing,
             };
           });
         } else if (newText.trim().length > 0) {
@@ -1076,8 +1162,12 @@
             if (hasPrecedingSpace) {
               currentX += lineFs * 0.25;
             }
-            const candidateWord = origLine?.words?.find((w) => w.text === cleanToken);
-            const wW = candidateWord?.width && candidateWord.width > 0 ? candidateWord.width : cleanToken.length * approxCharW;
+            const candidateWord =
+              origLine?.words?.find((w) => w.text === cleanToken) ??
+              origLine?.words?.[Math.min(words.length, (origLine?.words?.length || 1) - 1)];
+            const wW = candidateWord?.width && candidateWord.width > 0 && candidateWord.text === cleanToken
+              ? candidateWord.width
+              : cleanToken.length * approxCharW;
             words.push({
               text: cleanToken,
               left: currentX,
@@ -1090,11 +1180,16 @@
               baselineY: lBaseline,
               charStartIndex: 0,
               charCount: cleanToken.length,
-              fontFamily: candidateWord?.fontFamily ?? editFontFamily,
-              rawFontFamily: candidateWord?.rawFontFamily ?? editFontFamily,
-              color: candidateWord?.color ?? hexToRgba(editColorHex),
-              fontWeight: candidateWord?.fontWeight || editFontWeight,
-              fontStyle: candidateWord?.fontStyle || editFontStyle,
+              fontFamily: candidateWord?.fontFamily ?? origLine?.fontFamily ?? editFontFamily,
+              rawFontFamily: candidateWord?.rawFontFamily ?? origLine?.rawFontFamily ?? editFontFamily,
+              matchedFontFamily: candidateWord?.matchedFontFamily ?? origLine?.matchedFontFamily ?? editFontFamily,
+              color: candidateWord?.color ?? origLine?.color ?? hexToRgba(editColorHex),
+              fontWeight: candidateWord?.fontWeight || origLine?.fontWeight || editFontWeight,
+              fontStyle: candidateWord?.fontStyle || origLine?.fontStyle || editFontStyle,
+              underline: partialStyle ? ('underline' in partialStyle ? partialStyle.underline : candidateWord?.underline) : (candidateWord?.underline ?? editUnderline),
+              strikethrough: partialStyle ? ('strikethrough' in partialStyle ? partialStyle.strikethrough : candidateWord?.strikethrough) : (candidateWord?.strikethrough ?? editStrikethrough),
+              backgroundColor: partialStyle ? ('backgroundColor' in partialStyle ? partialStyle.backgroundColor : candidateWord?.backgroundColor) : (candidateWord?.backgroundColor ?? targetBg),
+              letterSpacing: candidateWord?.letterSpacing ?? lLetterSpacing,
               hasPrecedingSpace,
             });
             currentX += wW;
@@ -1102,26 +1197,38 @@
           }
         }
 
+        const allWordsUnderline = words.length > 0 && words.every((w) => Boolean(w.underline));
+        const anyWordUnderline = words.some((w) => Boolean(w.underline));
+        const allWordsStrike = words.length > 0 && words.every((w) => Boolean(w.strikethrough));
+        const anyWordStrike = words.some((w) => Boolean(w.strikethrough));
+        const allWordsBg = words.length > 0 && words.every((w) => Boolean(w.backgroundColor) && w.backgroundColor === words[0].backgroundColor);
+
         return {
           ...origLine,
           text: newText,
           left: origLine?.left ?? activePdfSpan.left,
           top: lTop,
-          right: (origLine?.left ?? activePdfSpan.left) + activePdfSpan.width,
+          right: (origLine?.left ?? activePdfSpan.left) + (origLine?.width ?? activePdfSpan.width),
           bottom: lTop + lH,
           width: origLine?.width ?? activePdfSpan.width,
           height: lH,
           fontSize: partialStyle?.fontSize ?? (validFontSize ?? origLine?.fontSize ?? activePdfSpan.fontSize),
           baselineY: lBaseline,
           lineHeight: lH,
+          letterSpacing: lLetterSpacing,
           charStartIndex: 0,
           charCount: newText.length,
-          fontFamily: partialStyle?.fontFamily ?? (partialStyle ? (origLine?.fontFamily ?? activePdfSpan.fontFamily) : editFontFamily),
-          fontWeight: partialStyle?.fontWeight ?? (partialStyle ? (origLine?.fontWeight ?? activePdfSpan.fontWeight) : editFontWeight),
-          fontStyle: partialStyle?.fontStyle ?? (partialStyle ? (origLine?.fontStyle ?? activePdfSpan.fontStyle) : editFontStyle),
+          fontFamily: partialStyle?.fontFamily ?? (origLine?.fontFamily ?? editFontFamily ?? activePdfSpan.fontFamily),
+          rawFontFamily: partialStyle?.fontFamily ?? (origLine?.rawFontFamily ?? origLine?.fontFamily ?? editFontFamily ?? activePdfSpan.rawFontFamily),
+          matchedFontFamily: partialStyle?.fontFamily ?? (origLine?.matchedFontFamily ?? origLine?.fontFamily ?? editFontFamily ?? activePdfSpan.matchedFontFamily),
+          fontWeight: partialStyle?.fontWeight ?? (origLine?.fontWeight ?? editFontWeight ?? activePdfSpan.fontWeight),
+          fontStyle: partialStyle?.fontStyle ?? (origLine?.fontStyle ?? editFontStyle ?? activePdfSpan.fontStyle),
           color: partialStyle?.color !== undefined
             ? (typeof partialStyle.color === 'string' ? hexToRgba(partialStyle.color) : (partialStyle.color as unknown as ColorRgba))
-            : (partialStyle ? (origLine?.color ?? activePdfSpan.color) : hexToRgba(editColorHex)),
+            : (origLine?.color ?? hexToRgba(editColorHex) ?? activePdfSpan.color),
+          underline: words.length > 0 ? (allWordsUnderline ? true : (anyWordUnderline ? undefined : false)) : (partialStyle ? ('underline' in partialStyle ? partialStyle.underline : origLine?.underline) : editUnderline),
+          strikethrough: words.length > 0 ? (allWordsStrike ? true : (anyWordStrike ? undefined : false)) : (partialStyle ? ('strikethrough' in partialStyle ? partialStyle.strikethrough : origLine?.strikethrough) : editStrikethrough),
+          backgroundColor: words.length > 0 ? (allWordsBg ? words[0].backgroundColor : undefined) : targetBg,
           words,
         };
       });
@@ -1132,17 +1239,20 @@
         text: editText,
         fontSize: partialStyle ? (partialStyle.fontSize ?? activePdfSpan.fontSize) : validFontSize,
         fontFamily: partialStyle ? (partialStyle.fontFamily ?? activePdfSpan.fontFamily) : editFontFamily,
+        rawFontFamily: partialStyle ? (partialStyle.fontFamily ?? activePdfSpan.rawFontFamily) : editFontFamily,
         fontWeight: partialStyle ? (partialStyle.fontWeight ?? activePdfSpan.fontWeight) : editFontWeight,
         fontStyle: partialStyle ? (partialStyle.fontStyle ?? activePdfSpan.fontStyle) : editFontStyle,
-        underline: partialStyle ? (partialStyle.underline ?? activePdfSpan.underline) : editUnderline,
-        strikethrough: partialStyle ? (partialStyle.strikethrough ?? activePdfSpan.strikethrough) : editStrikethrough,
+        underline: partialStyle ? ('underline' in partialStyle ? partialStyle.underline : activePdfSpan.underline) : editUnderline,
+        strikethrough: partialStyle ? ('strikethrough' in partialStyle ? partialStyle.strikethrough : activePdfSpan.strikethrough) : editStrikethrough,
         backgroundColor: targetBg,
-        textAlign: editTextAlign,
+        textAlign: (partialStyle as { textAlign?: 'left' | 'center' | 'right' })?.textAlign ?? editTextAlign,
         letterSpacing: editLetterSpacing || undefined,
+        wordSpacing: activePdfSpan.wordSpacing,
+        scaleX: activePdfSpan.scaleX,
         color: partialStyle?.color !== undefined
           ? (typeof partialStyle.color === 'string' ? hexToRgba(partialStyle.color) : (partialStyle.color as unknown as ColorRgba))
-          : hexToRgba(editColorHex),
-        lineHeight: !isNaN(parsedLineHeight) && parsedLineHeight > 0 ? parsedLineHeight : undefined,
+          : (partialStyle ? activePdfSpan.color : hexToRgba(editColorHex)),
+        lineHeight: hasExplicitLineHeight ? parsedLineHeight : undefined,
         lines: updatedLines,
         reflowParagraph: isMultiLine,
       },
@@ -1176,8 +1286,58 @@
   function handleHorizontalAlignChange(val: string): void {
     if (val === 'left' || val === 'center' || val === 'right') {
       editTextAlign = val;
-      applyChanges();
+      applyChanges({ textAlign: val } as Partial<TextSegment>);
     }
+  }
+
+  const documentTypography = $derived.by(() => {
+    void store.isDocumentLoaded;
+    void store.activeWorkspaceFileId;
+    void store.renderVersion;
+    return actions.getDocumentTypography();
+  });
+
+  const activeTextPreset = $derived.by((): TextStylePresetId | 'custom' => {
+    if (hasMixedFontSize) return 'custom';
+    return detectMatchingTextPreset(
+      {
+        fontSize: editFontSize,
+        fontWeight: editFontWeight,
+        fontStyle: editFontStyle,
+      },
+      documentTypography
+    );
+  });
+
+  const activeTextPresetLabel = $derived.by((): string => {
+    if (activeTextPreset === 'custom') return 'Custom';
+    const meta = TEXT_STYLE_PRESETS.find((p) => p.id === activeTextPreset);
+    return meta ? meta.label : 'Custom';
+  });
+
+  function handleTextPresetChange(val: string): void {
+    if (!val || val === 'custom') return;
+    const presetId = val as TextStylePresetId;
+    const style = getPresetStyleProfile(presetId, documentTypography);
+    hasMixedFontSize = false;
+    editFontSize = style.fontSize;
+    editFontFamily = resolveInspectorFontFamily(style.fontFamily, style.rawFontFamily);
+    editFontWeight = style.fontWeight;
+    editFontStyle = style.fontStyle;
+    editColorHex = normalizeColorToHex(style.color);
+    if (style.lineHeight && style.lineHeight > 0) {
+      editLineHeight = `${Math.round(style.lineHeight * 10) / 10}`;
+    } else {
+      editLineHeight = '';
+    }
+    applyChanges({
+      fontSize: editFontSize,
+      fontFamily: editFontFamily,
+      rawFontFamily: style.rawFontFamily || editFontFamily,
+      fontWeight: editFontWeight,
+      fontStyle: editFontStyle,
+      color: editColorHex,
+    });
   }
 
   function handleVerticalAlignChange(val: string): void {
@@ -1196,6 +1356,7 @@
         <div class="flex flex-col gap-1">
           <Label class="field-label">Text Content</Label>
           <Textarea
+            aria-label="Text Content"
             bind:value={editText}
             class="text-xs resize-y"
             onkeydown={(e) => {
@@ -1204,18 +1365,50 @@
                 applyChanges();
               }
             }}
-            onblur={() => applyChanges()}
+            onblur={() => {
+              const origText = activeCanvasElement ? activeCanvasElement.text : (activePdfSpan?.text ?? '');
+              if (editText !== origText) {
+                applyChanges();
+              }
+            }}
             placeholder="Paragraph text..."
             rows={3}
           />
         </div>
+
+        {#if featureFlags.isEnabled('text.presets')}
+        <!-- Text Style Preset -->
+        <div class="flex flex-col gap-1 mt-0.5">
+          <Label class="field-label">Text Style</Label>
+          <Select.Root
+            type="single"
+            value={activeTextPreset}
+            onValueChange={handleTextPresetChange}
+          >
+            <Select.Trigger aria-label="Text Style" class="h-8 text-xs w-full font-normal">
+              {activeTextPresetLabel}
+            </Select.Trigger>
+            <Select.Content>
+              {#each TEXT_STYLE_PRESETS as preset (preset.id)}
+                {@const presetStyle = getPresetStyleProfile(preset.id, documentTypography)}
+                <Select.Item value={preset.id} label={preset.label}>
+                  <span class="flex items-center justify-between w-full gap-2">
+                    <span>{preset.label}</span>
+                    <span class="text-[11px] text-muted-foreground">{presetStyle.fontSize}pt</span>
+                  </span>
+                </Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+        {/if}
 
         <!-- Font Family -->
         <div class="flex flex-col gap-1 mt-0.5">
           <Label class="field-label">Font Family</Label>
           <Select.Root 
             type="single" 
-            value={editFontFamily} 
+            value={selectedFontValue} 
             onValueChange={(val) => { 
               if (val) {
                 editFontFamily = val; 
@@ -1228,7 +1421,13 @@
             </Select.Trigger>
             <Select.Content>
               {#each fontSelectItems as item (item.value)}
-                <Select.Item value={item.value} label={item.label}>
+                <Select.Item 
+                  value={item.value} 
+                  label={item.label}
+                  class={item.isLastDocumentFont ? "border-b border-border mb-1 pb-1.5 rounded-b-none" : ""}
+                  data-document-font={item.isDocumentFont ? "true" : "false"}
+                  data-last-document-font={item.isLastDocumentFont ? "true" : undefined}
+                >
                   {item.label}
                 </Select.Item>
               {/each}
@@ -1256,14 +1455,10 @@
           </div>
 
           <div class="flex flex-col gap-1 w-[110px] shrink-0">
-            <div class="flex items-center justify-between">
-              <Label class="field-label">Size (pt)</Label>
-              {#if hasMixedFontSize}
-                <span class="text-[10px] text-muted-foreground font-medium">Mixed</span>
-              {/if}
-            </div>
+            <Label class="field-label">Size (pt)</Label>
             <Input 
               type="number" 
+              aria-label="Font Size (pt)"
               bind:value={editFontSize} 
               onchange={() => applyChanges({ fontSize: editFontSize })}
               onkeydown={(e) => e.key === 'Enter' && applyChanges({ fontSize: editFontSize })}
@@ -1275,15 +1470,45 @@
           </div>
         </div>
 
-        <!-- Row 1: Formatting Controls & Line Height -->
-        <div class="flex items-end gap-2 mt-0.5 w-full">
-          <div class="flex flex-col gap-1 shrink-0">
+        <!-- Line Height & Letter Spacing -->
+        <div class="grid grid-cols-2 gap-2 mt-0.5 w-full">
+          <div class="flex flex-col gap-1 min-w-0">
+            <Label class="field-label">Line Height (pt)</Label>
+            <Input 
+              type="text" 
+              inputmode="decimal"
+              aria-label="Line Height (pt)"
+              bind:value={editLineHeight}
+              placeholder="Auto"
+              onchange={() => applyChanges({ lineHeight: !isNaN(parseFloat(editLineHeight)) && parseFloat(editLineHeight) > 0 ? parseFloat(editLineHeight) : undefined } as Partial<TextSegment>)}
+              onkeydown={(e) => e.key === 'Enter' && applyChanges({ lineHeight: !isNaN(parseFloat(editLineHeight)) && parseFloat(editLineHeight) > 0 ? parseFloat(editLineHeight) : undefined } as Partial<TextSegment>)}
+              class="h-8 text-xs w-full" 
+            />
+          </div>
+
+          <div class="flex flex-col gap-1 min-w-0">
+            <Label class="field-label">Letter Spacing</Label>
+            <Input 
+              type="text" 
+              aria-label="Letter Spacing"
+              bind:value={editLetterSpacing}
+              onchange={() => applyChanges({ letterSpacing: editLetterSpacing || undefined })}
+              onkeydown={(e) => e.key === 'Enter' && applyChanges({ letterSpacing: editLetterSpacing || undefined })}
+              placeholder="0%"
+              class="h-8 text-xs w-full" 
+            />
+          </div>
+        </div>
+
+        <!-- Formatting & Alignment Toolbar -->
+        <div class="grid grid-cols-2 gap-2 w-full">
+          <div class="flex flex-col gap-1 min-w-0">
             <Label class="field-label">Formatting</Label>
-            <ButtonGroup variant="outline" size="sm" class="h-8">
+            <ButtonGroup variant="outline" size="sm" class="h-8 w-full flex">
               <Button
                 variant={editFontWeight === 'bold' ? 'default' : 'outline'}
                 size="sm"
-                class="h-8 w-8 p-0"
+                class="flex-1 h-8 p-0"
                 onclick={() => toggleFormatting('bold')}
                 aria-label="Bold"
                 aria-pressed={editFontWeight === 'bold'}
@@ -1294,7 +1519,7 @@
               <Button
                 variant={editFontStyle === 'italic' ? 'default' : 'outline'}
                 size="sm"
-                class="h-8 w-8 p-0"
+                class="flex-1 h-8 p-0"
                 onclick={() => toggleFormatting('italic')}
                 aria-label="Italic"
                 aria-pressed={editFontStyle === 'italic'}
@@ -1305,7 +1530,7 @@
               <Button
                 variant={editUnderline ? 'default' : 'outline'}
                 size="sm"
-                class="h-8 w-8 p-0"
+                class="flex-1 h-8 p-0"
                 onclick={() => toggleFormatting('underline')}
                 aria-label="Underline"
                 aria-pressed={editUnderline}
@@ -1316,7 +1541,7 @@
               <Button
                 variant={editStrikethrough ? 'default' : 'outline'}
                 size="sm"
-                class="h-8 w-8 p-0"
+                class="flex-1 h-8 p-0"
                 onclick={() => toggleFormatting('strikethrough')}
                 aria-label="Strikethrough"
                 aria-pressed={editStrikethrough}
@@ -1327,21 +1552,90 @@
             </ButtonGroup>
           </div>
 
-          <div class="flex flex-col gap-1 flex-1 min-w-0">
-            <Label class="field-label">Line Height (pt)</Label>
-            <Input 
-              type="text" 
-              bind:value={editLineHeight}
-              placeholder="Auto"
-              onchange={() => applyChanges()}
-              onkeydown={(e) => e.key === 'Enter' && applyChanges()}
-              class="h-8 text-xs w-full" 
-            />
+          <div class="flex flex-col gap-1 min-w-0">
+            <Label class="field-label">Alignment</Label>
+            <div class={featureFlags.isEnabled('text.vertical-align') ? 'grid grid-cols-2 gap-2 w-full' : 'w-full'}>
+              <!-- Horizontal Alignment -->
+              <ButtonGroup variant="outline" size="sm" class="h-8 w-full flex">
+                <Button
+                  variant={editTextAlign === 'left' ? 'default' : 'outline'}
+                  size="sm"
+                  class="flex-1 h-8 p-0"
+                  onclick={() => handleHorizontalAlignChange('left')}
+                  aria-label="Align Left"
+                  aria-pressed={editTextAlign === 'left'}
+                  title="Align Left"
+                >
+                  <AlignLeft class="h-3.5 w-3.5"/>
+                </Button>
+                <Button
+                  variant={editTextAlign === 'center' ? 'default' : 'outline'}
+                  size="sm"
+                  class="flex-1 h-8 p-0"
+                  onclick={() => handleHorizontalAlignChange('center')}
+                  aria-label="Align Center"
+                  aria-pressed={editTextAlign === 'center'}
+                  title="Align Center"
+                >
+                  <AlignCenter class="h-3.5 w-3.5"/>
+                </Button>
+                <Button
+                  variant={editTextAlign === 'right' ? 'default' : 'outline'}
+                  size="sm"
+                  class="flex-1 h-8 p-0"
+                  onclick={() => handleHorizontalAlignChange('right')}
+                  aria-label="Align Right"
+                  aria-pressed={editTextAlign === 'right'}
+                  title="Align Right"
+                >
+                  <AlignRight class="h-3.5 w-3.5"/>
+                </Button>
+              </ButtonGroup>
+
+              {#if featureFlags.isEnabled('text.vertical-align')}
+              <!-- Vertical Alignment -->
+              <ButtonGroup variant="outline" size="sm" class="h-8 w-full flex">
+                <Button
+                  variant={editVerticalAlign === 'top' ? 'default' : 'outline'}
+                  size="sm"
+                  class="flex-1 h-8 p-0"
+                  onclick={() => handleVerticalAlignChange('top')}
+                  aria-label="Align Top"
+                  aria-pressed={editVerticalAlign === 'top'}
+                  title="Align Top"
+                >
+                  <AlignVerticalSpaceAround class="h-3.5 w-3.5"/>
+                </Button>
+                <Button
+                  variant={editVerticalAlign === 'middle' ? 'default' : 'outline'}
+                  size="sm"
+                  class="flex-1 h-8 p-0"
+                  onclick={() => handleVerticalAlignChange('middle')}
+                  aria-label="Align Middle"
+                  aria-pressed={editVerticalAlign === 'middle'}
+                  title="Align Middle"
+                >
+                  <AlignVerticalJustifyCenter class="h-3.5 w-3.5"/>
+                </Button>
+                <Button
+                  variant={editVerticalAlign === 'bottom' ? 'default' : 'outline'}
+                  size="sm"
+                  class="flex-1 h-8 p-0"
+                  onclick={() => handleVerticalAlignChange('bottom')}
+                  aria-label="Align Bottom"
+                  aria-pressed={editVerticalAlign === 'bottom'}
+                  title="Align Bottom"
+                >
+                  <AlignVerticalSpaceBetween class="h-3.5 w-3.5"/>
+                </Button>
+              </ButtonGroup>
+              {/if}
+            </div>
           </div>
         </div>
 
-        <!-- Row 2: Color & Highlight / Background -->
-        <div class="grid grid-cols-2 gap-2 mt-0.5 w-full">
+        <!-- Colour & Highlight / Background -->
+        <div class="grid grid-cols-2 gap-2 mt-0.5 mb-1 w-full">
           <div class="flex flex-col gap-1">
             <Label class="field-label">Color</Label>
             <ColorPicker 
@@ -1371,101 +1665,6 @@
             />
           </div>
         </div>
-
-        <!-- Letter Spacing -->
-        <div class="flex flex-col gap-1 mt-0.5 w-full">
-          <Label class="field-label">Letter Spacing</Label>
-          <Input 
-            type="text" 
-            bind:value={editLetterSpacing}
-            onchange={() => applyChanges()}
-            onkeydown={(e) => e.key === 'Enter' && applyChanges()}
-            placeholder="0%"
-            class="h-8 text-xs w-full" 
-          />
-        </div>
-
-        <!-- Alignment -->
-        <div class="flex flex-col gap-1 mt-0.5 mb-1 w-full">
-          <Label class="field-label">Alignment</Label>
-          <div class="grid grid-cols-2 gap-2 w-full">
-            <!-- Horizontal Alignment -->
-            <ButtonGroup variant="outline" size="sm" class="h-8 w-full flex">
-              <Button
-                variant={editTextAlign === 'left' ? 'default' : 'outline'}
-                size="sm"
-                class="flex-1 h-8 p-0"
-                onclick={() => handleHorizontalAlignChange('left')}
-                aria-label="Align Left"
-                aria-pressed={editTextAlign === 'left'}
-                title="Align Left"
-              >
-                <AlignLeft class="h-3.5 w-3.5"/>
-              </Button>
-              <Button
-                variant={editTextAlign === 'center' ? 'default' : 'outline'}
-                size="sm"
-                class="flex-1 h-8 p-0"
-                onclick={() => handleHorizontalAlignChange('center')}
-                aria-label="Align Center"
-                aria-pressed={editTextAlign === 'center'}
-                title="Align Center"
-              >
-                <AlignCenter class="h-3.5 w-3.5"/>
-              </Button>
-              <Button
-                variant={editTextAlign === 'right' ? 'default' : 'outline'}
-                size="sm"
-                class="flex-1 h-8 p-0"
-                onclick={() => handleHorizontalAlignChange('right')}
-                aria-label="Align Right"
-                aria-pressed={editTextAlign === 'right'}
-                title="Align Right"
-              >
-                <AlignRight class="h-3.5 w-3.5"/>
-              </Button>
-            </ButtonGroup>
-
-            {#if featureFlags.isEnabled('text.vertical-align')}
-            <!-- Vertical Alignment -->
-            <ButtonGroup variant="outline" size="sm" class="h-8 w-full flex">
-              <Button
-                variant={editVerticalAlign === 'top' ? 'default' : 'outline'}
-                size="sm"
-                class="flex-1 h-8 p-0"
-                onclick={() => handleVerticalAlignChange('top')}
-                aria-label="Align Top"
-                aria-pressed={editVerticalAlign === 'top'}
-                title="Align Top"
-              >
-                <AlignVerticalSpaceAround class="h-3.5 w-3.5"/>
-              </Button>
-              <Button
-                variant={editVerticalAlign === 'middle' ? 'default' : 'outline'}
-                size="sm"
-                class="flex-1 h-8 p-0"
-                onclick={() => handleVerticalAlignChange('middle')}
-                aria-label="Align Middle"
-                aria-pressed={editVerticalAlign === 'middle'}
-                title="Align Middle"
-              >
-                <AlignVerticalJustifyCenter class="h-3.5 w-3.5"/>
-              </Button>
-              <Button
-                variant={editVerticalAlign === 'bottom' ? 'default' : 'outline'}
-                size="sm"
-                class="flex-1 h-8 p-0"
-                onclick={() => handleVerticalAlignChange('bottom')}
-                aria-label="Align Bottom"
-                aria-pressed={editVerticalAlign === 'bottom'}
-                title="Align Bottom"
-              >
-                <AlignVerticalSpaceBetween class="h-3.5 w-3.5"/>
-              </Button>
-            </ButtonGroup>
-            {/if}
-          </div>
-        </div>
       </div>
     </SidebarSection>
 
@@ -1477,5 +1676,10 @@
       pageIndex={activePdfSpan?.pageIndex ?? activeCanvasElement?.pageIndex ?? store.currentPageIndex}
     />
     {/if}
+  </div>
+{:else}
+  <div class="px-3 py-6 text-center text-xs text-muted-foreground">
+    <p class="font-medium text-foreground mb-1">No text selected</p>
+    <p class="text-pretty">Select a text span or text element on the page to edit its typography.</p>
   </div>
 {/if}
