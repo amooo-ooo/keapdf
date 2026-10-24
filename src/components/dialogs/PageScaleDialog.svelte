@@ -7,7 +7,8 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Button, ButtonGroup } from '$lib/components/ui/button/index.js';
-  import { Checkbox } from '$lib/components/ui/checkbox/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
+  import { ControlRow } from '$lib/components/ui/control-row/index.js';
   import {
     Scaling,
     Maximize2,
@@ -164,25 +165,25 @@
 </script>
 
 <Dialog.Root open={store.showPageScaleDialog} onOpenChange={handleOpenChange}>
-  <Dialog.Content class="sm:max-w-[480px]">
-    <Dialog.Header>
-      <Dialog.Title class="flex items-center gap-2 text-base font-semibold">
-        <Scaling class="h-4 w-4 text-primary" />
+  <Dialog.Content class="sm:max-w-[460px]">
+    <Dialog.Header class="pr-12">
+      <Dialog.Title>
+        <Scaling class="h-4 w-4" />
         Scale and Resize Pages
       </Dialog.Title>
-      <Dialog.Description class="text-xs text-muted-foreground">
+      <Dialog.Description>
         Adjust page dimensions, paper format presets, and content geometry.
       </Dialog.Description>
     </Dialog.Header>
 
-    <div class="space-y-4 py-2 text-xs">
-      <!-- Mode Selection -->
-      <div class="space-y-1.5">
-        <Label class="text-xs font-medium">Resize Mode</Label>
+    <div class="dialog-body">
+      <!-- note: mode selection -->
+      <div class="field-group">
+        <Label class="field-label">Resize Mode</Label>
         <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
           <Button
             type="button"
-            variant={mode === 'proportional' ? 'default' : 'outline'}
+            variant={mode === 'proportional' ? 'secondary' : 'outline'}
             class="flex-1 text-xs"
             onclick={() => (mode = 'proportional')}
           >
@@ -191,7 +192,7 @@
           </Button>
           <Button
             type="button"
-            variant={mode === 'pad-margins' ? 'default' : 'outline'}
+            variant={mode === 'pad-margins' ? 'secondary' : 'outline'}
             class="flex-1 text-xs"
             onclick={() => (mode = 'pad-margins')}
           >
@@ -201,69 +202,41 @@
         </ButtonGroup>
       </div>
 
-      <!-- Paper Size Presets -->
-      <div class="space-y-1.5">
-        <div class="flex items-center justify-between">
-          <Label class="text-xs font-medium">Paper Format Preset</Label>
-          <!-- Unit Selector -->
-          <ButtonGroup variant="outline" size="xs" class="h-6">
-            <Button
-              type="button"
-              variant={unit === 'pt' ? 'default' : 'outline'}
-              class="px-2 text-[10px]"
-              onclick={() => handleUnitChange('pt')}
-            >
-              pt
-            </Button>
-            <Button
-              type="button"
-              variant={unit === 'mm' ? 'default' : 'outline'}
-              class="px-2 text-[10px]"
-              onclick={() => handleUnitChange('mm')}
-            >
-              mm
-            </Button>
-            <Button
-              type="button"
-              variant={unit === 'in' ? 'default' : 'outline'}
-              class="px-2 text-[10px]"
-              onclick={() => handleUnitChange('in')}
-            >
-              in
-            </Button>
-          </ButtonGroup>
-        </div>
-
+      <!-- note: paper size presets -->
+      <div class="field-group">
+        <Label class="field-label">Paper Format Preset</Label>
         <div class="grid grid-cols-3 gap-1.5">
           {#each Object.entries(STANDARD_PAPER_SIZES) as [key, spec]}
-            <button
+            <Button
               type="button"
-              class="flex flex-col items-center justify-center p-2 rounded-md border text-center cursor-pointer transition-colors {preset === key ? 'border-primary bg-primary/10 font-medium' : 'border-border hover:bg-muted/50'}"
+              variant={preset === key ? 'secondary' : 'outline'}
+              class="flex flex-col items-center justify-center p-2 h-auto text-center"
               onclick={() => handlePresetChange(key as PaperSizePreset)}
             >
-              <span class="text-xs">{key}</span>
+              <span class="text-xs font-medium">{key}</span>
               <span class="text-[10px] text-muted-foreground">{spec.label.split('(')[1]?.replace(')', '')}</span>
-            </button>
+            </Button>
           {/each}
-          <button
+          <Button
             type="button"
-            class="flex flex-col items-center justify-center p-2 rounded-md border text-center cursor-pointer transition-colors {preset === 'custom' ? 'border-primary bg-primary/10 font-medium' : 'border-border hover:bg-muted/50'}"
+            variant={preset === 'custom' ? 'secondary' : 'outline'}
+            class="flex flex-col items-center justify-center p-2 h-auto text-center"
             onclick={() => handlePresetChange('custom')}
           >
-            <span class="text-xs">Custom</span>
-            <span class="text-[10px] text-muted-foreground">User defined</span>
-          </button>
+            <span class="text-xs font-medium">Custom</span>
+            <span class="text-[10px] text-muted-foreground">Custom dimensions</span>
+          </Button>
         </div>
       </div>
 
-      <!-- Orientation and Custom Dimensions Grid -->
-      <div class="grid grid-cols-2 gap-3 items-end">
-        <div class="space-y-1.5">
-          <Label class="text-xs font-medium">Orientation</Label>
+      <!-- note: orientation and unit selector row -->
+      <div class="field-grid-2">
+        <div class="field-group">
+          <Label class="field-label">Orientation</Label>
           <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
             <Button
               type="button"
-              variant={orientation === 'portrait' ? 'default' : 'outline'}
+              variant={orientation === 'portrait' ? 'secondary' : 'outline'}
               class="flex-1 text-xs"
               onclick={() => handleOrientationChange('portrait')}
             >
@@ -271,7 +244,7 @@
             </Button>
             <Button
               type="button"
-              variant={orientation === 'landscape' ? 'default' : 'outline'}
+              variant={orientation === 'landscape' ? 'secondary' : 'outline'}
               class="flex-1 text-xs"
               onclick={() => handleOrientationChange('landscape')}
             >
@@ -280,50 +253,80 @@
           </ButtonGroup>
         </div>
 
-        <div class="grid grid-cols-2 gap-2">
-          <div class="space-y-1">
-            <Label class="text-[11px] text-muted-foreground">Width ({unit})</Label>
-            <Input
-              type="number"
-              bind:value={targetWidthInput}
-              min="10"
-              step="0.1"
-              disabled={preset !== 'custom'}
-              class="h-8 text-xs font-sans"
-            />
-          </div>
-          <div class="space-y-1">
-            <Label class="text-[11px] text-muted-foreground">Height ({unit})</Label>
-            <Input
-              type="number"
-              bind:value={targetHeightInput}
-              min="10"
-              step="0.1"
-              disabled={preset !== 'custom'}
-              class="h-8 text-xs font-sans"
-            />
-          </div>
-        </div>
-      </div>
-
-      <!-- Mode-Specific Controls -->
-      {#if mode === 'proportional'}
-        <div class="flex items-center space-x-2 pt-1">
-          <Checkbox
-            id="constrain-proportions"
-            bind:checked={constrainProportions}
-          />
-          <Label for="constrain-proportions" class="text-xs cursor-pointer">
-            Constrain proportions (maintain aspect ratio and center content)
-          </Label>
-        </div>
-      {:else}
-        <div class="space-y-1.5 pt-1">
-          <Label class="text-xs font-medium">Content Alignment</Label>
+        <div class="field-group">
+          <Label class="field-label">Measurement Unit</Label>
           <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
             <Button
               type="button"
-              variant={alignment === 'top-left' ? 'default' : 'outline'}
+              variant={unit === 'pt' ? 'secondary' : 'outline'}
+              class="flex-1 text-xs"
+              onclick={() => handleUnitChange('pt')}
+            >
+              pt
+            </Button>
+            <Button
+              type="button"
+              variant={unit === 'mm' ? 'secondary' : 'outline'}
+              class="flex-1 text-xs"
+              onclick={() => handleUnitChange('mm')}
+            >
+              mm
+            </Button>
+            <Button
+              type="button"
+              variant={unit === 'in' ? 'secondary' : 'outline'}
+              class="flex-1 text-xs"
+              onclick={() => handleUnitChange('in')}
+            >
+              in
+            </Button>
+          </ButtonGroup>
+        </div>
+      </div>
+
+      <!-- note: width and height dimensions row -->
+      <div class="field-grid-2">
+        <div class="field-group">
+          <Label class="field-label">Width ({unit})</Label>
+          <Input
+            type="number"
+            prefix="W"
+            bind:value={targetWidthInput}
+            min="10"
+            step="0.1"
+            disabled={preset !== 'custom'}
+            class="field-input"
+          />
+        </div>
+        <div class="field-group">
+          <Label class="field-label">Height ({unit})</Label>
+          <Input
+            type="number"
+            prefix="H"
+            bind:value={targetHeightInput}
+            min="10"
+            step="0.1"
+            disabled={preset !== 'custom'}
+            class="field-input"
+          />
+        </div>
+      </div>
+
+      <!-- note: mode-specific controls -->
+      {#if mode === 'proportional'}
+        <ControlRow label="Constrain proportions (maintain aspect ratio and center content)" for="constrain-proportions" size="sm">
+          <Switch
+            id="constrain-proportions"
+            bind:checked={constrainProportions}
+          />
+        </ControlRow>
+      {:else}
+        <div class="field-group">
+          <Label class="field-label">Content Alignment</Label>
+          <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
+            <Button
+              type="button"
+              variant={alignment === 'top-left' ? 'secondary' : 'outline'}
               class="flex-1 text-xs"
               onclick={() => (alignment = 'top-left')}
             >
@@ -331,7 +334,7 @@
             </Button>
             <Button
               type="button"
-              variant={alignment === 'center' ? 'default' : 'outline'}
+              variant={alignment === 'center' ? 'secondary' : 'outline'}
               class="flex-1 text-xs"
               onclick={() => (alignment = 'center')}
             >
@@ -339,7 +342,7 @@
             </Button>
             <Button
               type="button"
-              variant={alignment === 'bottom-center' ? 'default' : 'outline'}
+              variant={alignment === 'bottom-center' ? 'secondary' : 'outline'}
               class="flex-1 text-xs"
               onclick={() => (alignment = 'bottom-center')}
             >
@@ -349,13 +352,13 @@
         </div>
       {/if}
 
-      <!-- Scope Selection -->
-      <div class="space-y-1.5 pt-1">
-        <Label class="text-xs font-medium">Apply To</Label>
+      <!-- note: scope selection -->
+      <div class="field-group">
+        <Label class="field-label">Apply To</Label>
         <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
           <Button
             type="button"
-            variant={scope === 'current' ? 'default' : 'outline'}
+            variant={scope === 'current' ? 'secondary' : 'outline'}
             class="flex-1 text-xs"
             onclick={() => (scope = 'current')}
           >
@@ -363,7 +366,7 @@
           </Button>
           <Button
             type="button"
-            variant={scope === 'all' ? 'default' : 'outline'}
+            variant={scope === 'all' ? 'secondary' : 'outline'}
             class="flex-1 text-xs"
             onclick={() => (scope = 'all')}
           >
@@ -372,7 +375,7 @@
           {#if selectedPageIndices.length > 1}
             <Button
               type="button"
-              variant={scope === 'selected' ? 'default' : 'outline'}
+              variant={scope === 'selected' ? 'secondary' : 'outline'}
               class="flex-1 text-xs"
               onclick={() => (scope = 'selected')}
             >
@@ -382,8 +385,8 @@
         </ButtonGroup>
       </div>
 
-      <!-- Geometry Preview Summary Badge -->
-      <div class="rounded-md bg-muted/50 p-2.5 space-y-1 border border-border/50">
+      <!-- note: geometry preview summary badge -->
+      <div class="dialog-card gap-1.5">
         <div class="flex items-center justify-between text-[11px] text-muted-foreground">
           <span>Current Size:</span>
           <span class="font-sans text-foreground">
@@ -399,7 +402,7 @@
         {#if mode === 'proportional'}
           <div class="flex items-center justify-between text-[11px] text-muted-foreground">
             <span>Content Scale:</span>
-            <span class="font-sans text-primary">
+            <span class="font-sans text-foreground">
               {scalePercentPreview.x}% x {scalePercentPreview.y}%
             </span>
           </div>
@@ -407,17 +410,18 @@
       </div>
 
       {#if errorMessage}
-        <div class="text-xs text-destructive bg-destructive/10 p-2 rounded-md">
+        <div role="alert" class="dialog-error">
           {errorMessage}
         </div>
       {/if}
     </div>
 
-    <Dialog.Footer class="pt-2">
+    <Dialog.Footer>
       <Button
         type="button"
         variant="outline"
         size="sm"
+        class="h-8 text-xs"
         onclick={() => actions.closePageScaleDialog()}
         disabled={isApplying}
       >
@@ -425,8 +429,9 @@
       </Button>
       <Button
         type="button"
-        variant="default"
+        variant="secondary"
         size="sm"
+        class="h-8 text-xs"
         onclick={handleApply}
         disabled={isApplying || !store.isDocumentLoaded}
       >
