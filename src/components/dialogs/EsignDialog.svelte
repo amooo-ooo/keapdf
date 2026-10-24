@@ -1,16 +1,23 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import { useCanvasStore } from '../../stores/canvas.svelte';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import * as Tabs from '$lib/components/ui/tabs/index.js';
+  import * as Select from '$lib/components/ui/select/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
-  import { Checkbox } from '$lib/components/ui/checkbox/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
+  import { ControlRow } from '$lib/components/ui/control-row/index.js';
   import { Slider } from '$lib/components/ui/slider/index.js';
+  import { ColorPicker } from '$lib/components/ui/color-picker/index.js';
+  import {
+    SIGNATURE_PLACEMENT_PRESETS,
+    type SignaturePlacementPreset,
+  } from '../../utils/signature-placement';
   import {
     getSavedSignatures,
     saveSignature,
@@ -19,6 +26,7 @@
     renderDrawnStrokesToDataUrl,
     renderTypedSignatureToDataUrl,
     processUploadedSignatureImage,
+    composeSignatureAppearanceDataUrl,
     preloadSignatureFonts,
     type SavedSignature,
     type DrawPoint,
@@ -28,7 +36,6 @@
     Type,
     Upload,
     Trash2,
-    Check,
     Star,
     Eraser,
     Undo2,
@@ -36,6 +43,7 @@
     Sparkles,
     SlidersHorizontal,
     Loader2,
+    ShieldCheck,
   } from 'lucide-svelte';
 
   const store = useEditorStore();
@@ -47,6 +55,9 @@
   let saveToCollection = $state(true);
   let signatureTitle = $state('My Signature');
   let isPlacing = $state(false);
+  let placementPreset = $state<Exclude<SignaturePlacementPreset, 'custom'>>('bottom-right');
+  let showFullNameUnderneath = $state(false);
+  let signerFullName = $state('John Doe');
 
   // Drawing State
   let drawCanvasEl: HTMLCanvasElement | null = $state(null);
@@ -61,11 +72,11 @@
   let rafPending = false;
   let activePointerId: number | null = null;
 
-  const penColors = [
-    { label: 'Black', value: '#000000' },
-    { label: 'Dark Navy', value: '#1e3a8a' },
-    { label: 'Royal Blue', value: '#2563eb' },
-    { label: 'Dark Gray', value: '#374151' },
+  const inkColorPresets = [
+    { label: 'Black', color: '#000000' },
+    { label: 'Dark Navy', color: '#1e3a8a' },
+    { label: 'Royal Blue', color: '#2563eb' },
+    { label: 'Dark Grey', color: '#374151' },
   ];
 
   // Type State
@@ -118,7 +129,10 @@
     const targetWidth = Math.round(clientW * dpr);
     const targetHeight = Math.round(clientH * dpr);
 
-    if (Math.abs(drawCanvasEl.width - targetWidth) > 1 || Math.abs(drawCanvasEl.height - targetHeight) > 1) {
+    if (
+      Math.abs(drawCanvasEl.width - targetWidth) > 1 ||
+      Math.abs(drawCanvasEl.height - targetHeight) > 1
+    ) {
       drawCanvasEl.width = targetWidth;
       drawCanvasEl.height = targetHeight;
     }
@@ -127,10 +141,11 @@
     redrawCanvas();
   }
 
-
-  onDestroy(() => {
-    cleanupPointerListeners();
-    rafPending = false;
+  $effect(() => {
+    return () => {
+      cleanupPointerListeners();
+      rafPending = false;
+    };
   });
 
   $effect(() => {
@@ -235,7 +250,9 @@
         if (drawCanvasEl.hasPointerCapture(activePointerId)) {
           drawCanvasEl.releasePointerCapture(activePointerId);
         }
-      } catch {}
+      } catch {
+        // Ignore release errors
+      }
       activePointerId = null;
     }
   }
@@ -245,7 +262,9 @@
     try {
       drawCanvasEl.setPointerCapture(e.pointerId);
       activePointerId = e.pointerId;
-    } catch {}
+    } catch {
+      // Ignore capture errors
+    }
 
     if (typeof window !== 'undefined') {
       window.addEventListener('pointerup', handleWindowPointerUp, { once: true });
@@ -305,10 +324,43 @@
     }
   }
 
+  async function placeWithOptionalFullName(sig: SavedSignature): Promise<void> {
+    let targetSig = sig;
+    if (showFullNameUnderneath) {
+      const resolvedName = (
+        signerFullName.trim() ||
+        sig.text ||
+        typedName.trim() ||
+        sig.title ||
+        'Authorized Signer'
+      ).trim();
+      const composed = await composeSignatureAppearanceDataUrl({
+        graphicDataUrl: sig.dataUrl,
+        signerName: resolvedName,
+        showTextDetails: true,
+        color: sig.color,
+        fontFamily: sig.fontFamily,
+      });
+      if (composed.isComposite && composed.dataUrl) {
+        targetSig = {
+          ...sig,
+          dataUrl: composed.dataUrl,
+          aspectRatio: composed.aspectRatio,
+        };
+      }
+    }
+    actions.placeSignatureOnCanvas(
+      targetSig,
+      store.currentPageIndex,
+      canvasStore,
+      placementPreset
+    );
+  }
+
   // Place Actions
-  function handleUseSaved(sig: SavedSignature): void {
+  async function handleUseSaved(sig: SavedSignature): Promise<void> {
     try {
-      actions.placeSignatureOnCanvas(sig, store.currentPageIndex, canvasStore);
+      await placeWithOptionalFullName(sig);
     } catch (err) {
       console.error('Failed to place saved signature:', err);
     } finally {
@@ -333,7 +385,9 @@
     isPlacing = true;
 
     try {
-      const rect = cachedCanvasRect || (drawCanvasEl ? drawCanvasEl.getBoundingClientRect() : { width: 600, height: 250 });
+      const rect =
+        cachedCanvasRect ||
+        (drawCanvasEl ? drawCanvasEl.getBoundingClientRect() : { width: 600, height: 250 });
       const { dataUrl, aspectRatio } = renderDrawnStrokesToDataUrl(
         strokes,
         strokeWidth,
@@ -366,7 +420,7 @@
         };
       }
 
-      actions.placeSignatureOnCanvas(sigRecord, store.currentPageIndex, canvasStore);
+      await placeWithOptionalFullName(sigRecord);
     } catch (err) {
       console.error('Failed to apply drawn signature:', err);
     } finally {
@@ -414,7 +468,7 @@
         };
       }
 
-      actions.placeSignatureOnCanvas(sigRecord, store.currentPageIndex, canvasStore);
+      await placeWithOptionalFullName(sigRecord);
     } catch (err) {
       console.error('Failed to apply typed signature:', err);
     } finally {
@@ -453,7 +507,7 @@
         };
       }
 
-      actions.placeSignatureOnCanvas(sigRecord, store.currentPageIndex, canvasStore);
+      await placeWithOptionalFullName(sigRecord);
     } catch (err) {
       console.error('Failed to apply uploaded signature:', err);
     } finally {
@@ -503,96 +557,117 @@
 </script>
 
 <Dialog.Root open={store.showEsignDialog} onOpenChange={handleOpenChange}>
-  <Dialog.Content class="sm:max-w-[620px] max-h-[90vh] flex flex-col p-0 overflow-hidden">
-    <Dialog.Header class="px-6 pt-5 pb-3 border-b border-border bg-card">
-      <div class="flex items-center justify-between pr-8">
-        <Dialog.Title class="flex items-center gap-2 text-base font-semibold">
-          <PenTool class="h-4 w-4 text-primary" />
+  <Dialog.Content class="sm:max-w-[600px] max-h-[90vh] flex flex-col overflow-hidden font-sans">
+    <Dialog.Header class="pr-12">
+      <div class="flex items-center justify-between gap-2">
+        <Dialog.Title>
+          <PenTool class="h-4 w-4 text-muted-foreground shrink-0" />
           Add Electronic Signature (E-Sign)
         </Dialog.Title>
         {#if savedSignatures.length > 0}
-          <Badge variant="secondary" class="text-xs">
+          <Badge variant="secondary" class="text-[10px] h-5 px-2 shrink-0">
             {savedSignatures.length} saved
           </Badge>
         {/if}
       </div>
-      <Dialog.Description class="text-xs text-muted-foreground">
-        Create, customize, and place persistent electronic signatures directly on your PDF pages.
+      <Dialog.Description>
+        Create, customise, and place persistent electronic signatures directly on your PDF pages.
       </Dialog.Description>
     </Dialog.Header>
 
-    <div class="flex-1 overflow-y-auto px-6 py-4">
-      <Tabs.Root value={activeTab} onValueChange={(val) => { activeTab = val as typeof activeTab; if (val === 'draw') requestAnimationFrame(() => setupCanvasDimensions()); }}>
-        <Tabs.List class="grid grid-cols-4 mb-4">
-          <Tabs.Trigger value="signatures" class="text-xs">
+    <div class="dialog-body">
+      <Tabs.Root
+        value={activeTab}
+        onValueChange={(val) => {
+          activeTab = val as typeof activeTab;
+          if (val === 'draw') requestAnimationFrame(() => setupCanvasDimensions());
+        }}
+      >
+        <Tabs.List class="grid w-full grid-cols-4 h-8">
+          <Tabs.Trigger value="signatures" class="text-xs gap-1.5">
             My Signatures
           </Tabs.Trigger>
-          <Tabs.Trigger value="draw" class="text-xs">
-            <PenTool class="h-3.5 w-3.5 mr-1.5" /> Draw
+          <Tabs.Trigger value="draw" class="text-xs gap-1.5">
+            <PenTool class="h-3.5 w-3.5" /> Draw
           </Tabs.Trigger>
-          <Tabs.Trigger value="type" class="text-xs">
-            <Type class="h-3.5 w-3.5 mr-1.5" /> Type
+          <Tabs.Trigger value="type" class="text-xs gap-1.5">
+            <Type class="h-3.5 w-3.5" /> Type
           </Tabs.Trigger>
-          <Tabs.Trigger value="upload" class="text-xs">
-            <Upload class="h-3.5 w-3.5 mr-1.5" /> Upload
+          <Tabs.Trigger value="upload" class="text-xs gap-1.5">
+            <Upload class="h-3.5 w-3.5" /> Upload
           </Tabs.Trigger>
         </Tabs.List>
 
-        <!-- Saved signatures list -->
-        <Tabs.Content value="signatures" class="space-y-4">
+        <!-- note: saved signatures list -->
+        <Tabs.Content value="signatures" class="flex flex-col gap-3 mt-3 outline-none">
           {#if savedSignatures.length === 0}
-            <div class="border border-dashed border-border rounded-lg p-8 text-center flex flex-col items-center justify-center gap-2">
+            <div class="border border-dashed border-border rounded-[var(--radius-card)] bg-card p-8 text-center flex flex-col items-center justify-center gap-2">
               <PenTool class="h-8 w-8 text-muted-foreground stroke-1" />
               <p class="text-xs text-muted-foreground">You have no saved signatures yet.</p>
-              <Button size="sm" variant="outline" class="mt-2 text-xs" onclick={() => (activeTab = 'draw')}>
+              <Button size="sm" variant="outline" class="mt-2 h-8 text-xs" onclick={() => (activeTab = 'draw')}>
                 <Plus class="h-3.5 w-3.5 mr-1.5" /> Create New Signature
               </Button>
             </div>
           {:else}
-            <div class="grid grid-cols-2 gap-3 max-h-[340px] overflow-y-auto pr-1">
+            <div class="grid grid-cols-2 gap-2.5 max-h-[300px] overflow-y-auto pr-1">
               {#each savedSignatures as sig (sig.id)}
                 <div
-                  class="group relative border border-border hover:border-primary/60 bg-card rounded-lg p-3 flex flex-col justify-between transition-all cursor-pointer shadow-xs hover:shadow-md"
-                  onclick={() => handleUseSaved(sig)}
-                  onkeydown={(e) => { if (e.key === 'Enter') handleUseSaved(sig); }}
-                  role="button"
-                  tabindex="0"
+                  class="group relative dialog-card justify-between hover:border-ring transition-[border-color,background-color]"
                 >
-                  <div class="flex items-center justify-between mb-2">
-                    <span class="text-xs font-medium truncate max-w-[140px]">{sig.title}</span>
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-xs font-medium text-foreground truncate max-w-[140px]" title={sig.title}>{sig.title}</span>
                     <div class="flex items-center gap-1">
                       {#if sig.isDefault}
-                        <Badge variant="secondary" class="text-[10px] px-1.5 py-0 h-4 bg-primary/10 text-primary">
+                        <Badge variant="secondary" class="text-[10px] px-1.5 py-0 h-4">
                           Default
                         </Badge>
                       {:else}
-                        <button
+                        <Button
                           type="button"
-                          class="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-warning p-1 transition-opacity"
+                          variant="ghost"
+                          size="icon-xs"
+                          class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-warning transition-opacity"
                           title="Set as default"
+                          aria-label="Set as default signature"
                           onclick={(e) => handleSetDefault(sig.id, e)}
                         >
                           <Star class="h-3.5 w-3.5" />
-                        </button>
+                        </Button>
                       {/if}
-                      <button
+                      <Button
                         type="button"
-                        class="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive p-1 transition-opacity"
+                        variant="ghost"
+                        size="icon-xs"
+                        class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground transition-opacity"
                         title="Delete signature"
+                        aria-label="Delete signature"
                         onclick={(e) => handleDeleteSaved(sig.id, e)}
                       >
                         <Trash2 class="h-3.5 w-3.5" />
-                      </button>
+                      </Button>
                     </div>
                   </div>
 
-                  <div class="h-20 bg-muted/30 rounded border border-border/40 flex items-center justify-center p-2">
-                    <img src={sig.dataUrl} alt={sig.title} class="max-h-full max-w-full object-contain" />
-                  </div>
+                  <button
+                    type="button"
+                    aria-label={`Use saved signature ${sig.title}`}
+                    class="h-20 w-full bg-background/60 bg-transparency-grid rounded-[var(--radius-card-inner)] border border-border/60 flex items-center justify-center p-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onclick={() => handleUseSaved(sig)}
+                  >
+                    <img src={sig.dataUrl} alt={sig.title} class="max-h-full max-w-full object-contain img-subtle-outline" />
+                  </button>
 
-                  <div class="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <div class="flex items-center justify-between text-[11px] text-muted-foreground">
                     <span class="capitalize">{sig.type}</span>
-                    <Button size="sm" variant="ghost" class="h-6 text-[11px] px-2 text-primary font-medium hover:bg-primary/10" onclick={(e) => { e.stopPropagation(); handleUseSaved(sig); }}>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      class="h-8 text-xs px-2.5"
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        void handleUseSaved(sig);
+                      }}
+                    >
                       Use on PDF
                     </Button>
                   </div>
@@ -600,91 +675,173 @@
               {/each}
             </div>
 
-            <div class="pt-2 flex justify-end">
-              <Button size="sm" variant="outline" class="text-xs" onclick={() => (activeTab = 'draw')}>
+            <div class="pt-1 flex justify-end">
+              <Button size="sm" variant="outline" class="h-8 text-xs" onclick={() => (activeTab = 'draw')}>
                 <Plus class="h-3.5 w-3.5 mr-1.5" /> Create Another Signature
               </Button>
             </div>
           {/if}
         </Tabs.Content>
 
-        <!-- Draw signature canvas -->
-        <Tabs.Content value="draw" class="space-y-4">
-          <div class="space-y-2">
+        <!-- note: draw signature canvas -->
+        <Tabs.Content value="draw" class="flex flex-col gap-3 mt-3 outline-none">
+          <div class="dialog-card">
             <div class="flex items-center justify-between">
-              <Label class="text-xs font-medium">Draw your signature</Label>
-              <div class="flex items-center gap-2">
-                <Button size="sm" variant="ghost" class="h-7 text-xs px-2 text-muted-foreground" onclick={undoDraw} disabled={strokes.length === 0}>
+              <Label class="field-label">Draw your signature</Label>
+              <div class="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  class="h-8 text-xs px-2 text-muted-foreground hover:text-foreground"
+                  onclick={undoDraw}
+                  disabled={strokes.length === 0}
+                >
                   <Undo2 class="h-3.5 w-3.5 mr-1" /> Undo
                 </Button>
-                <Button size="sm" variant="ghost" class="h-7 text-xs px-2 text-muted-foreground hover:text-destructive" onclick={clearDraw} disabled={strokes.length === 0 && !isDrawing}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  class="h-8 text-xs px-2 text-muted-foreground hover:text-foreground"
+                  onclick={clearDraw}
+                  disabled={strokes.length === 0 && !isDrawing}
+                >
                   <Eraser class="h-3.5 w-3.5 mr-1" /> Clear
                 </Button>
               </div>
             </div>
 
-            <div class="relative w-full h-[180px] bg-card border-2 border-dashed border-border rounded-lg overflow-hidden touch-none">
+            <div class="relative w-full h-[160px] bg-background/60 bg-transparency-grid border border-dashed border-border rounded-[var(--radius-card-inner)] overflow-hidden touch-none">
               <canvas
                 bind:this={drawCanvasEl}
-                class="w-full h-full cursor-crosshair block"
+                class="w-full h-full cursor-crosshair block img-subtle-outline"
                 onpointerdown={handlePointerDown}
                 onpointermove={handlePointerMove}
                 onpointerup={handlePointerUp}
                 onpointercancel={handlePointerUp}
               ></canvas>
               {#if strokes.length === 0 && !isDrawing}
-                <div class="absolute inset-0 flex items-center justify-center pointer-events-none text-muted-foreground/40 text-sm select-none">
+                <div class="absolute inset-0 flex items-center justify-center pointer-events-none text-muted-foreground/50 text-xs select-none">
                   Sign here with mouse, trackpad, or stylus
                 </div>
               {/if}
             </div>
+
+            <div class="field-grid-2">
+              <div class="field-group">
+                <Label class="field-label">Ink Colour</Label>
+                <ColorPicker
+                  bind:value={penColor}
+                  presets={inkColorPresets}
+                  label="Ink Colour"
+                  bordered={true}
+                  onValueChange={(col) => {
+                    penColor = col;
+                    redrawCanvas();
+                  }}
+                />
+              </div>
+
+              <div class="field-group">
+                <Label class="field-label">Stroke Width</Label>
+                <Slider
+                  type="single"
+                  min={1}
+                  max={5}
+                  step={0.5}
+                  unit="px"
+                  value={strokeWidth}
+                  onValueChange={(val: number) => {
+                    strokeWidth = val;
+                    redrawCanvas();
+                  }}
+                  class="w-full"
+                />
+              </div>
+            </div>
           </div>
 
-          <div class="grid grid-cols-2 gap-4 pt-1">
-            <div>
-              <Label class="text-xs text-muted-foreground mb-1.5 block">Ink Color</Label>
-              <div class="flex items-center gap-2">
-                {#each penColors as c}
+          <div class="pt-1 flex items-center justify-between gap-3">
+            <div class="flex-1">
+              <ControlRow label="Save signature persistently for reuse" for="save-collection-draw" size="sm">
+                <Switch id="save-collection-draw" bind:checked={saveToCollection} />
+              </ControlRow>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              class="h-8 text-xs px-4 shrink-0"
+              onclick={handleApplyDrawn}
+              disabled={strokes.length === 0 || isPlacing}
+            >
+              {#if isPlacing}
+                <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Placing...
+              {:else}
+                Place on Document
+              {/if}
+            </Button>
+          </div>
+        </Tabs.Content>
+
+        <!-- note: type signature typography -->
+        <Tabs.Content value="type" class="flex flex-col gap-3 mt-3 outline-none">
+          <div class="dialog-card">
+            <div class="field-grid-2">
+              <div class="field-group">
+                <Label for="type-name-input" class="field-label">Your Name or Initials</Label>
+                <Input
+                  id="type-name-input"
+                  bind:value={typedName}
+                  placeholder="Enter your full name..."
+                  class="field-input"
+                />
+              </div>
+
+              <div class="field-group">
+                <Label class="field-label">Ink Colour</Label>
+                <ColorPicker
+                  bind:value={typedColor}
+                  presets={inkColorPresets}
+                  label="Ink Colour"
+                  bordered={true}
+                />
+              </div>
+            </div>
+
+            <div class="field-group">
+              <Label class="field-label">Choose Handwriting Style</Label>
+              <div class="grid grid-cols-2 gap-2 max-h-[200px] overflow-y-auto pr-1">
+                {#each availableFonts as f (f.name)}
                   <button
                     type="button"
-                    class="w-6 h-6 rounded-full border border-border flex items-center justify-center transition-all {penColor === c.value ? 'ring-2 ring-primary ring-offset-2' : ''}"
-                    style="background-color: {c.value};"
-                    onclick={() => { penColor = c.value; redrawCanvas(); }}
-                    title={c.label}
+                    class="border rounded-[var(--radius-card-inner)] p-2.5 text-left transition-colors flex flex-col justify-between cursor-pointer {selectedFont === f.name ? 'border-foreground/40 ring-1 ring-ring bg-secondary/40' : 'border-border hover:border-ring bg-background/50'}"
+                    onclick={() => (selectedFont = f.name)}
                   >
-                    {#if penColor === c.value}
-                      <Check class="h-3 w-3 text-white" />
-                    {/if}
+                    <div class="text-[10px] text-muted-foreground mb-1">{f.label} ({f.name})</div>
+                    <div
+                      class="text-2xl truncate py-0.5 img-subtle-outline"
+                      style="font-family: '{f.name}', cursive; color: {typedColor};"
+                    >
+                      {typedName.trim() || 'Signature'}
+                    </div>
                   </button>
                 {/each}
               </div>
             </div>
-
-            <div>
-              <div class="flex justify-between text-xs text-muted-foreground mb-1">
-                <span>Stroke Width</span>
-                <span>{strokeWidth}px</span>
-              </div>
-              <Slider
-                type="single"
-                min={1}
-                max={5}
-                step={0.5}
-                value={strokeWidth}
-                onValueChange={(val: number) => { strokeWidth = val; redrawCanvas(); }}
-                class="w-full mt-1.5"
-              />
-            </div>
           </div>
 
-          <div class="pt-2 border-t border-border flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <Checkbox id="save-collection-draw" bind:checked={saveToCollection} />
-              <Label for="save-collection-draw" class="text-xs cursor-pointer select-none font-normal">
-                Save signature persistently for reuse
-              </Label>
+          <div class="pt-1 flex items-center justify-between gap-3">
+            <div class="flex-1">
+              <ControlRow label="Save signature persistently for reuse" for="save-collection-type" size="sm">
+                <Switch id="save-collection-type" bind:checked={saveToCollection} />
+              </ControlRow>
             </div>
-            <Button size="sm" class="text-xs px-4" onclick={handleApplyDrawn} disabled={strokes.length === 0 || isPlacing}>
+            <Button
+              variant="secondary"
+              size="sm"
+              class="h-8 text-xs px-4 shrink-0"
+              onclick={handleApplyTyped}
+              disabled={!typedName.trim() || isPlacing}
+            >
               {#if isPlacing}
                 <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Placing...
               {:else}
@@ -694,72 +851,8 @@
           </div>
         </Tabs.Content>
 
-        <!-- Type signature typography -->
-        <Tabs.Content value="type" class="space-y-4">
-          <div class="space-y-1.5">
-            <Label for="type-name-input" class="text-xs font-medium">Your Name or Initials</Label>
-            <Input id="type-name-input" bind:value={typedName} placeholder="Enter your full name..." class="h-9 text-sm" />
-          </div>
-
-          <div>
-            <Label class="text-xs text-muted-foreground mb-2 block">Choose Handwriting Style</Label>
-            <div class="grid grid-cols-2 gap-2.5 max-h-[220px] overflow-y-auto pr-1">
-              {#each availableFonts as f}
-                <button
-                  type="button"
-                  class="border rounded-lg p-3 text-left transition-all flex flex-col justify-between {selectedFont === f.name ? 'border-primary ring-1 ring-primary bg-primary/5' : 'border-border hover:border-muted-foreground/50 bg-card'}"
-                  onclick={() => (selectedFont = f.name)}
-                >
-                  <div class="text-[10px] text-muted-foreground mb-1">{f.label} ({f.name})</div>
-                  <div
-                    class="text-2xl truncate py-1"
-                    style="font-family: '{f.name}', cursive; color: {typedColor};"
-                  >
-                    {typedName.trim() || 'Signature'}
-                  </div>
-                </button>
-              {/each}
-            </div>
-          </div>
-
-          <div class="pt-1 flex items-center gap-3">
-            <Label class="text-xs text-muted-foreground">Ink Color:</Label>
-            <div class="flex items-center gap-2">
-              {#each penColors as c}
-                <button
-                  type="button"
-                  class="w-5 h-5 rounded-full border border-border flex items-center justify-center transition-all {typedColor === c.value ? 'ring-2 ring-primary ring-offset-2' : ''}"
-                  style="background-color: {c.value};"
-                  onclick={() => (typedColor = c.value)}
-                  title={c.label}
-                >
-                  {#if typedColor === c.value}
-                    <Check class="h-2.5 w-2.5 text-white" />
-                  {/if}
-                </button>
-              {/each}
-            </div>
-          </div>
-
-          <div class="pt-2 border-t border-border flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <Checkbox id="save-collection-type" bind:checked={saveToCollection} />
-              <Label for="save-collection-type" class="text-xs cursor-pointer select-none font-normal">
-                Save signature persistently for reuse
-              </Label>
-            </div>
-            <Button size="sm" class="text-xs px-4" onclick={handleApplyTyped} disabled={!typedName.trim() || isPlacing}>
-              {#if isPlacing}
-                <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Placing...
-              {:else}
-                Place on Document
-              {/if}
-            </Button>
-          </div>
-        </Tabs.Content>
-
-        <!-- Upload signature artwork -->
-        <Tabs.Content value="upload" class="space-y-4">
+        <!-- note: upload signature artwork -->
+        <Tabs.Content value="upload" class="flex flex-col gap-3 mt-3 outline-none">
           <input
             bind:this={fileInputRef}
             type="file"
@@ -768,72 +861,97 @@
             onchange={(e) => {
               const input = e.target as HTMLInputElement;
               const file = input.files?.[0];
-              if (file) handleImageFile(file);
+              if (file) void handleImageFile(file);
               input.value = '';
             }}
           />
 
           {#if !uploadedDataUrl}
             <div
-              class="border-2 border-dashed border-border hover:border-primary/60 rounded-lg p-8 text-center flex flex-col items-center justify-center gap-2 cursor-pointer transition-colors"
+              class="border border-dashed border-border hover:border-ring rounded-[var(--radius-card)] bg-card p-8 text-center flex flex-col items-center justify-center gap-2 cursor-pointer transition-colors"
               onclick={() => fileInputRef?.click()}
-              onkeydown={(e) => { if (e.key === 'Enter') fileInputRef?.click(); }}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  fileInputRef?.click();
+                }
+              }}
               role="button"
               tabindex="0"
             >
               <Upload class="h-8 w-8 text-muted-foreground stroke-1" />
-              <div class="text-xs font-medium">Click to upload signature image</div>
-              <p class="text-[11px] text-muted-foreground">PNG, JPG, or SVG with handwritten signature or company stamp</p>
+              <div class="text-xs font-medium text-foreground">Click to upload signature image</div>
+              <p class="text-[11px] text-muted-foreground">
+                PNG, JPG, or SVG with handwritten signature or company stamp
+              </p>
             </div>
           {:else}
-            <div class="space-y-3">
-              <div class="relative h-[160px] bg-muted/30 border border-border rounded-lg flex items-center justify-center p-4">
+            <div class="dialog-card">
+              <div class="relative h-[140px] bg-background/60 bg-transparency-grid border border-border rounded-[var(--radius-card-inner)] flex items-center justify-center p-4">
                 {#if isCleaning}
                   <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Sparkles class="h-4 w-4 animate-spin text-primary" /> Processing image transparency...
+                    <Sparkles class="h-4 w-4 animate-spin" /> Processing image transparency...
                   </div>
                 {:else}
-                  <img src={cleanedUploadDataUrl || uploadedDataUrl} alt="Signature Preview" class="max-h-full max-w-full object-contain" />
+                  <img
+                    src={cleanedUploadDataUrl || uploadedDataUrl}
+                    alt="Signature Preview"
+                    class="max-h-full max-w-full object-contain img-subtle-outline"
+                  />
                 {/if}
               </div>
 
-              <div class="space-y-2 bg-muted/20 p-3 rounded-lg border border-border">
-                <div class="flex items-center justify-between text-xs">
-                  <span class="flex items-center gap-1 text-muted-foreground font-medium">
-                    <SlidersHorizontal class="h-3.5 w-3.5" /> Background Cleanup Threshold
-                  </span>
-                  <span class="text-xs font-sans">{threshold}</span>
-                </div>
+              <div class="field-group">
+                <Label class="field-label flex items-center gap-1">
+                  <SlidersHorizontal class="h-3.5 w-3.5" /> Background Cleanup Threshold
+                </Label>
                 <Slider
                   type="single"
                   min={150}
                   max={255}
                   step={1}
+                  unit=""
                   value={threshold}
-                  onValueChange={(val: number) => { threshold = val; if (uploadedDataUrl) processUpload(uploadedDataUrl); }}
-                  class="w-full mt-1.5"
+                  onValueChange={(val: number) => {
+                    threshold = val;
+                    if (uploadedDataUrl) void processUpload(uploadedDataUrl);
+                  }}
+                  class="w-full"
                 />
-                <p class="text-[10px] text-muted-foreground">
+                <span class="field-hint">
                   Adjust threshold to automatically remove paper background and make signature transparent.
-                </p>
+                </span>
               </div>
 
-              <div class="flex justify-end gap-2">
-                <Button size="sm" variant="outline" class="text-xs" onclick={() => { uploadedDataUrl = null; cleanedUploadDataUrl = null; }}>
+              <div class="flex justify-end">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  class="h-8 text-xs"
+                  onclick={() => {
+                    uploadedDataUrl = null;
+                    cleanedUploadDataUrl = null;
+                  }}
+                >
                   Choose Another Image
                 </Button>
               </div>
             </div>
           {/if}
 
-          <div class="pt-2 border-t border-border flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <Checkbox id="save-collection-upload" bind:checked={saveToCollection} />
-              <Label for="save-collection-upload" class="text-xs cursor-pointer select-none font-normal">
-                Save signature persistently for reuse
-              </Label>
+          <div class="pt-1 flex items-center justify-between gap-3">
+            <div class="flex-1">
+              <ControlRow label="Save signature persistently for reuse" for="save-collection-upload" size="sm">
+                <Switch id="save-collection-upload" bind:checked={saveToCollection} />
+              </ControlRow>
             </div>
-            <Button size="sm" class="text-xs px-4" onclick={handleApplyUpload} disabled={!uploadedDataUrl || isCleaning || isPlacing}>
+            <Button
+              variant="secondary"
+              size="sm"
+              class="h-8 text-xs px-4 shrink-0"
+              onclick={handleApplyUpload}
+              disabled={!uploadedDataUrl || isCleaning || isPlacing}
+            >
               {#if isPlacing}
                 <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Placing...
               {:else}
@@ -843,19 +961,83 @@
           </div>
         </Tabs.Content>
       </Tabs.Root>
+
+      <div class="dialog-card">
+        <ControlRow
+          label="Show Full Name Underneath Signature"
+          description="Composite signer full name centered beneath the signature graphic"
+          for="esign-show-full-name"
+          variant="ghost"
+          size="compact"
+          class="px-0"
+        >
+          <Switch id="esign-show-full-name" bind:checked={showFullNameUnderneath} />
+        </ControlRow>
+        {#if showFullNameUnderneath}
+          <div class="field-group pt-1 border-t border-border/60">
+            <Label for="esign-full-name-input" class="field-label">Full Name Displayed Underneath</Label>
+            <Input
+              id="esign-full-name-input"
+              bind:value={signerFullName}
+              placeholder="e.g. Jane Doe"
+              class="field-input"
+            />
+          </div>
+        {/if}
+      </div>
     </div>
 
-    <Dialog.Footer class="px-6 py-3 border-t border-border bg-card flex items-center justify-between">
-      <div class="text-[11px] text-muted-foreground">
-        Canvas elements can be moved, resized, and rotated anytime before baking into PDF.
+    <Dialog.Footer class="justify-between">
+      <div class="flex items-center gap-2">
+        <span class="text-[11px] text-muted-foreground">Placement Preset:</span>
+        <Select.Root
+          type="single"
+          value={placementPreset}
+          onValueChange={(val) => {
+            if (
+              val === 'bottom-right' ||
+              val === 'bottom-left' ||
+              val === 'center' ||
+              val === 'top-right' ||
+              val === 'top-left'
+            ) {
+              placementPreset = val;
+            }
+          }}
+        >
+          <Select.Trigger variant="border" class="w-[140px] h-8 text-xs font-sans">
+            {SIGNATURE_PLACEMENT_PRESETS.find((p) => p.id === placementPreset)?.label ?? 'Bottom Right'}
+          </Select.Trigger>
+          <Select.Content>
+            {#each SIGNATURE_PLACEMENT_PRESETS as preset (preset.id)}
+              <Select.Item value={preset.id} label={preset.label}>
+                {preset.label}
+              </Select.Item>
+            {/each}
+          </Select.Content>
+        </Select.Root>
       </div>
-      <Dialog.Close>
-        {#snippet child({ props })}
-          <Button variant="outline" size="sm" class="text-xs" {...props} onclick={handleClose}>
-            Close
-          </Button>
-        {/snippet}
-      </Dialog.Close>
+      <div class="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          class="h-8 text-xs"
+          onclick={() => {
+            handleClose();
+            actions.openCertSignDialog();
+          }}
+        >
+          <ShieldCheck class="h-3.5 w-3.5 mr-1" /> Sign with Certificate
+        </Button>
+        <Dialog.Close>
+          {#snippet child({ props })}
+            <Button variant="outline" size="sm" class="h-8 text-xs" {...props} onclick={handleClose}>
+              Close
+            </Button>
+          {/snippet}
+        </Dialog.Close>
+      </div>
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
