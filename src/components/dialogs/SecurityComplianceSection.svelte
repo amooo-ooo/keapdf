@@ -5,6 +5,8 @@
   } from '../../services/pdf/operations/signature-ops';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import * as Card from '$lib/components/ui/card/index.js';
+  import * as Select from '$lib/components/ui/select/index.js';
   import {
     CheckCircle2,
     AlertCircle,
@@ -24,10 +26,15 @@
     X,
   } from 'lucide-svelte';
 
+  // Retain Paperclip reference while attachment metric is commented out
+  void Paperclip;
+
   interface Props {
     metadata: DocumentMetadata | null;
     signatureResults: SignatureValidationResult[];
     isValidatingSignatures: boolean;
+    showEncryptionBanner?: boolean;
+    showHeader?: boolean;
     onRefreshSignatures: () => void | Promise<void>;
     onOpenCertSign: () => void;
     onOpenValidateDialog: () => void;
@@ -37,13 +44,38 @@
     metadata,
     signatureResults,
     isValidatingSignatures,
+    showEncryptionBanner = true,
+    showHeader = true,
     onRefreshSignatures,
     onOpenCertSign,
     onOpenValidateDialog,
   }: Props = $props();
 
-  let selectedSigIndex = $state(0);
-  let isTechDetailsOpen = $state(false);
+  let selectedSigIndex = $state<number>(0);
+  let lastSignatureCount = 0;
+  let checkExpandedOverrides = $state<Record<string, boolean>>({});
+
+  $effect(() => {
+    const count = signatureResults.length;
+    if (count !== lastSignatureCount) {
+      lastSignatureCount = count;
+      selectedSigIndex = count > 0 ? count - 1 : 0;
+    }
+  });
+
+  function isCheckExpanded(checkId: string, status: string, sigId = ''): boolean {
+    const key = `${sigId}:${checkId}`;
+    if (key in checkExpandedOverrides) {
+      return checkExpandedOverrides[key];
+    }
+    return status !== 'valid';
+  }
+
+  function toggleCheck(checkId: string, status: string, sigId = ''): void {
+    const key = `${sigId}:${checkId}`;
+    const current = isCheckExpanded(checkId, status, sigId);
+    checkExpandedOverrides[key] = !current;
+  }
 
   // Clamp selected signature index if results length changes
   let activeSignature = $derived.by(() => {
@@ -68,14 +100,13 @@
   });
 </script>
 
-<div class="space-y-4">
+<div class="flex flex-col gap-3">
+  {#if showEncryptionBanner}
   <!-- Document encryption and access restrictions -->
-  <div class="border border-border rounded-lg p-4 bg-muted/20 flex items-center justify-between">
+  <div class="border border-border rounded-2xl p-4 bg-card flex items-center justify-between">
     <div class="flex items-center gap-3">
       <div
-        class="w-9 h-9 rounded-full {metadata?.isEncrypted
-          ? 'bg-success/10 text-success'
-          : 'bg-primary/10 text-primary'} flex items-center justify-center"
+        class="w-9 h-9 rounded-full bg-card text-foreground border border-border flex items-center justify-center"
       >
         {#if metadata?.isEncrypted}
           <Lock class="h-4 w-4" />
@@ -98,319 +129,380 @@
       {metadata?.isEncrypted ? 'Protected' : 'Unrestricted'}
     </Badge>
   </div>
+  {/if}
 
-  <!-- High-level metrics for signatures and attachments -->
-  <div class="grid grid-cols-2 gap-3">
-    <div class="border border-border rounded-lg p-3 bg-card flex items-center gap-2.5">
-      <ShieldCheck class="h-4 w-4 text-primary shrink-0" />
+  <!-- High-level metrics for signatures and attachments commented out temporarily -->
+  <!--
+  <div class="grid grid-cols-2 gap-2">
+    <div class="border border-border rounded-2xl p-2.5 bg-card flex items-center gap-2 min-w-0">
+      <ShieldCheck class="h-4 w-4 shrink-0 text-muted-foreground" />
       <div class="flex flex-col min-w-0">
-        <span class="text-[11px] text-muted-foreground">Digital Signatures</span>
-        <span class="text-xs font-semibold text-foreground">
-          {signatureResults.length || metadata?.signaturesCount || 0} signature{(signatureResults.length || metadata?.signaturesCount || 0) === 1 ? '' : 's'}
+        <span class="text-[11px] text-muted-foreground truncate">Signatures</span>
+        <span class="text-xs font-semibold text-foreground truncate">
+          {signatureResults.length || metadata?.signaturesCount || 0} {(signatureResults.length || metadata?.signaturesCount || 0) === 1 ? 'signature' : 'signatures'}
         </span>
       </div>
     </div>
 
-    <div class="border border-border rounded-lg p-3 bg-card flex items-center gap-2.5">
+    <div class="border border-border rounded-2xl p-2.5 bg-card flex items-center gap-2 min-w-0">
       <Paperclip class="h-4 w-4 text-muted-foreground shrink-0" />
       <div class="flex flex-col min-w-0">
-        <span class="text-[11px] text-muted-foreground">Embedded Attachments</span>
-        <span class="text-xs font-semibold text-foreground">
-          {metadata?.attachmentsCount || 0} file{(metadata?.attachmentsCount || 0) === 1 ? '' : 's'}
+        <span class="text-[11px] text-muted-foreground truncate">Attachments</span>
+        <span class="text-xs font-semibold text-foreground truncate">
+          {metadata?.attachmentsCount || 0} {(metadata?.attachmentsCount || 0) === 1 ? 'file' : 'files'}
         </span>
       </div>
     </div>
   </div>
+  -->
 
-  <!-- Digital signatures and standards compliance -->
-  <div class="border border-border rounded-lg p-4 bg-card space-y-3.5">
-    <div class="flex items-center justify-between pb-1 border-b border-border/60">
-      <div class="flex items-center gap-2">
-        <ShieldCheck class="h-4 w-4 text-primary" />
-        <div>
-          <h4 class="text-xs font-semibold text-foreground">
-            Digital Signature & Standards Compliance
-          </h4>
-          <p class="text-[10px] text-muted-foreground">
-            Evaluated according to Swiss Federal Act on Electronic Signatures (ZertES / ESigA, SR 943.03) and ETSI EN 319 142.
-          </p>
-        </div>
-      </div>
-      <Button
-        variant="ghost"
-        size="sm"
-        class="h-7 text-xs px-2"
-        onclick={() => onRefreshSignatures()}
-        disabled={isValidatingSignatures}
-      >
-        <RefreshCw class="h-3 w-3 mr-1 {isValidatingSignatures ? 'animate-spin' : ''}" />
-        Refresh
-      </Button>
-    </div>
-
+  {#snippet signatureContent()}
     {#if isValidatingSignatures}
-      <div class="py-6 flex flex-col items-center justify-center text-center space-y-1.5">
-        <RefreshCw class="h-5 w-5 animate-spin text-primary" />
+      <div class="py-6 px-3 flex flex-col items-center justify-center text-center space-y-1.5 {showHeader ? '' : 'border border-border rounded-2xl bg-card'}">
+        <RefreshCw class="h-5 w-5 animate-spin text-muted-foreground" />
         <span class="text-xs font-medium text-foreground">Verifying Cryptographic Signatures...</span>
         <span class="text-[10px] text-muted-foreground">
           Auditing byte ranges, certificate trust chains, and ESigA compliance rules.
         </span>
       </div>
     {:else if signatureResults.length === 0}
-      <div class="py-6 border border-dashed border-border rounded-lg text-center flex flex-col items-center justify-center gap-2 bg-muted/10">
-        <FileCheck class="h-7 w-7 text-muted-foreground stroke-1" />
-        <div class="text-xs font-semibold text-foreground">No Digital Signatures Found</div>
-        <p class="text-[11px] text-muted-foreground max-w-[340px]">
-          This document does not contain cryptographic ISO 32000 digital signatures or AcroForm signature fields.
-        </p>
-        <Button size="sm" variant="outline" class="mt-1 text-xs h-7" onclick={onOpenCertSign}>
-          <KeyRound class="h-3.5 w-3.5 mr-1.5 text-primary" /> Add Digital Certificate Signature
+      <div class="flex flex-col gap-2">
+        <div class="p-3.5 border border-dashed border-border rounded-2xl text-center flex flex-col items-center justify-center gap-2 bg-card">
+          <FileCheck class="h-6 w-6 text-muted-foreground stroke-1" />
+          <div class="text-xs font-semibold text-foreground">No Digital Signatures Found</div>
+          <p class="text-[11px] text-muted-foreground leading-normal max-w-[280px]">
+            This document does not contain cryptographic ISO 32000 digital signatures or AcroForm signature fields.
+          </p>
+        </div>
+        <Button size="sm" variant="outline" class="w-full text-xs h-8 justify-center" onclick={onOpenCertSign}>
+          <KeyRound class="h-3.5 w-3.5 mr-1.5" /> Add Digital Certificate Signature
         </Button>
       </div>
     {:else if activeSignature}
-      <!-- Multiple signatures selector tabs -->
+      <!-- Multiple signatures selector dropdown -->
       {#if signatureResults.length > 1}
-        <div class="flex items-center gap-1.5 overflow-x-auto pb-1">
-          {#each signatureResults as sig, idx}
-            <button
-              type="button"
-              class="text-[11px] px-2.5 py-1 rounded-md border font-medium transition-colors {selectedSigIndex === idx
-                ? 'bg-primary text-primary-foreground border-primary'
-                : 'bg-muted/40 text-muted-foreground border-border hover:bg-muted/70'}"
-              onclick={() => (selectedSigIndex = idx)}
+        <div class="w-full">
+          <Select.Root
+            type="single"
+            value={String(selectedSigIndex)}
+            onValueChange={(val: string) => {
+              if (val !== undefined && val !== '') {
+                selectedSigIndex = parseInt(val, 10);
+              }
+            }}
+          >
+            <Select.Trigger
+              variant="border"
+              class="w-full text-xs font-sans h-8 justify-between"
+              aria-label="Select digital signature"
             >
-              Sig #{idx + 1}: {sig.signerName}
-            </button>
-          {/each}
+              <span class="truncate" title={activeSignature.signerName}>
+                {activeSignature.signerName}
+              </span>
+            </Select.Trigger>
+            <Select.Content>
+              {#each signatureResults as sig, idx}
+                <Select.Item value={String(idx)} label={sig.signerName}>
+                  <span class="truncate" title={sig.signerName}>
+                    {sig.signerName}
+                  </span>
+                </Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
         </div>
       {/if}
 
-      <!-- Signature Overview Header Card -->
-      <div class="border rounded-lg p-3 bg-muted/20 space-y-2">
-        <div class="flex items-start justify-between gap-2">
-          <div class="space-y-0.5">
-            <div class="flex items-center gap-2 flex-wrap">
-              <span class="text-xs font-semibold text-foreground">
-                {activeSignature.signerName}
-              </span>
+      <!-- Signature overview header card -->
+      <Card.Root>
+        <Card.Header>
+          <Card.Title>
+            Signature
+          </Card.Title>
 
-              {#if activeSignature.esigaCompliance.status === 'compliant'}
-                <Badge variant="success" class="text-[10px] flex items-center gap-1">
-                  <CheckCircle2 class="h-3 w-3" /> ESigA Compliant ({activeSignature.esigaCompliance.qualificationLevel})
-                </Badge>
-              {:else if activeSignature.esigaCompliance.status === 'indeterminate'}
-                <Badge
-                  variant="warning"
-                  class="text-[10px] flex items-center gap-1"
-                >
-                  <AlertCircle class="h-3 w-3" /> ESigA: Indeterminate
-                </Badge>
-              {:else}
-                <Badge variant="destructive" class="text-[10px] flex items-center gap-1">
-                  <XCircle class="h-3 w-3" /> ESigA: Non-Compliant
-                </Badge>
-              {/if}
+          <Card.Actions>
+            <Button
+              variant="outline"
+              size="icon-xs"
+              class="shrink-0 text-muted-foreground hover:text-foreground"
+              onclick={onOpenValidateDialog}
+              aria-label="Inspect signature"
+              title="Open comprehensive verification modal"
+            >
+              <ExternalLink class="h-3 w-3" />
+            </Button>
+          </Card.Actions>
+        </Card.Header>
 
-              <Badge variant="outline" class="text-[10px] font-sans">
-                {activeSignature.padesProfile}
+        <Card.Content>
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-xs font-semibold text-foreground">
+              {activeSignature.signerName}
+            </span>
+
+            {#if activeSignature.esigaCompliance.status === 'compliant'}
+              <Badge variant="success" class="text-[10px] flex items-center gap-1">
+                <CheckCircle2 class="h-3 w-3" /> ESigA Compliant ({activeSignature.esigaCompliance.qualificationLevel})
               </Badge>
+            {:else if activeSignature.esigaCompliance.status === 'indeterminate'}
+              <Badge
+                variant="warning"
+                class="text-[10px] flex items-center gap-1"
+              >
+                <AlertCircle class="h-3 w-3" /> ESigA: Indeterminate
+              </Badge>
+            {:else}
+              <Badge variant="destructive" class="text-[10px] flex items-center gap-1">
+                <XCircle class="h-3 w-3" /> ESigA: Non-Compliant
+              </Badge>
+            {/if}
 
-              {#if activeSignature.hasDss}
-                <Badge variant="success" class="text-[10px]">
-                  LTV Enabled (/DSS)
-                </Badge>
-              {/if}
-            </div>
+            <Badge variant="outline" class="text-[10px] font-sans">
+              {activeSignature.padesProfile}
+            </Badge>
 
-            <div class="text-[11px] text-muted-foreground flex items-center gap-1">
-              <Clock class="h-3 w-3" /> Signed: {activeSignature.signingTimeFormatted}
-            </div>
+            {#if activeSignature.isCertificationSignature}
+              <Badge variant="outline" class="text-[10px] font-sans">
+                Certified{activeSignature.docMdpPermissionLevel ? ` (DocMDP P=${activeSignature.docMdpPermissionLevel})` : ''}
+              </Badge>
+            {/if}
+
+            {#if activeSignature.hasDss}
+              <Badge variant="success" class="text-[10px]">
+                LTV Enabled (/DSS)
+              </Badge>
+            {/if}
           </div>
 
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-7 text-xs px-2 text-primary"
-            onclick={onOpenValidateDialog}
-            title="Open comprehensive verification modal"
-          >
-            <ExternalLink class="h-3.5 w-3.5 mr-1" /> Inspector
-          </Button>
-        </div>
-      </div>
+          <div class="text-[11px] text-muted-foreground flex items-center gap-1">
+            <Clock class="h-3 w-3" /> Signed: {activeSignature.signingTimeFormatted}
+          </div>
+        </Card.Content>
+      </Card.Root>
 
       <!-- Statutory industry standard compliance pillars -->
-      <div class="space-y-2">
-        <span class="text-[11px] font-semibold text-foreground uppercase tracking-wider block">
-          Statutory Verification Checks (Swiss ZertES / ESigA & ETSI)
-        </span>
+      <div class="flex flex-col gap-2">
+        <div class={showHeader ? "sidebar-section-header h-auto min-h-9 py-1 px-0" : "sidebar-section-header h-auto min-h-9 py-1 -mx-3"}>
+          <span class="sidebar-section-title leading-snug">
+            Statutory Verification Checks (Swiss ZertES / ESigA & ETSI)
+          </span>
+        </div>
 
-        <div class="space-y-2">
+        <div class="border border-border rounded-2xl overflow-hidden bg-card divide-y divide-border">
           {#each activeSignature.esigaCompliance.checks as check (check.id)}
+            {@const isCheckOpen = isCheckExpanded(check.id, check.status, activeSignature.signatureId)}
             <div
-              class="border rounded-lg p-3 flex items-start gap-2.5 transition-colors {check.status === 'valid'
-                ? 'border-success/30 bg-success/5'
+              class="transition-colors {check.status === 'valid'
+                ? 'bg-card'
                 : check.status === 'indeterminate'
-                  ? 'border-warning/30 bg-warning/5'
-                  : 'border-destructive/30 bg-destructive/5'}"
+                  ? 'bg-warning/5'
+                  : 'bg-destructive/5'}"
             >
-              <div class="shrink-0 mt-0.5">
-                {#if check.status === 'valid'}
-                  <CheckCircle2 class="h-4 w-4 text-success" />
-                {:else if check.status === 'indeterminate'}
-                  <AlertCircle class="h-4 w-4 text-warning" />
-                {:else}
-                  <XCircle class="h-4 w-4 text-destructive" />
-                {/if}
-              </div>
-
-              <div class="space-y-0.5 min-w-0 flex-1">
-                <div class="flex items-center justify-between gap-2">
-                  <span class="text-xs font-medium text-foreground">
+              <button
+                type="button"
+                class="w-full px-3 py-2.5 flex items-center justify-between gap-2.5 text-left hover:bg-muted/30 transition-colors"
+                aria-expanded={isCheckOpen}
+                onclick={() => toggleCheck(check.id, check.status, activeSignature.signatureId)}
+              >
+                <div class="flex items-center gap-2.5 min-w-0 flex-1">
+                  <div class="shrink-0">
+                    {#if check.status === 'valid'}
+                      <CheckCircle2 class="h-4 w-4" />
+                    {:else if check.status === 'indeterminate'}
+                      <AlertCircle class="h-4 w-4 text-warning" />
+                    {:else}
+                      <XCircle class="h-4 w-4 text-destructive" />
+                    {/if}
+                  </div>
+                  <span class="text-xs font-medium text-foreground leading-snug">
                     {check.title}
-                  </span>
-                  <span
-                    class="text-[10px] font-medium uppercase {check.status === 'valid'
-                      ? 'text-success'
-                      : check.status === 'indeterminate'
-                        ? 'text-warning'
-                        : 'text-destructive'}"
-                  >
-                    {check.status}
                   </span>
                 </div>
 
-                <p class="text-xs text-foreground/90 font-normal leading-snug">
-                  {check.message}
-                </p>
-
-                {#if check.technicalDetails}
-                  <p class="text-[11px] text-muted-foreground pt-0.5 leading-tight">
-                    {check.technicalDetails}
-                  </p>
+                {#if isCheckOpen}
+                  <ChevronDown class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                {:else}
+                  <ChevronRight class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 {/if}
-              </div>
+              </button>
+
+              {#if isCheckOpen}
+                <div class="px-3 pb-3 pt-2 border-t border-border/60 space-y-1">
+                  <p class="text-xs text-foreground/90 font-normal leading-snug">
+                    {check.message}
+                  </p>
+
+                  {#if check.technicalDetails}
+                    <p class="text-xs text-muted-foreground pt-0.5 leading-tight">
+                      {check.technicalDetails}
+                    </p>
+                  {/if}
+                </div>
+              {/if}
             </div>
           {/each}
         </div>
       </div>
 
-      <!-- Expandable Technical Specifications Drawer -->
-      <div class="border border-border/80 rounded-lg overflow-hidden bg-card text-xs">
-        <button
-          type="button"
-          class="w-full px-3 py-2 bg-muted/20 hover:bg-muted/30 flex items-center justify-between text-left font-medium text-muted-foreground"
-          onclick={() => (isTechDetailsOpen = !isTechDetailsOpen)}
-        >
-          <span class="text-[11px]">Technical Cryptographic Details & Certificate Chain</span>
-          {#if isTechDetailsOpen}
-            <ChevronDown class="h-3.5 w-3.5" />
-          {:else}
-            <ChevronRight class="h-3.5 w-3.5" />
-          {/if}
-        </button>
+      <!-- Technical cryptographic details and certificate chain -->
+      <div class="flex flex-col gap-2">
+        <div class={showHeader ? "sidebar-section-header h-auto min-h-9 py-1 px-0" : "sidebar-section-header h-auto min-h-9 py-1 -mx-3"}>
+          <span class="sidebar-section-title leading-snug">
+            Technical Cryptographic Details & Certificate Chain
+          </span>
+        </div>
 
-        {#if isTechDetailsOpen}
-          <div class="p-3 border-t border-border/60 space-y-2 text-[11px]">
-            <div class="grid grid-cols-[130px_1fr] gap-x-2 gap-y-1">
-              <span class="text-muted-foreground">Subject CN:</span>
-              <span class="text-foreground font-medium">{activeSignature.certificateSubject.commonName}</span>
-
-              {#if activeSignature.certificateSubject.organization}
-                <span class="text-muted-foreground">Organization:</span>
-                <span class="text-foreground">{activeSignature.certificateSubject.organization}</span>
-              {/if}
-
-              <span class="text-muted-foreground">Issuer:</span>
-              <span class="text-foreground">{activeSignature.certificateIssuer.commonName}</span>
-
-              <span class="text-muted-foreground">Serial Number:</span>
-              <span class="text-foreground font-sans text-[10px] break-all">{activeSignature.serialNumber}</span>
-
-              <span class="text-muted-foreground">Validity Window:</span>
-              <span class="text-foreground">{activeSignature.validFrom} - {activeSignature.validTo}</span>
-
-              <span class="text-muted-foreground">SubFilter / Type:</span>
-              <span class="text-foreground font-sans text-[10px]">
-                {activeSignature.subFilter} ({activeSignature.filter})
-              </span>
-
-              <span class="text-muted-foreground">ByteRange:</span>
-              <span class="text-foreground font-sans text-[10px]">
-                [{activeSignature.byteRange.join(', ')}]
-              </span>
-
-              <span class="text-muted-foreground">SigningCertV2:</span>
-              <span class="text-foreground">
-                {activeSignature.hasSigningCertificateV2 ? 'RFC 5035 Bound (SHA-256)' : 'Legacy PKCS#7 (Unbound)'}
-              </span>
-            </div>
+        <div class="panel-key-value-grid">
+          <div class="panel-key-label">Subject CN</div>
+          <div class="panel-value-text truncate" title={activeSignature.certificateSubject.commonName}>
+            {activeSignature.certificateSubject.commonName}
           </div>
-        {/if}
+
+          {#if activeSignature.certificateSubject.organization}
+            <div class="panel-key-label">Organisation</div>
+            <div class="panel-value-text truncate" title={activeSignature.certificateSubject.organization}>
+              {activeSignature.certificateSubject.organization}
+            </div>
+          {/if}
+
+          <div class="panel-key-label">Issuer</div>
+          <div class="panel-value-text truncate" title={activeSignature.certificateIssuer.commonName}>
+            {activeSignature.certificateIssuer.commonName}
+          </div>
+
+          <div class="panel-key-label">Serial Number</div>
+          <div class="panel-value-text truncate" title={activeSignature.serialNumber}>
+            {activeSignature.serialNumber}
+          </div>
+
+          <div class="panel-key-label">Validity Window</div>
+          <div class="panel-value-text truncate" title={`${activeSignature.validFrom} - ${activeSignature.validTo}`}>
+            {activeSignature.validFrom} - {activeSignature.validTo}
+          </div>
+
+          <div class="panel-key-label">Digest Algorithm</div>
+          <div class="panel-value-text truncate" title={activeSignature.digestAlgorithm}>
+            {activeSignature.digestAlgorithm}
+          </div>
+
+          <div class="panel-key-label">SubFilter / Type</div>
+          <div class="panel-value-text truncate" title={`${activeSignature.subFilter} (${activeSignature.filter})`}>
+            {activeSignature.subFilter} ({activeSignature.filter})
+          </div>
+
+          {#if activeSignature.transformMethod}
+            <div class="panel-key-label">Transform Method</div>
+            <div
+              class="panel-value-text truncate"
+              title={`${activeSignature.transformMethod}${activeSignature.docMdpPermissionLevel ? ` (P=${activeSignature.docMdpPermissionLevel})` : ''}`}
+            >
+              {activeSignature.transformMethod}{activeSignature.docMdpPermissionLevel ? ` (P=${activeSignature.docMdpPermissionLevel})` : ''}
+            </div>
+          {/if}
+
+          <div class="panel-key-label">ByteRange</div>
+          <div class="panel-value-text truncate" title={`[${activeSignature.byteRange.join(', ')}]`}>
+            [{activeSignature.byteRange.join(', ')}]
+          </div>
+
+          <div class="panel-key-label">SigningCertV2</div>
+          <div
+            class="panel-value-text truncate"
+            title={activeSignature.hasSigningCertificateV2 ? 'RFC 5035 Bound (SHA-256)' : 'Legacy PKCS#7 (Unbound)'}
+          >
+            {activeSignature.hasSigningCertificateV2 ? 'RFC 5035 Bound (SHA-256)' : 'Legacy PKCS#7 (Unbound)'}
+          </div>
+        </div>
       </div>
     {/if}
-  </div>
+  {/snippet}
 
-  <!-- Decoded permission bitflags -->
-  <div class="border border-border rounded-lg p-3.5 bg-card flex flex-col gap-2">
-    <div class="flex items-center justify-between">
-      <span class="text-xs font-semibold text-foreground">Standard Permission Flags</span>
-      <span class="text-[10px] text-muted-foreground font-sans">
-        Raw Mask: 0x{(metadata?.permissions ?? 0).toString(16).toUpperCase()}
-      </span>
+  {#if showHeader}
+  <!-- Digital signatures and standards compliance -->
+  <div class="border border-border rounded-2xl p-3.5 bg-card flex flex-col gap-3">
+    <div class="space-y-1.5 pb-2.5 border-b border-border/60">
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-1.5 min-w-0 flex-1">
+          <ShieldCheck class="h-3.5 w-3.5 shrink-0 text-foreground" />
+          <h4 class="text-xs font-semibold text-foreground leading-snug" title="Digital Signature & Standards Compliance">
+            Digital Signature & Standards Compliance
+          </h4>
+        </div>
+        <Button
+          variant="outline"
+          size="icon-xs"
+          class="shrink-0 text-muted-foreground hover:text-foreground"
+          onclick={() => onRefreshSignatures()}
+          disabled={isValidatingSignatures}
+          aria-label="Refresh signatures"
+          title="Refresh signatures"
+        >
+          <RefreshCw class="h-3 w-3 {isValidatingSignatures ? 'animate-spin' : ''}" />
+        </Button>
+      </div>
+      <p class="text-[10px] text-muted-foreground leading-normal">
+        Evaluated according to Swiss Federal Act on Electronic Signatures (ZertES / ESigA, SR 943.03) and ETSI EN 319 142.
+      </p>
     </div>
 
-    <div class="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
-      <div class="flex items-center gap-2">
+    {@render signatureContent()}
+  </div>
+  {:else}
+  <!-- Digital signatures and standards compliance content -->
+  <div class="flex flex-col gap-3">
+    {@render signatureContent()}
+  </div>
+  {/if}
+
+  <!-- Decoded permission bitflags -->
+  <div class="panel-metric-banner -mx-3 px-3 border-t border-border pt-2.5">
+    <span class="text-xs font-semibold text-foreground">Standard Permission Flags</span>
+    <div class="flex flex-col gap-1.5 text-xs">
+      <div class="flex items-center gap-1.5 {permissions.canPrint ? 'text-muted-foreground' : 'text-muted-foreground/60'}">
         {#if permissions.canPrint}
-          <Check class="h-3.5 w-3.5 text-success" />
+          <Check class="h-3 w-3 shrink-0 text-muted-foreground opacity-75" />
         {:else}
-          <X class="h-3.5 w-3.5 text-destructive" />
+          <X class="h-3 w-3 shrink-0 text-muted-foreground/60 opacity-40" />
         {/if}
         <span>Printing Content</span>
       </div>
-
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-1.5 {permissions.canCopy ? 'text-muted-foreground' : 'text-muted-foreground/60'}">
         {#if permissions.canCopy}
-          <Check class="h-3.5 w-3.5 text-success" />
+          <Check class="h-3 w-3 shrink-0 text-muted-foreground opacity-75" />
         {:else}
-          <X class="h-3.5 w-3.5 text-destructive" />
+          <X class="h-3 w-3 shrink-0 text-muted-foreground/60 opacity-40" />
         {/if}
         <span>Copying Text & Graphics</span>
       </div>
-
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-1.5 {permissions.canModify ? 'text-muted-foreground' : 'text-muted-foreground/60'}">
         {#if permissions.canModify}
-          <Check class="h-3.5 w-3.5 text-success" />
+          <Check class="h-3 w-3 shrink-0 text-muted-foreground opacity-75" />
         {:else}
-          <X class="h-3.5 w-3.5 text-destructive" />
+          <X class="h-3 w-3 shrink-0 text-muted-foreground/60 opacity-40" />
         {/if}
         <span>Modifying Document</span>
       </div>
-
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-1.5 {permissions.canFillForms ? 'text-muted-foreground' : 'text-muted-foreground/60'}">
         {#if permissions.canFillForms}
-          <Check class="h-3.5 w-3.5 text-success" />
+          <Check class="h-3 w-3 shrink-0 text-muted-foreground opacity-75" />
         {:else}
-          <X class="h-3.5 w-3.5 text-destructive" />
+          <X class="h-3 w-3 shrink-0 text-muted-foreground/60 opacity-40" />
         {/if}
         <span>Form Field Completion</span>
       </div>
-
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-1.5 {permissions.canAnnotate ? 'text-muted-foreground' : 'text-muted-foreground/60'}">
         {#if permissions.canAnnotate}
-          <Check class="h-3.5 w-3.5 text-success" />
+          <Check class="h-3 w-3 shrink-0 text-muted-foreground opacity-75" />
         {:else}
-          <X class="h-3.5 w-3.5 text-destructive" />
+          <X class="h-3 w-3 shrink-0 text-muted-foreground/60 opacity-40" />
         {/if}
         <span>Adding Comments & Notes</span>
       </div>
-
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-1.5 {permissions.canAccessAccessibility ? 'text-muted-foreground' : 'text-muted-foreground/60'}">
         {#if permissions.canAccessAccessibility}
-          <Check class="h-3.5 w-3.5 text-success" />
+          <Check class="h-3 w-3 shrink-0 text-muted-foreground opacity-75" />
         {:else}
-          <X class="h-3.5 w-3.5 text-destructive" />
+          <X class="h-3 w-3 shrink-0 text-muted-foreground/60 opacity-40" />
         {/if}
         <span>Screen Reader Access</span>
       </div>
