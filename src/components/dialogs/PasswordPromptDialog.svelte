@@ -50,76 +50,77 @@
 </script>
 
 <Dialog.Root open={store.showPasswordPromptDialog} onOpenChange={handleOpenChange}>
-  <Dialog.Content class="sm:max-w-md font-sans">
-    <Dialog.Header>
-      <div class="flex items-center gap-2 mb-1">
-        <div class="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary">
-          <Lock class="h-4 w-4" />
-        </div>
-        <div>
-          <Dialog.Title class="text-base font-semibold">Password Protected Document</Dialog.Title>
-          <Dialog.Description class="text-xs text-muted-foreground">
-            This PDF is encrypted. Enter the document password to open it.
-          </Dialog.Description>
-        </div>
-      </div>
+  <Dialog.Content class="sm:max-w-[400px] font-sans">
+    <Dialog.Header class="pr-12">
+      <Dialog.Title>
+        <Lock class="h-4 w-4" />
+        Password Protected Document
+      </Dialog.Title>
+      <Dialog.Description>
+        This PDF is encrypted. Enter the document password to open it.
+      </Dialog.Description>
     </Dialog.Header>
 
-    {#if store.pendingPasswordFileName}
-      <div class="rounded-md bg-muted/50 px-3 py-2 text-xs font-medium text-foreground truncate">
-        {store.pendingPasswordFileName}
-      </div>
-    {/if}
+    <div class="dialog-body">
+      {#if store.pendingPasswordFileName}
+        <div class="rounded-[var(--radius-card-inner)] bg-muted/40 border border-border px-3 py-2 text-xs font-medium text-foreground truncate" title={store.pendingPasswordFileName}>
+          {store.pendingPasswordFileName}
+        </div>
+      {/if}
 
-    {#if store.passwordPromptError}
-      <div class="flex items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
-        <AlertCircle class="h-4 w-4 shrink-0" />
-        <span>{store.passwordPromptError}</span>
-      </div>
-    {/if}
+      {#if store.passwordPromptError}
+        <div role="alert" class="dialog-error">
+          <AlertCircle class="h-4 w-4 shrink-0" />
+          <span>{store.passwordPromptError}</span>
+        </div>
+      {/if}
 
-    <div class="space-y-2 py-2">
-      <Label for="doc-password" class="text-xs font-medium">Document Password</Label>
-      <div class="relative">
-        <Input
-          id="doc-password"
-          type={showPassword ? 'text' : 'password'}
-          placeholder="Enter password..."
-          bind:value={password}
-          onkeydown={handleKeyDown}
-          class="h-9 pr-9 text-xs"
-          disabled={isSubmitting}
-          autofocus
-        />
-        <button
-          type="button"
-          class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors p-1 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          onclick={() => (showPassword = !showPassword)}
-          tabindex={0}
-          aria-label={showPassword ? 'Hide password' : 'Show password'}
-        >
-          {#if showPassword}
-            <EyeOff class="h-3.5 w-3.5" aria-hidden="true" />
-          {:else}
-            <Eye class="h-3.5 w-3.5" aria-hidden="true" />
-          {/if}
-        </button>
+      <div class="field-group">
+        <Label for="doc-password" class="field-label">Document Password</Label>
+        <div class="relative">
+          <Input
+            id="doc-password"
+            type={showPassword ? 'text' : 'password'}
+            aria-invalid={Boolean(store.passwordPromptError)}
+            placeholder="Enter password..."
+            bind:value={password}
+            onkeydown={handleKeyDown}
+            class="field-input pr-8"
+            disabled={isSubmitting}
+            autofocus
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            class="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 text-muted-foreground hover:text-foreground"
+            onclick={() => (showPassword = !showPassword)}
+            aria-label={showPassword ? 'Hide password' : 'Show password'}
+          >
+            {#if showPassword}
+              <EyeOff class="h-3.5 w-3.5" aria-hidden="true" />
+            {:else}
+              <Eye class="h-3.5 w-3.5" aria-hidden="true" />
+            {/if}
+          </Button>
+        </div>
       </div>
     </div>
 
-    <Dialog.Footer class="gap-2 sm:gap-0">
+    <Dialog.Footer>
       <Button
         variant="outline"
         size="sm"
-        class="text-xs"
+        class="h-8 text-xs"
         onclick={() => actions.cancelPasswordPrompt()}
         disabled={isSubmitting}
       >
         Cancel
       </Button>
       <Button
+        variant="secondary"
         size="sm"
-        class="text-xs"
+        class="h-8 text-xs"
         onclick={handleSubmit}
         disabled={!password || isSubmitting}
       >
