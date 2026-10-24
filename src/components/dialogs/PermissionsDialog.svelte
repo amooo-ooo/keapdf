@@ -5,9 +5,10 @@
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
-  import { Button } from '$lib/components/ui/button/index.js';
+  import { Button, ButtonGroup } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Switch } from '$lib/components/ui/switch/index.js';
+  import { ControlRow } from '$lib/components/ui/control-row/index.js';
   import {
     computePermissionBitmask,
     decodePermissionBitmask,
@@ -89,6 +90,46 @@
   const computedBitmask = $derived(computePermissionBitmask(currentFlags));
   const hexMask = $derived(`0x${(computedBitmask >>> 0).toString(16).toUpperCase()}`);
 
+  const activePreset = $derived.by<'read-only' | 'fill-and-sign' | 'unrestricted' | 'custom'>(() => {
+    if (
+      canPrint &&
+      canPrintHighQuality &&
+      canCopy &&
+      canModify &&
+      canAnnotate &&
+      canFillForms &&
+      canExtractAccessibility &&
+      canAssemble
+    ) {
+      return 'unrestricted';
+    }
+    if (
+      canPrint &&
+      canPrintHighQuality &&
+      !canCopy &&
+      !canModify &&
+      !canAnnotate &&
+      !canFillForms &&
+      canExtractAccessibility &&
+      !canAssemble
+    ) {
+      return 'read-only';
+    }
+    if (
+      canPrint &&
+      canPrintHighQuality &&
+      !canCopy &&
+      !canModify &&
+      canAnnotate &&
+      canFillForms &&
+      canExtractAccessibility &&
+      !canAssemble
+    ) {
+      return 'fill-and-sign';
+    }
+    return 'custom';
+  });
+
   function applyPreset(preset: 'read-only' | 'fill-and-sign' | 'unrestricted'): void {
     if (preset === 'read-only') {
       canPrint = true;
@@ -148,173 +189,154 @@
 </script>
 
 <Dialog.Root open={store.showPermissionsDialog} onOpenChange={handleOpenChange}>
-  <Dialog.Content class="sm:max-w-lg font-sans">
-    <Dialog.Header>
-      <div class="flex items-center gap-2 mb-1">
-        <div class="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary">
-          <Key class="h-4 w-4" />
-        </div>
-        <div>
-          <Dialog.Title class="text-base font-semibold">Granular Document Permissions</Dialog.Title>
-          <Dialog.Description class="text-xs text-muted-foreground">
-            Configure ISO 32000-1 access permissions and owner authentication restrictions.
-          </Dialog.Description>
-        </div>
-      </div>
+  <Dialog.Content class="sm:max-w-[500px] font-sans">
+    <Dialog.Header class="pr-12">
+      <Dialog.Title>
+        <Key class="h-4 w-4" />
+        Granular Document Permissions
+      </Dialog.Title>
+      <Dialog.Description>
+        Configure ISO 32000-1 access permissions and owner authentication restrictions.
+      </Dialog.Description>
     </Dialog.Header>
 
-    {#if errorMessage}
-      <div class="flex items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
-        <AlertCircle class="h-4 w-4 shrink-0" />
-        <span>{errorMessage}</span>
-      </div>
-    {/if}
-
-    <!-- Presets and Bitmask Preview -->
-    <div class="flex items-center justify-between border-b pb-3 pt-1">
-      <div class="flex items-center gap-1.5">
-        <span class="text-xs text-muted-foreground mr-1">Presets:</span>
-        <Button
-          variant="outline"
-          size="sm"
-          class="h-7 text-[11px] px-2"
-          onclick={() => applyPreset('read-only')}
-        >
-          Read Only
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          class="h-7 text-[11px] px-2"
-          onclick={() => applyPreset('fill-and-sign')}
-        >
-          Fill & Sign
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          class="h-7 text-[11px] px-2"
-          onclick={() => applyPreset('unrestricted')}
-        >
-          Unrestricted
-        </Button>
-      </div>
-      <Badge variant="secondary" class="font-sans text-[10px]">
-        Mask: {hexMask}
-      </Badge>
-    </div>
-
-    <!-- Permission Scope Switches -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 py-2 max-h-64 overflow-y-auto pr-1">
-      <div class="flex items-center justify-between rounded-lg border p-2.5">
-        <div class="space-y-0.5 pr-2">
-          <Label class="text-xs font-medium cursor-pointer" for="perm-print">Printing</Label>
-          <p class="text-[10px] text-muted-foreground">Allow low-resolution draft printing</p>
+    <div class="dialog-body">
+      {#if errorMessage}
+        <div role="alert" class="dialog-error">
+          <AlertCircle class="h-4 w-4 shrink-0" />
+          <span>{errorMessage}</span>
         </div>
-        <Switch id="perm-print" bind:checked={canPrint} />
-      </div>
+      {/if}
 
-      <div class="flex items-center justify-between rounded-lg border p-2.5">
-        <div class="space-y-0.5 pr-2">
-          <Label class="text-xs font-medium cursor-pointer" for="perm-print-hq">High-Quality Print</Label>
-          <p class="text-[10px] text-muted-foreground">Allow high-resolution document output</p>
+      <!-- note: presets and bitmask preview -->
+      <div class="field-group pb-2 border-b border-border">
+        <div class="flex items-center justify-between">
+          <Label class="field-label">Security Presets</Label>
+          <Badge variant="secondary" class="font-sans text-[10px] h-5">
+            Mask: {hexMask}
+          </Badge>
         </div>
-        <Switch id="perm-print-hq" bind:checked={canPrintHighQuality} disabled={!canPrint} />
+        <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
+          <Button
+            type="button"
+            variant={activePreset === 'read-only' ? 'secondary' : 'outline'}
+            class="flex-1 text-xs"
+            onclick={() => applyPreset('read-only')}
+          >
+            Read Only
+          </Button>
+          <Button
+            type="button"
+            variant={activePreset === 'fill-and-sign' ? 'secondary' : 'outline'}
+            class="flex-1 text-xs"
+            onclick={() => applyPreset('fill-and-sign')}
+          >
+            Fill &amp; Sign
+          </Button>
+          <Button
+            type="button"
+            variant={activePreset === 'unrestricted' ? 'secondary' : 'outline'}
+            class="flex-1 text-xs"
+            onclick={() => applyPreset('unrestricted')}
+          >
+            Unrestricted
+          </Button>
+        </ButtonGroup>
       </div>
 
-      <div class="flex items-center justify-between rounded-lg border p-2.5">
-        <div class="space-y-0.5 pr-2">
-          <Label class="text-xs font-medium cursor-pointer" for="perm-copy">Content Copying</Label>
-          <p class="text-[10px] text-muted-foreground">Allow copying text and graphic assets</p>
+      <!-- note: permission scope switches grouped into logical categories -->
+      <div class="space-y-3">
+        <div class="field-group">
+          <span class="field-label">Printing &amp; Content Access</span>
+          <div class="grid grid-cols-2 gap-2">
+            <ControlRow label="Printing" description="Draft resolution output" variant="card" size="compact">
+              <Switch id="perm-print" bind:checked={canPrint} />
+            </ControlRow>
+
+            <ControlRow label="High-Quality Print" description="Full vector output" variant="card" size="compact">
+              <Switch id="perm-print-hq" bind:checked={canPrintHighQuality} disabled={!canPrint} />
+            </ControlRow>
+
+            <ControlRow label="Content Copying" description="Copy text and graphics" variant="card" size="compact">
+              <Switch id="perm-copy" bind:checked={canCopy} />
+            </ControlRow>
+
+            <ControlRow label="Accessibility" description="Screen reader access" variant="card" size="compact">
+              <Switch id="perm-accessibility" bind:checked={canExtractAccessibility} />
+            </ControlRow>
+          </div>
         </div>
-        <Switch id="perm-copy" bind:checked={canCopy} />
-      </div>
 
-      <div class="flex items-center justify-between rounded-lg border p-2.5">
-        <div class="space-y-0.5 pr-2">
-          <Label class="text-xs font-medium cursor-pointer" for="perm-accessibility">Accessibility</Label>
-          <p class="text-[10px] text-muted-foreground">Allow screen readers text extraction</p>
+        <div class="field-group">
+          <span class="field-label">Modifications &amp; Interactive Forms</span>
+          <div class="grid grid-cols-2 gap-2">
+            <ControlRow label="Annotations" description="Comments and markups" variant="card" size="compact">
+              <Switch id="perm-annotate" bind:checked={canAnnotate} />
+            </ControlRow>
+
+            <ControlRow label="Form Filling" description="Interactive fields" variant="card" size="compact">
+              <Switch id="perm-forms" bind:checked={canFillForms} />
+            </ControlRow>
+
+            <ControlRow label="Page Assembly" description="Insert, rotate, delete" variant="card" size="compact">
+              <Switch id="perm-assemble" bind:checked={canAssemble} />
+            </ControlRow>
+
+            <ControlRow label="Document Editing" description="Modify page content" variant="card" size="compact">
+              <Switch id="perm-modify" bind:checked={canModify} />
+            </ControlRow>
+          </div>
         </div>
-        <Switch id="perm-accessibility" bind:checked={canExtractAccessibility} />
       </div>
 
-      <div class="flex items-center justify-between rounded-lg border p-2.5">
-        <div class="space-y-0.5 pr-2">
-          <Label class="text-xs font-medium cursor-pointer" for="perm-annotate">Annotations</Label>
-          <p class="text-[10px] text-muted-foreground">Allow adding comments and markups</p>
+      <!-- note: owner password configuration -->
+      <div class="field-group border-t border-border pt-2.5">
+        <div class="flex items-center justify-between">
+          <Label for="permissions-owner-pwd" class="field-label">Owner Password *</Label>
+          <span class="text-[10px] text-muted-foreground">Required to enforce permissions per ISO 32000</span>
         </div>
-        <Switch id="perm-annotate" bind:checked={canAnnotate} />
-      </div>
-
-      <div class="flex items-center justify-between rounded-lg border p-2.5">
-        <div class="space-y-0.5 pr-2">
-          <Label class="text-xs font-medium cursor-pointer" for="perm-forms">Form Filling</Label>
-          <p class="text-[10px] text-muted-foreground">Allow interactive form completion</p>
+        <div class="relative">
+          <Input
+            id="permissions-owner-pwd"
+            type={showPassword ? 'text' : 'password'}
+            aria-invalid={Boolean(errorMessage)}
+            placeholder="Set owner password to protect permissions..."
+            bind:value={ownerPassword}
+            class="field-input pr-8"
+            disabled={isSaving}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            class="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 text-muted-foreground hover:text-foreground"
+            onclick={() => (showPassword = !showPassword)}
+            aria-label={showPassword ? 'Hide password' : 'Show password'}
+          >
+            {#if showPassword}
+              <EyeOff class="h-3.5 w-3.5" aria-hidden="true" />
+            {:else}
+              <Eye class="h-3.5 w-3.5" aria-hidden="true" />
+            {/if}
+          </Button>
         </div>
-        <Switch id="perm-forms" bind:checked={canFillForms} />
-      </div>
-
-      <div class="flex items-center justify-between rounded-lg border p-2.5">
-        <div class="space-y-0.5 pr-2">
-          <Label class="text-xs font-medium cursor-pointer" for="perm-assemble">Page Assembly</Label>
-          <p class="text-[10px] text-muted-foreground">Allow page insertion and deletion</p>
-        </div>
-        <Switch id="perm-assemble" bind:checked={canAssemble} />
-      </div>
-
-      <div class="flex items-center justify-between rounded-lg border p-2.5">
-        <div class="space-y-0.5 pr-2">
-          <Label class="text-xs font-medium cursor-pointer" for="perm-modify">Document Editing</Label>
-          <p class="text-[10px] text-muted-foreground">Allow structural page content alterations</p>
-        </div>
-        <Switch id="perm-modify" bind:checked={canModify} />
-      </div>
-    </div>
-
-    <!-- Owner Password Configuration -->
-    <div class="space-y-1.5 border-t pt-3">
-      <div class="flex items-center justify-between">
-        <Label for="permissions-owner-pwd" class="text-xs font-medium">Owner Password *</Label>
-        <span class="text-[10px] text-muted-foreground">Required to enforce permissions per ISO 32000</span>
-      </div>
-      <div class="relative">
-        <Input
-          id="permissions-owner-pwd"
-          type={showPassword ? 'text' : 'password'}
-          placeholder="Set owner password to protect permissions..."
-          bind:value={ownerPassword}
-          class="h-9 pr-9 text-xs"
-          disabled={isSaving}
-        />
-        <button
-          type="button"
-          class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors p-1 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          onclick={() => (showPassword = !showPassword)}
-          tabindex={0}
-          aria-label={showPassword ? 'Hide password' : 'Show password'}
-        >
-          {#if showPassword}
-            <EyeOff class="h-3.5 w-3.5" aria-hidden="true" />
-          {:else}
-            <Eye class="h-3.5 w-3.5" aria-hidden="true" />
-          {/if}
-        </button>
       </div>
     </div>
 
-    <Dialog.Footer class="gap-2 sm:gap-0 pt-2">
+    <Dialog.Footer>
       <Button
         variant="outline"
         size="sm"
-        class="text-xs"
+        class="h-8 text-xs"
         onclick={() => store.closePermissionsDialog()}
         disabled={isSaving}
       >
         Cancel
       </Button>
       <Button
+        variant="secondary"
         size="sm"
-        class="text-xs"
+        class="h-8 text-xs"
         onclick={handleApply}
         disabled={!ownerPassword.trim() || isSaving}
       >
