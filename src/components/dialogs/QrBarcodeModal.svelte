@@ -5,8 +5,11 @@
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
-  import { Button } from '$lib/components/ui/button/index.js';
+  import { Button, ButtonGroup } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
+  import { ControlRow } from '$lib/components/ui/control-row/index.js';
+  import { ColorPicker } from '$lib/components/ui/color-picker/index.js';
   import { QrCode, Barcode, Link2, Plus } from 'lucide-svelte';
   import {
     generateQrCodeSvg,
@@ -99,117 +102,119 @@
 
 {#if store.showQrBarcodeModal}
   <Dialog.Root open={true} onOpenChange={handleOpenChange}>
-    <Dialog.Content class="sm:max-w-[460px]">
-      <Dialog.Header>
-        <Dialog.Title class="flex items-center gap-2 text-base font-semibold">
-          <QrCode class="h-4 w-4 text-primary" />
+    <Dialog.Content class="sm:max-w-[440px]">
+      <Dialog.Header class="pr-12">
+        <Dialog.Title>
+          <QrCode class="h-4 w-4" />
           Add QR Code or Barcode
         </Dialog.Title>
-        <Dialog.Description class="text-xs text-muted-foreground">
+        <Dialog.Description>
           Generate ISO/IEC 18004 2D matrix QR codes or Code 128 barcodes from URLs and text links.
         </Dialog.Description>
       </Dialog.Header>
 
-      <div class="space-y-4 py-2">
-        <!-- Symbology selector pills -->
-        <div class="grid grid-cols-2 gap-2 p-1 bg-muted rounded-lg">
-          <button
-            type="button"
-            class="flex items-center justify-center gap-2 py-1.5 px-3 rounded-md text-xs font-medium transition-all {symbology === 'qr-code' ? 'bg-background shadow-xs text-foreground' : 'text-muted-foreground hover:text-foreground'}"
-            onclick={() => { symbology = 'qr-code'; }}
-          >
-            <QrCode class="h-3.5 w-3.5" />
-            <span>QR Code (2D)</span>
-          </button>
-          <button
-            type="button"
-            class="flex items-center justify-center gap-2 py-1.5 px-3 rounded-md text-xs font-medium transition-all {symbology === 'code-128' ? 'bg-background shadow-xs text-foreground' : 'text-muted-foreground hover:text-foreground'}"
-            onclick={() => { symbology = 'code-128'; }}
-          >
-            <Barcode class="h-3.5 w-3.5" />
-            <span>Barcode (1D)</span>
-          </button>
+      <div class="dialog-body">
+        <!-- note: symbology selector -->
+        <div class="field-group">
+          <Label class="field-label">Symbology Type</Label>
+          <ButtonGroup variant="outline" size="sm" class="w-full h-8">
+            <Button
+              type="button"
+              variant={symbology === 'qr-code' ? 'secondary' : 'outline'}
+              class="flex-1 text-xs gap-1.5"
+              onclick={() => { symbology = 'qr-code'; }}
+            >
+              <QrCode class="h-3.5 w-3.5" />
+              <span>QR Code (2D)</span>
+            </Button>
+            <Button
+              type="button"
+              variant={symbology === 'code-128' ? 'secondary' : 'outline'}
+              class="flex-1 text-xs gap-1.5"
+              onclick={() => { symbology = 'code-128'; }}
+            >
+              <Barcode class="h-3.5 w-3.5" />
+              <span>Barcode (1D)</span>
+            </Button>
+          </ButtonGroup>
         </div>
 
-        <!-- Payload / Link input -->
-        <div class="space-y-1.5">
-          <Label for="barcode-payload" class="text-xs flex items-center justify-between">
-            <span class="flex items-center gap-1.5">
-              <Link2 class="h-3.5 w-3.5 text-primary" />
+        <!-- note: payload / link input -->
+        <div class="field-group">
+          <div class="flex items-center justify-between">
+            <Label for="barcode-payload" class="field-label flex items-center gap-1.5">
+              <Link2 class="h-3.5 w-3.5" />
               Link or Text Payload
-            </span>
+            </Label>
             <span class="text-[10px] text-muted-foreground font-sans">
               {payload.length} chars
             </span>
-          </Label>
+          </div>
           <Input
             id="barcode-payload"
             bind:value={payload}
             placeholder={symbology === 'qr-code' ? 'https://example.com' : 'CODE-12345'}
-            class="h-8 text-xs font-sans"
+            class="field-input"
             autofocus
           />
         </div>
 
-        <!-- Styling options -->
-        <div class="grid grid-cols-2 gap-3">
-          <div class="space-y-1.5">
-            <Label for="barcode-fg" class="text-xs">Foreground Colour</Label>
+        <!-- note: styling options -->
+        <div class="field-grid-2">
+          <div class="field-group">
+            <Label for="barcode-fg" class="field-label">Foreground Colour</Label>
             <div class="flex items-center gap-2">
-              <input
-                id="barcode-fg"
-                type="color"
-                bind:value={fgColor}
-                class="w-8 h-8 rounded border border-input cursor-pointer bg-transparent"
+              <ColorPicker
+                variant="circle"
+                value={fgColor}
+                onValueChange={(val) => (fgColor = val)}
               />
               <Input
+                id="barcode-fg"
                 bind:value={fgColor}
-                class="h-8 text-xs font-sans uppercase"
+                class="field-input flex-1"
               />
             </div>
           </div>
-          <div class="space-y-1.5">
-            <Label for="barcode-bg" class="text-xs">Background Colour</Label>
+          <div class="field-group">
+            <Label for="barcode-bg" class="field-label">Background Colour</Label>
             <div class="flex items-center gap-2">
-              <input
-                id="barcode-bg"
-                type="color"
-                bind:value={bgColor}
-                class="w-8 h-8 rounded border border-input cursor-pointer bg-transparent"
+              <ColorPicker
+                variant="circle"
+                value={bgColor}
+                onValueChange={(val) => (bgColor = val)}
               />
               <Input
+                id="barcode-bg"
                 bind:value={bgColor}
-                class="h-8 text-xs font-sans uppercase"
+                class="field-input flex-1"
               />
             </div>
           </div>
         </div>
 
-        <!-- 1D barcode options -->
+        <!-- note: 1D barcode options -->
         {#if symbology === 'code-128'}
-          <div class="flex items-center justify-between p-2 rounded-md bg-muted/50 border border-border">
-            <Label for="include-text" class="text-xs cursor-pointer">Show Human-readable Text</Label>
-            <input
+          <ControlRow label="Show Human-readable Text" for="include-text" size="sm">
+            <Switch
               id="include-text"
-              type="checkbox"
               bind:checked={includeText}
-              class="rounded border-input text-primary cursor-pointer"
             />
-          </div>
+          </ControlRow>
         {/if}
 
-        <!-- Live Vector Preview Box -->
-        <div class="flex flex-col items-center justify-center p-4 bg-muted/40 rounded-lg border border-border min-h-[160px]">
-          <div class="p-2 bg-white rounded shadow-xs border border-border">
+        <!-- note: live vector preview box -->
+        <div class="dialog-card items-center justify-center min-h-[150px]">
+          <div class="p-2 bg-white rounded-[var(--radius-card-inner)] border border-border">
             {@html previewSvg}
           </div>
-          <span class="text-[10px] text-muted-foreground mt-2">
+          <span class="text-[10px] text-muted-foreground mt-1">
             {symbology === 'qr-code' ? 'ISO/IEC 18004 Matrix' : 'ISO/IEC 15417 Code 128'}
           </span>
         </div>
       </div>
 
-      <Dialog.Footer class="flex items-center justify-between sm:justify-between">
+      <Dialog.Footer class="justify-between">
         <Badge variant="outline" class="text-[10px]">
           ISO/IEC Symbology
         </Badge>
@@ -217,7 +222,7 @@
           <Button variant="outline" size="sm" class="h-8 text-xs" onclick={handleClose}>
             Cancel
           </Button>
-          <Button size="sm" class="h-8 text-xs" onclick={handleAddToDocument}>
+          <Button variant="secondary" size="sm" class="h-8 text-xs" onclick={handleAddToDocument}>
             <Plus class="h-3.5 w-3.5 mr-1" />
             Add to Document
           </Button>
