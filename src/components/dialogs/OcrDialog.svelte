@@ -2,9 +2,11 @@
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
-  import { Button } from '$lib/components/ui/button/index.js';
+  import * as Select from '$lib/components/ui/select/index.js';
+  import { Button, ButtonGroup } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
-  import { Checkbox } from '$lib/components/ui/checkbox/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
+  import { ControlRow } from '$lib/components/ui/control-row/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import {
     ScanText,
@@ -96,32 +98,28 @@
 
 {#if store.showOcrDialog}
   <Dialog.Root open={true} onOpenChange={handleOpenChange}>
-    <Dialog.Content class="sm:max-w-[540px] max-h-[90vh] flex flex-col p-0 gap-0 overflow-hidden font-sans">
+    <Dialog.Content class="sm:max-w-[520px] font-sans">
       <!-- Header -->
-      <Dialog.Header class="p-4 pb-3 border-b bg-card">
-        <div class="flex items-center gap-2.5">
-          <div class="p-2 rounded-md bg-primary/10 text-primary">
-            <ScanText class="h-4 w-4" />
-          </div>
-          <div>
-            <Dialog.Title class="text-sm font-semibold">Recognize Text (OCR)</Dialog.Title>
-            <Dialog.Description class="text-xs text-muted-foreground">
-              Extract selectable and editable text from scanned pages directly in your browser.
-            </Dialog.Description>
-          </div>
-        </div>
+      <Dialog.Header class="pr-12">
+        <Dialog.Title>
+          <ScanText class="h-4 w-4" />
+          Recognize Text (OCR)
+        </Dialog.Title>
+        <Dialog.Description>
+          Extract selectable and editable text from scanned pages directly in your browser.
+        </Dialog.Description>
       </Dialog.Header>
 
       <!-- Main Body -->
-      <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4 text-xs">
+      <div class="dialog-body">
         <!-- Detection Summary Banner -->
-        <div class="rounded-lg border bg-muted/30 p-3 flex flex-col gap-2">
+        <div class="dialog-card">
           <div class="flex items-center justify-between">
             <span class="font-medium text-foreground flex items-center gap-1.5">
-              <Sparkles class="h-3.5 w-3.5 text-primary" />
+              <Sparkles class="h-3.5 w-3.5" />
               Document Scan Detection
             </span>
-            <Badge variant="outline" class="text-[11px] font-sans tabular-nums">
+            <Badge variant="outline" class="text-[11px] font-sans">
               {scannedCount} / {store.pageCount} scanned
             </Badge>
           </div>
@@ -135,107 +133,109 @@
         </div>
 
         <!-- Scope Selection -->
-        <div class="flex flex-col gap-1.5">
-          <Label class="text-xs font-semibold text-foreground">Target Scope</Label>
-          <div class="grid grid-cols-3 gap-2">
-            <button
+        <div class="field-group">
+          <Label class="field-label">Target Scope</Label>
+          <ButtonGroup variant="outline" size="sm" class="w-full h-8">
+            <Button
               type="button"
-              class="flex flex-col items-center justify-center p-2.5 rounded-lg border text-center transition-all cursor-pointer {selectedScope === 'current' ? 'border-primary bg-primary/5 text-primary font-medium shadow-xs' : 'border-border bg-card hover:bg-muted/40 text-muted-foreground'}"
+              variant={selectedScope === 'current' ? 'secondary' : 'outline'}
+              class="flex-1 text-xs gap-1.5"
               onclick={() => (selectedScope = 'current')}
               disabled={store.isOcrRunning}
             >
-              <FileText class="h-4 w-4 mb-1" />
-              <span class="text-xs">Current Page</span>
-              <span class="text-[10px] opacity-75">Page {store.currentPageIndex + 1}</span>
-            </button>
+              <FileText class="h-3.5 w-3.5" />
+              Current ({store.currentPageIndex + 1})
+            </Button>
 
-            <button
+            <Button
               type="button"
-              class="flex flex-col items-center justify-center p-2.5 rounded-lg border text-center transition-all cursor-pointer {selectedScope === 'scanned' ? 'border-primary bg-primary/5 text-primary font-medium shadow-xs' : 'border-border bg-card hover:bg-muted/40 text-muted-foreground'}"
+              variant={selectedScope === 'scanned' ? 'secondary' : 'outline'}
+              class="flex-1 text-xs gap-1.5"
               onclick={() => (selectedScope = 'scanned')}
               disabled={store.isOcrRunning || scannedCount === 0}
             >
-              <ScanText class="h-4 w-4 mb-1" />
-              <span class="text-xs">Scanned Only</span>
-              <span class="text-[10px] opacity-75">{scannedCount} page(s)</span>
-            </button>
+              <ScanText class="h-3.5 w-3.5" />
+              Scanned ({scannedCount})
+            </Button>
 
-            <button
+            <Button
               type="button"
-              class="flex flex-col items-center justify-center p-2.5 rounded-lg border text-center transition-all cursor-pointer {selectedScope === 'all' ? 'border-primary bg-primary/5 text-primary font-medium shadow-xs' : 'border-border bg-card hover:bg-muted/40 text-muted-foreground'}"
+              variant={selectedScope === 'all' ? 'secondary' : 'outline'}
+              class="flex-1 text-xs gap-1.5"
               onclick={() => (selectedScope = 'all')}
               disabled={store.isOcrRunning}
             >
-              <Layers class="h-4 w-4 mb-1" />
-              <span class="text-xs">Entire Document</span>
-              <span class="text-[10px] opacity-75">{store.pageCount} page(s)</span>
-            </button>
-          </div>
+              <Layers class="h-3.5 w-3.5" />
+              All Pages ({store.pageCount})
+            </Button>
+          </ButtonGroup>
         </div>
 
         <!-- Language Selection -->
-        <div class="flex flex-col gap-1.5">
-          <Label class="text-xs font-semibold text-foreground flex items-center gap-1.5">
+        <div class="field-group">
+          <Label class="field-label flex items-center gap-1.5">
             <Globe class="h-3.5 w-3.5 text-muted-foreground" />
             Document Language
           </Label>
-          <select
-            bind:value={selectedLanguage}
+          <Select.Root
+            type="single"
+            value={selectedLanguage}
+            onValueChange={(v) => { if (v) selectedLanguage = v; }}
             disabled={store.isOcrRunning}
-            class="w-full h-8 px-2.5 text-xs bg-card border border-input rounded-md focus:outline-hidden focus:ring-1 focus:ring-ring text-foreground"
           >
-            {#each LANGUAGES as lang}
-              <option value={lang.code}>{lang.name}</option>
-            {/each}
-          </select>
+            <Select.Trigger class="w-full h-8 text-xs font-sans">
+              {LANGUAGES.find((l) => l.code === selectedLanguage)?.name ?? selectedLanguage}
+            </Select.Trigger>
+            <Select.Content>
+              {#each LANGUAGES as lang}
+                <Select.Item value={lang.code} label={lang.name}>{lang.name}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
         </div>
 
-        <!-- Options Checkbox -->
-        <div class="flex flex-col gap-2 pt-1 border-t">
-          <label class="flex items-start gap-2 cursor-pointer select-none">
-            <Checkbox
-              checked={autoEmbedLayer}
-              onCheckedChange={(v) => (autoEmbedLayer = Boolean(v))}
-              disabled={store.isOcrRunning}
-              class="mt-0.5"
-            />
-            <div class="flex flex-col">
-              <span class="text-xs font-medium text-foreground">Embed Searchable Text Layer</span>
-              <span class="text-[11px] text-muted-foreground">
-                Synthesizes invisible ISO 32000 text objects into the PDF stream, preserving original scans while allowing selection in standard PDF viewers.
-              </span>
-            </div>
-          </label>
-        </div>
+        <!-- Options Toggle -->
+        <ControlRow
+          label="Embed Searchable Text Layer"
+          description="Synthesizes invisible ISO 32000 text objects into the PDF stream, preserving original scans while allowing selection in standard PDF viewers."
+          for="ocr-auto-embed"
+          size="sm"
+        >
+          <Switch
+            id="ocr-auto-embed"
+            bind:checked={autoEmbedLayer}
+            disabled={store.isOcrRunning}
+          />
+        </ControlRow>
 
         <!-- Live Progress Status -->
         {#if store.isOcrRunning && store.ocrProgress}
-          <div class="rounded-lg border bg-primary/5 p-3 flex flex-col gap-2">
+          <div class="dialog-card">
             <div class="flex items-center justify-between text-xs">
-              <span class="font-medium text-primary flex items-center gap-1.5">
-                <Loader2 class="h-3.5 w-3.5 animate-spin" />
+              <span class="font-medium text-foreground flex items-center gap-1.5">
+                <Loader2 class="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                 {store.ocrProgress.status || 'Recognizing glyphs...'}
               </span>
-              <span class="font-sans tabular-nums text-[11px] text-primary">
+              <span class="font-sans text-[11px] text-muted-foreground">
                 {Math.round(store.ocrProgress.progress * 100)}%
               </span>
             </div>
-            <div class="w-full h-1.5 bg-primary/20 rounded-full overflow-hidden">
+            <div class="w-full h-1.5 bg-muted rounded-full overflow-hidden">
               <div
-                class="h-full bg-primary transition-all duration-200 ease-out rounded-full"
+                class="h-full bg-foreground transition-[width] duration-200 ease-out rounded-full"
                 style="width: {Math.max(5, Math.round(store.ocrProgress.progress * 100))}%"
               ></div>
             </div>
           </div>
         {:else if statusMessage}
-          <div class="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-2.5 flex items-center gap-2 text-xs text-emerald-600 dark:text-emerald-400">
-            <CheckCircle2 class="h-4 w-4 shrink-0" />
+          <div role="status" class="rounded-[var(--radius-card-inner)] border border-border bg-card p-2.5 flex items-center gap-2 text-xs text-foreground">
+            <CheckCircle2 class="h-4 w-4 shrink-0 text-foreground" />
             <span>{statusMessage}</span>
           </div>
         {/if}
 
         {#if errorMessage}
-          <div class="rounded-lg border border-destructive/30 bg-destructive/10 p-2.5 flex items-center gap-2 text-xs text-destructive">
+          <div role="alert" class="dialog-error">
             <AlertCircle class="h-4 w-4 shrink-0" />
             <span>{errorMessage}</span>
           </div>
@@ -243,13 +243,13 @@
       </div>
 
       <!-- Footer -->
-      <Dialog.Footer class="p-3 px-4 border-t bg-card flex items-center justify-between gap-2">
+      <Dialog.Footer class="justify-between">
         <span class="text-[11px] text-muted-foreground">
           Targets {targetPages.length} page(s)
         </span>
         <div class="flex items-center gap-2">
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
             class="h-8 text-xs"
             onclick={() => actions.closeOcrDialog()}
@@ -258,7 +258,7 @@
             Cancel
           </Button>
           <Button
-            variant="default"
+            variant="secondary"
             size="sm"
             class="h-8 text-xs font-medium gap-1.5"
             onclick={handleStartOcr}
