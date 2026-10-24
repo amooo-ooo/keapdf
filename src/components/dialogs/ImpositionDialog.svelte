@@ -808,346 +808,383 @@
                 </Button>
                 <Button
                   type="button"
-                  class="p-2.5 text-xs rounded-md border text-center transition-colors {singleLayout === 'horizontal-strip' ? 'bg-primary text-primary-foreground border-primary font-medium' : 'bg-muted/30 border-border hover:bg-muted text-muted-foreground hover:text-foreground'}"
+                  variant={singleLayout === 'horizontal-strip' ? 'default' : 'outline'}
+                  class="flex-1 text-xs"
                   onclick={() => { singleLayout = 'horizontal-strip'; }}
                 >
-                  Horizontal Strip (Panorama)
-                </button>
-                <button
+                  Horizontal Strip
+                </Button>
+                <Button
                   type="button"
-                  class="p-2.5 text-xs rounded-md border text-center transition-colors {singleLayout === 'grid' ? 'bg-primary text-primary-foreground border-primary font-medium' : 'bg-muted/30 border-border hover:bg-muted text-muted-foreground hover:text-foreground'}"
+                  variant={singleLayout === 'grid' ? 'default' : 'outline'}
+                  class="flex-1 text-xs"
                   onclick={() => { singleLayout = 'grid'; }}
                 >
-                  Single Giant Canvas Grid
-                </button>
-              </div>
+                  Canvas Grid
+                </Button>
+              </ButtonGroup>
             </div>
 
             {#if singleLayout === 'grid'}
-              <div class="grid gap-1.5">
-                <Label class="text-xs">Grid Columns</Label>
-                <Input type="number" min="1" max="10" bind:value={singleGridCols} class="h-8 text-xs max-w-[140px]" />
+              <div class="field-group">
+                <Label class="field-label">Grid Columns</Label>
+                <Input type="number" min="1" max="10" bind:value={singleGridCols} class="field-input max-w-[140px]" />
               </div>
             {/if}
 
-            <div class="grid grid-cols-2 gap-3">
-              <div class="grid gap-1.5">
-                <div class="flex justify-between text-xs">
-                  <Label class="text-xs">Inter-Page Spacing</Label>
-                  <span class="text-muted-foreground">{singleSpacingPts} pt</span>
-                </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div class="field-group">
+                <Label class="field-label">Inter-Page Spacing</Label>
                 <Slider
                   type="single"
                   min={0}
                   max={60}
                   step={1}
+                  unit=" pt"
                   value={singleSpacingPts}
                   onValueChange={(val: number) => { singleSpacingPts = val; }}
-                  class="w-full mt-1.5"
+                  class="w-full"
                 />
               </div>
 
-              <div class="grid gap-1.5">
-                <div class="flex justify-between text-xs">
-                  <Label class="text-xs">Outer Margin</Label>
-                  <span class="text-muted-foreground">{singleMarginPts} pt</span>
-                </div>
+              <div class="field-group">
+                <Label class="field-label">Outer Margin</Label>
                 <Slider
                   type="single"
                   min={0}
                   max={60}
                   step={1}
+                  unit=" pt"
                   value={singleMarginPts}
                   onValueChange={(val: number) => { singleMarginPts = val; }}
-                  class="w-full mt-1.5"
+                  class="w-full"
                 />
               </div>
             </div>
 
-            <div class="grid grid-cols-2 gap-3">
-              <div class="grid gap-1.5">
-                <Label class="text-xs">Background Color</Label>
+            <div class="grid grid-cols-2 gap-2">
+              <div class="field-group">
+                <Label class="field-label">Background Colour</Label>
                 <div class="flex items-center gap-2">
                   <ColorPicker
                     value={singleBgColor}
                     onValueChange={(val) => { singleBgColor = val; }}
-                    label="Background Color"
+                    label="Background Colour"
                   />
-                  <Input type="text" bind:value={singleBgColor} class="h-8 text-xs font-sans" />
+                  <Input type="text" bind:value={singleBgColor} class="field-input" />
                 </div>
               </div>
 
-              <div class="grid gap-1.5">
-                <Label class="text-xs">Page Range</Label>
+              <div class="field-group">
+                <Label class="field-label">Page Range</Label>
                 <Input
                   type="text"
                   placeholder="All pages (e.g. 1-10)"
                   bind:value={singlePageRange}
-                  class="h-8 text-xs"
+                  class="field-input"
                 />
               </div>
             </div>
 
             <div class="pt-1">
-              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <Checkbox bind:checked={singleDrawBorders} />
-                <span>Draw Page Borders</span>
-              </label>
+              <ControlRow label="Draw Page Borders" variant="card" size="compact">
+                <Switch bind:checked={singleDrawBorders} aria-label="Draw Page Borders" />
+              </ControlRow>
             </div>
           </div>
 
-        <!-- POSTERIZE / TILE CONTROLS -->
+        <!-- note: posterise and tile controls -->
         {:else if activeMode === 'posterize'}
-          <div class="flex flex-col gap-3.5">
-            <div class="grid grid-cols-2 gap-3">
-              <div class="grid gap-1.5">
-                <Label class="text-xs">Target Sheet Size</Label>
-                <select
-                  bind:value={posterSheetSize}
-                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+          <div class="flex flex-col gap-3">
+            <div class="grid grid-cols-2 gap-2">
+              <div class="field-group">
+                <Label class="field-label">Target Sheet Size</Label>
+                <Select.Root
+                  type="single"
+                  value={posterSheetSize}
+                  onValueChange={(val) => { if (val) posterSheetSize = val as StandardSheetSize; }}
                 >
-                  <option value="A4">A4 Sheet</option>
-                  <option value="Letter">US Letter Sheet</option>
-                  <option value="A3">A3 Sheet</option>
-                </select>
+                  <Select.Trigger class="h-8 text-xs font-sans w-full">
+                    {posterSheetSize === 'A4' ? 'A4 Sheet' : posterSheetSize === 'Letter' ? 'US Letter Sheet' : 'A3 Sheet'}
+                  </Select.Trigger>
+                  <Select.Content>
+                    <Select.Item value="A4" label="A4 Sheet">A4 Sheet</Select.Item>
+                    <Select.Item value="Letter" label="US Letter Sheet">US Letter Sheet</Select.Item>
+                    <Select.Item value="A3" label="A3 Sheet">A3 Sheet</Select.Item>
+                  </Select.Content>
+                </Select.Root>
               </div>
 
-              <div class="grid gap-1.5">
-                <Label class="text-xs">Sheet Orientation</Label>
-                <select
-                  bind:value={posterOrientation}
-                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                >
-                  <option value="portrait">Portrait</option>
-                  <option value="landscape">Landscape</option>
-                </select>
+              <div class="field-group">
+                <Label class="field-label">Sheet Orientation</Label>
+                <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
+                  <Button
+                    type="button"
+                    variant={posterOrientation === 'portrait' ? 'default' : 'outline'}
+                    class="flex-1 text-xs"
+                    onclick={() => { posterOrientation = 'portrait'; }}
+                  >
+                    Portrait
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={posterOrientation === 'landscape' ? 'default' : 'outline'}
+                    class="flex-1 text-xs"
+                    onclick={() => { posterOrientation = 'landscape'; }}
+                  >
+                    Landscape
+                  </Button>
+                </ButtonGroup>
               </div>
             </div>
 
-            <div class="grid gap-1.5">
-              <Label class="text-xs font-medium">Tiling Method</Label>
-              <div class="grid grid-cols-2 gap-2">
-                <button
+            <div class="field-group">
+              <Label class="field-label">Tiling Method</Label>
+              <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
+                <Button
                   type="button"
-                  class="p-2 text-xs rounded border text-center transition-colors {posterModeType === 'scale' ? 'bg-primary text-primary-foreground border-primary font-medium' : 'bg-muted/30 border-border text-muted-foreground'}"
+                  variant={posterModeType === 'scale' ? 'default' : 'outline'}
+                  class="flex-1 text-xs"
                   onclick={() => { posterModeType = 'scale'; }}
                 >
                   Scale Poster ({posterScalePercent}%)
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
-                  class="p-2 text-xs rounded border text-center transition-colors {posterModeType === 'grid' ? 'bg-primary text-primary-foreground border-primary font-medium' : 'bg-muted/30 border-border text-muted-foreground'}"
+                  variant={posterModeType === 'grid' ? 'default' : 'outline'}
+                  class="flex-1 text-xs"
                   onclick={() => { posterModeType = 'grid'; }}
                 >
                   Fixed Sheet Grid ({posterGridCols}x{posterGridRows})
-                </button>
-              </div>
+                </Button>
+              </ButtonGroup>
             </div>
 
             {#if posterModeType === 'scale'}
-              <div class="grid gap-1.5">
-                <div class="flex justify-between text-xs">
-                  <Label class="text-xs">Poster Scaling Factor</Label>
-                  <span class="font-medium text-foreground">{posterScalePercent}%</span>
-                </div>
+              <div class="field-group">
+                <Label class="field-label">Poster Scaling Factor</Label>
                 <Slider
                   type="single"
                   min={120}
                   max={600}
                   step={20}
+                  unit="%"
                   value={posterScalePercent}
                   onValueChange={(val: number) => { posterScalePercent = val; }}
-                  class="w-full mt-1.5"
+                  class="w-full"
                 />
               </div>
             {:else}
-              <div class="grid grid-cols-2 gap-3 p-2.5 rounded-md bg-muted/30 border border-border">
-                <div class="grid gap-1">
-                  <Label class="text-[11px]">Sheet Columns</Label>
-                  <Input type="number" min="1" max="10" bind:value={posterGridCols} class="h-7 text-xs" />
+              <div class="grid grid-cols-2 gap-2 dialog-card">
+                <div class="field-group">
+                  <Label class="field-label">Sheet Columns</Label>
+                  <Input type="number" min="1" max="10" prefix="C" bind:value={posterGridCols} class="field-input" />
                 </div>
-                <div class="grid gap-1">
-                  <Label class="text-[11px]">Sheet Rows</Label>
-                  <Input type="number" min="1" max="10" bind:value={posterGridRows} class="h-7 text-xs" />
+                <div class="field-group">
+                  <Label class="field-label">Sheet Rows</Label>
+                  <Input type="number" min="1" max="10" prefix="R" bind:value={posterGridRows} class="field-input" />
                 </div>
               </div>
             {/if}
 
-            <div class="grid grid-cols-2 gap-3">
-              <div class="grid gap-1.5">
-                <div class="flex justify-between text-xs">
-                  <Label class="text-xs">Overlap Margin (for taping)</Label>
-                  <span class="text-muted-foreground">{posterOverlapPts} pt</span>
-                </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div class="field-group">
+                <Label class="field-label">Overlap Margin</Label>
                 <Slider
                   type="single"
                   min={0}
                   max={50}
                   step={1}
+                  unit=" pt"
                   value={posterOverlapPts}
                   onValueChange={(val: number) => { posterOverlapPts = val; }}
-                  class="w-full mt-1.5"
+                  class="w-full"
                 />
               </div>
 
-              <div class="grid gap-1.5">
-                <div class="flex justify-between text-xs">
-                  <Label class="text-xs">Sheet Margin</Label>
-                  <span class="text-muted-foreground">{posterMarginPts} pt</span>
-                </div>
+              <div class="field-group">
+                <Label class="field-label">Sheet Margin</Label>
                 <Slider
                   type="single"
                   min={0}
                   max={50}
                   step={1}
+                  unit=" pt"
                   value={posterMarginPts}
                   onValueChange={(val: number) => { posterMarginPts = val; }}
-                  class="w-full mt-1.5"
+                  class="w-full"
                 />
               </div>
             </div>
 
-            <div class="flex flex-wrap gap-4 pt-1">
-              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <Checkbox bind:checked={posterDrawCutGuides} />
-                <span>Draw Alignment & Cut Marks</span>
-              </label>
+            <div class="grid grid-cols-2 gap-1.5 pt-1">
+              <ControlRow label="Alignment & Cut Marks" variant="card" size="compact">
+                <Switch bind:checked={posterDrawCutGuides} aria-label="Draw Alignment and Cut Marks" />
+              </ControlRow>
 
-              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <Checkbox bind:checked={posterDrawLabels} />
-                <span>Print Tile Sheet Coordinates</span>
-              </label>
+              <ControlRow label="Tile Sheet Coordinates" variant="card" size="compact">
+                <Switch bind:checked={posterDrawLabels} aria-label="Print Tile Sheet Coordinates" />
+              </ControlRow>
             </div>
           </div>
 
-        <!-- CUT & STACK CONTROLS -->
+        <!-- note: cut and stack controls -->
         {:else if activeMode === 'cut-stack'}
-          <div class="flex flex-col gap-3.5">
-            <div class="p-3 rounded-lg bg-primary/5 border border-primary/15 text-xs text-muted-foreground">
+          <div class="flex flex-col gap-3">
+            <div class="dialog-card text-xs text-muted-foreground">
               <p class="font-medium text-foreground">Cut-and-Stack Imposition</p>
-              Arranges pages in stacked blocks across sheets so that when printed and chopped straight through the middle with a guillotine, the physical stacks naturally assemble in sequential order without hand sorting.
+              Arranges pages in stacked blocks across sheets so guillotine-cut stacks assemble in sequential order.
             </div>
 
-            <div class="grid grid-cols-2 gap-3">
-              <div class="grid gap-1.5">
-                <Label class="text-xs">Stack Layout</Label>
-                <select
-                  bind:value={cutStackPreset}
-                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                >
-                  <option value="2x1">2-Up Cut & Stack (Left/Right Stacks)</option>
-                  <option value="2x2">4-Up Cut & Stack (4 Quadrant Stacks)</option>
-                </select>
+            <div class="grid grid-cols-2 gap-2">
+              <div class="field-group">
+                <Label class="field-label">Stack Layout</Label>
+                <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
+                  <Button
+                    type="button"
+                    variant={cutStackPreset === '2x1' ? 'default' : 'outline'}
+                    class="flex-1 text-xs"
+                    onclick={() => { cutStackPreset = '2x1'; }}
+                  >
+                    2-Up (2x1)
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={cutStackPreset === '2x2' ? 'default' : 'outline'}
+                    class="flex-1 text-xs"
+                    onclick={() => { cutStackPreset = '2x2'; }}
+                  >
+                    4-Up (2x2)
+                  </Button>
+                </ButtonGroup>
               </div>
 
-              <div class="grid gap-1.5">
-                <Label class="text-xs">Sheet Size</Label>
-                <select
-                  bind:value={cutStackSheetSize}
-                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+              <div class="field-group">
+                <Label class="field-label">Sheet Size</Label>
+                <Select.Root
+                  type="single"
+                  value={cutStackSheetSize}
+                  onValueChange={(val) => { if (val) cutStackSheetSize = val as StandardSheetSize; }}
                 >
-                  <option value="A4">A4 Sheet</option>
-                  <option value="Letter">US Letter</option>
-                  <option value="A3">A3 Sheet</option>
-                  <option value="source">Match Source Page Size</option>
-                </select>
+                  <Select.Trigger class="h-8 text-xs font-sans w-full">
+                    {cutStackSheetSize === 'A4' ? 'A4 Sheet' : cutStackSheetSize === 'Letter' ? 'US Letter' : cutStackSheetSize === 'A3' ? 'A3 Sheet' : 'Match Source Page Size'}
+                  </Select.Trigger>
+                  <Select.Content>
+                    <Select.Item value="A4" label="A4 Sheet">A4 Sheet</Select.Item>
+                    <Select.Item value="Letter" label="US Letter">US Letter</Select.Item>
+                    <Select.Item value="A3" label="A3 Sheet">A3 Sheet</Select.Item>
+                    <Select.Item value="source" label="Match Source Page Size">Match Source Page Size</Select.Item>
+                  </Select.Content>
+                </Select.Root>
               </div>
             </div>
 
-            <div class="grid grid-cols-2 gap-3">
-              <div class="grid gap-1.5">
-                <Label class="text-xs">Orientation</Label>
-                <select
-                  bind:value={cutStackOrientation}
-                  class="flex h-8 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                >
-                  <option value="auto">Auto (Best Fit)</option>
-                  <option value="portrait">Portrait</option>
-                  <option value="landscape">Landscape</option>
-                </select>
+            <div class="grid grid-cols-2 gap-2">
+              <div class="field-group">
+                <Label class="field-label">Orientation</Label>
+                <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
+                  <Button
+                    type="button"
+                    variant={cutStackOrientation === 'auto' ? 'default' : 'outline'}
+                    class="flex-1 text-[11px] px-1.5"
+                    onclick={() => { cutStackOrientation = 'auto'; }}
+                  >
+                    Auto
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={cutStackOrientation === 'portrait' ? 'default' : 'outline'}
+                    class="flex-1 text-[11px] px-1.5"
+                    onclick={() => { cutStackOrientation = 'portrait'; }}
+                  >
+                    Portrait
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={cutStackOrientation === 'landscape' ? 'default' : 'outline'}
+                    class="flex-1 text-[11px] px-1.5"
+                    onclick={() => { cutStackOrientation = 'landscape'; }}
+                  >
+                    Landscape
+                  </Button>
+                </ButtonGroup>
               </div>
 
-              <div class="grid gap-1.5">
-                <Label class="text-xs">Page Range</Label>
+              <div class="field-group">
+                <Label class="field-label">Page Range</Label>
                 <Input
                   type="text"
                   placeholder="All pages"
                   bind:value={cutStackPageRange}
-                  class="h-8 text-xs"
+                  class="field-input"
                 />
               </div>
             </div>
 
-            <div class="grid grid-cols-2 gap-3">
-              <div class="grid gap-1.5">
-                <div class="flex justify-between text-xs">
-                  <Label class="text-xs">Outer Margin</Label>
-                  <span class="text-muted-foreground">{cutStackMarginPts} pt</span>
-                </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div class="field-group">
+                <Label class="field-label">Outer Margin</Label>
                 <Slider
                   type="single"
                   min={0}
                   max={50}
                   step={1}
+                  unit=" pt"
                   value={cutStackMarginPts}
                   onValueChange={(val: number) => { cutStackMarginPts = val; }}
-                  class="w-full mt-1.5"
+                  class="w-full"
                 />
               </div>
 
-              <div class="grid gap-1.5">
-                <div class="flex justify-between text-xs">
-                  <Label class="text-xs">Stack Gutter</Label>
-                  <span class="text-muted-foreground">{cutStackGutterPts} pt</span>
-                </div>
+              <div class="field-group">
+                <Label class="field-label">Stack Gutter</Label>
                 <Slider
                   type="single"
                   min={0}
                   max={40}
                   step={1}
+                  unit=" pt"
                   value={cutStackGutterPts}
                   onValueChange={(val: number) => { cutStackGutterPts = val; }}
-                  class="w-full mt-1.5"
+                  class="w-full"
                 />
               </div>
             </div>
 
-            <div class="flex flex-wrap gap-4 pt-1">
-              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <Checkbox bind:checked={cutStackDrawCutMarks} />
-                <span>Draw Chop Cut Lines</span>
-              </label>
+            <div class="grid grid-cols-2 gap-1.5 pt-1">
+              <ControlRow label="Draw Chop Cut Lines" variant="card" size="compact">
+                <Switch bind:checked={cutStackDrawCutMarks} aria-label="Draw Chop Cut Lines" />
+              </ControlRow>
 
-              <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <Checkbox bind:checked={cutStackDrawBorders} />
-                <span>Draw Page Borders</span>
-              </label>
+              <ControlRow label="Draw Page Borders" variant="card" size="compact">
+                <Switch bind:checked={cutStackDrawBorders} aria-label="Draw Page Borders" />
+              </ControlRow>
             </div>
           </div>
         {/if}
       </div>
 
-      <!-- Right Column: Interactive Live Sheet Layout Preview -->
-      <div class="md:col-span-5 p-6 bg-muted/10 flex flex-col justify-between items-center gap-4 overflow-y-auto">
+      <!-- note: right column: interactive live sheet layout preview -->
+      <div class="md:col-span-5 p-4 bg-muted/10 flex flex-col justify-between items-center gap-4 overflow-y-auto">
         <div class="w-full flex items-center justify-between">
-          <span class="text-xs font-semibold text-foreground uppercase tracking-wider">Sheet Layout Preview</span>
+          <span class="text-xs font-semibold text-foreground">Sheet Layout Preview</span>
           <span class="text-[11px] text-muted-foreground font-sans">
             Sheet {previewSheetIndex + 1} of {totalOutputSheets}
           </span>
         </div>
 
-        <!-- SVG Preview Schematic Canvas -->
-        <div class="w-full aspect-[4/3] max-w-[280px] bg-background border border-border/80 rounded-lg shadow-inner flex items-center justify-center p-3 relative overflow-hidden">
+        <!-- note: svg preview schematic canvas -->
+        <div class="w-full aspect-[4/3] max-w-[280px] bg-background border border-border/80 rounded-[var(--radius-card)] flex items-center justify-center p-3 relative overflow-hidden">
           {#if previewData}
             {#if previewData.type === 'grid'}
               <div
-                class="w-full h-full border border-dashed border-border/70 rounded grid gap-1 p-1.5 bg-muted/20"
+                class="w-full h-full border border-dashed border-border/70 rounded grid gap-1 p-1.5 bg-card"
                 style="grid-template-columns: repeat({previewData.cols}, 1fr); grid-template-rows: repeat({previewData.rows}, 1fr);"
               >
                 {#each previewData.cells as cell}
-                  <div class="border border-border/80 rounded bg-background flex flex-col items-center justify-center shadow-2xs relative group">
+                  <div class="border border-border/80 rounded bg-background flex flex-col items-center justify-center relative group">
                     {#if cell.pageNumber}
-                      <span class="text-xs font-semibold text-primary">p.{cell.pageNumber}</span>
+                      <span class="text-xs font-semibold text-foreground">p.{cell.pageNumber}</span>
                       <span class="text-[9px] text-muted-foreground">Source</span>
                     {:else}
                       <span class="text-[10px] text-muted-foreground/50 italic">Blank</span>
@@ -1157,15 +1194,15 @@
               </div>
 
             {:else if previewData.type === 'booklet'}
-              <div class="w-full h-full border border-border/80 rounded flex relative bg-muted/20">
-                <!-- Spine center line -->
+              <div class="w-full h-full border border-border/80 rounded flex relative bg-card">
+                <!-- note: spine centre line -->
                 <div class="absolute inset-y-0 left-1/2 w-0 border-l border-dashed border-destructive/60 z-10"></div>
 
-                <!-- Left Slot -->
+                <!-- note: left slot -->
                 <div class="w-1/2 h-full p-1.5 border-r border-border flex flex-col items-center justify-center bg-background">
                   {#if previewData.leftPage !== null}
                     {#if previewData.leftPage > 0}
-                      <span class="text-xs font-semibold text-primary">p.{previewData.leftPage}</span>
+                      <span class="text-xs font-semibold text-foreground">p.{previewData.leftPage}</span>
                       <span class="text-[9px] text-muted-foreground">Left Page</span>
                     {:else}
                       <span class="text-[10px] text-muted-foreground/60 italic">Blank</span>
@@ -1175,11 +1212,11 @@
                   {/if}
                 </div>
 
-                <!-- Right Slot -->
+                <!-- note: right slot -->
                 <div class="w-1/2 h-full p-1.5 flex flex-col items-center justify-center bg-background">
                   {#if previewData.rightPage !== null}
                     {#if previewData.rightPage > 0}
-                      <span class="text-xs font-semibold text-primary">p.{previewData.rightPage}</span>
+                      <span class="text-xs font-semibold text-foreground">p.{previewData.rightPage}</span>
                       <span class="text-[9px] text-muted-foreground">Right Page</span>
                     {:else}
                       <span class="text-[10px] text-muted-foreground/60 italic">Blank</span>
@@ -1191,18 +1228,18 @@
               </div>
 
             {:else if previewData.type === 'single'}
-              <div class="w-full h-full border border-border/80 rounded flex flex-col items-center justify-center p-2 bg-muted/20">
-                <div class="w-full max-w-[120px] py-3 bg-background border border-border rounded flex flex-col items-center gap-1 shadow-2xs">
-                  <Layers class="h-5 w-5 text-primary" />
+              <div class="w-full h-full border border-border/80 rounded flex flex-col items-center justify-center p-2 bg-card">
+                <div class="w-full max-w-[120px] py-3 bg-background border border-border rounded flex flex-col items-center gap-1">
+                  <Layers class="h-5 w-5 text-foreground" />
                   <span class="text-[11px] font-semibold text-foreground">{previewData.pageCount} Pages</span>
-                  <span class="text-[9px] text-muted-foreground capitalize">{previewData.layout.replace('-', ' ')}</span>
+                  <span class="text-[9px] text-muted-foreground">{previewData.layout.replace('-', ' ')}</span>
                 </div>
               </div>
 
             {:else if previewData.type === 'poster'}
-              <div class="w-full h-full border border-border/80 rounded flex flex-col items-center justify-center p-2 bg-muted/20 relative">
-                <div class="w-3/4 h-3/4 bg-background border-2 border-primary/60 border-dashed rounded flex flex-col items-center justify-center shadow-sm">
-                  <span class="text-xs font-semibold text-primary">Tile {previewData.sheetNum}</span>
+              <div class="w-full h-full border border-border/80 rounded flex flex-col items-center justify-center p-2 bg-card relative">
+                <div class="w-3/4 h-3/4 bg-background border border-border border-dashed rounded flex flex-col items-center justify-center">
+                  <span class="text-xs font-semibold text-foreground">Tile {previewData.sheetNum}</span>
                   <span class="text-[10px] text-muted-foreground">Row {previewData.currentRow}, Col {previewData.currentCol}</span>
                 </div>
               </div>
@@ -1210,16 +1247,16 @@
           {/if}
         </div>
 
-        <!-- Sheet Pagination controls -->
+        <!-- note: sheet pagination controls -->
         <div class="w-full flex items-center justify-between">
           <Button
             variant="outline"
             size="sm"
-            class="h-7 px-2 text-xs"
+            class="h-8 px-2.5 text-xs"
             disabled={previewSheetIndex <= 0}
             onclick={() => { previewSheetIndex = Math.max(0, previewSheetIndex - 1); }}
           >
-            <ChevronLeft class="h-3.5 w-3.5 mr-0.5" /> Prev
+            <ChevronLeft class="h-3.5 w-3.5 mr-0.5" /> Previous
           </Button>
 
           <span class="text-[11px] text-muted-foreground">
@@ -1229,7 +1266,7 @@
           <Button
             variant="outline"
             size="sm"
-            class="h-7 px-2 text-xs"
+            class="h-8 px-2.5 text-xs"
             disabled={previewSheetIndex >= totalOutputSheets - 1}
             onclick={() => { previewSheetIndex = Math.min(totalOutputSheets - 1, previewSheetIndex + 1); }}
           >
@@ -1239,35 +1276,41 @@
       </div>
     </div>
 
-    <!-- Error message banner if any -->
+    <!-- note: error message banner if any -->
     {#if errorMessage}
-      <div class="px-6 py-2 bg-destructive/10 border-t border-destructive/20 text-xs font-medium text-destructive">
+      <div role="alert" class="px-4 py-2 bg-destructive/10 border-t border-destructive/20 text-xs font-medium text-destructive">
         {errorMessage}
       </div>
     {/if}
 
-    <!-- Footer with Destination Selector & Action Buttons -->
-    <div class="px-6 py-3.5 border-t border-border bg-muted/30 flex flex-col sm:flex-row items-center justify-between gap-3">
-      <!-- Destination Selector -->
+    <!-- note: footer with destination selector and action buttons -->
+    <Dialog.Footer class="flex-col sm:flex-row justify-between gap-2">
+      <!-- note: destination selector -->
       <div class="flex items-center gap-2 w-full sm:w-auto">
-        <Label class="text-xs text-muted-foreground whitespace-nowrap">Output Destination:</Label>
-        <select
-          bind:value={destination}
-          class="flex h-8 rounded-md border border-input bg-background px-2.5 py-1 text-xs shadow-xs focus:outline-none focus:ring-1 focus:ring-ring"
+        <Label class="field-label whitespace-nowrap">Output Destination:</Label>
+        <Select.Root
+          type="single"
+          value={destination}
+          onValueChange={(val) => { if (val === 'workspace' || val === 'replace' || val === 'download') destination = val; }}
         >
-          <option value="workspace">Add to Workspace as New PDF</option>
-          <option value="replace">Replace Active Document</option>
-          <option value="download">Download PDF File Directly</option>
-        </select>
+          <Select.Trigger class="h-8 text-xs font-sans min-w-[210px]">
+            {destination === 'workspace' ? 'Add to Workspace as New PDF' : destination === 'replace' ? 'Replace Active Document' : 'Download PDF File Directly'}
+          </Select.Trigger>
+          <Select.Content>
+            <Select.Item value="workspace" label="Add to Workspace as New PDF">Add to Workspace as New PDF</Select.Item>
+            <Select.Item value="replace" label="Replace Active Document">Replace Active Document</Select.Item>
+            <Select.Item value="download" label="Download PDF File Directly">Download PDF File Directly</Select.Item>
+          </Select.Content>
+        </Select.Root>
       </div>
 
-      <!-- Action Buttons -->
+      <!-- note: action buttons -->
       <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
         <Button variant="outline" size="sm" class="h-8 text-xs" onclick={onClose} disabled={isProcessing}>
           Cancel
         </Button>
 
-        <Button size="sm" class="h-8 text-xs min-w-[130px]" onclick={handleApply} disabled={isProcessing || !store.isDocumentLoaded}>
+        <Button variant="secondary" size="sm" class="h-8 text-xs min-w-[130px]" onclick={handleApply} disabled={isProcessing || !store.isDocumentLoaded}>
           {#if isProcessing}
             <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" /> Imposing...
           {:else if destination === 'download'}
@@ -1279,6 +1322,6 @@
           {/if}
         </Button>
       </div>
-    </div>
+    </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
