@@ -2,11 +2,13 @@
   import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
+  import { useFeatureFlagStore } from '../../core/feature-flags';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import * as Select from '$lib/components/ui/select/index.js';
-  import { Button } from '$lib/components/ui/button/index.js';
+  import { Button, ButtonGroup } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
-  import { Checkbox } from '$lib/components/ui/checkbox/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
+  import { ControlRow } from '$lib/components/ui/control-row/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Slider } from '$lib/components/ui/slider/index.js';
   import type {
@@ -34,6 +36,7 @@
 
   const store = useEditorStore();
   const actions = useEditorActions();
+  const featureFlags = useFeatureFlagStore();
 
   let selectedFile = $state<File | null>(null);
   let isConverting = $state(false);
@@ -46,7 +49,7 @@
   let marginPreset = $state<'normal' | 'compact' | 'wide' | 'none'>('normal');
   let fontFamily = $state<'helvetica' | 'times' | 'courier'>('helvetica');
   let fontSize = $state(10.5);
-  let includePageNumbers = $state(true);
+  let includePageNumbers = $state(false);
   let includeGridlines = $state(true);
   let alternateRowShading = $state(true);
 
@@ -76,25 +79,25 @@
   function getFormatBadgeInfo(fmt: DocumentFormat): { label: string; color: string } {
     switch (fmt) {
       case 'docx':
-        return { label: 'Word Document (DOCX)', color: 'bg-info/10 text-info border-info/20' };
+        return { label: 'Word Document (DOCX)', color: 'bg-card text-foreground border-border' };
       case 'xlsx':
       case 'xls':
-        return { label: 'Excel Workbook (XLSX)', color: 'bg-success/10 text-success border-success/20' };
+        return { label: 'Excel Workbook (XLSX)', color: 'bg-card text-foreground border-border' };
       case 'csv':
-        return { label: 'Delimited Data (CSV)', color: 'bg-success/10 text-success border-success/20' };
+        return { label: 'Delimited Data (CSV)', color: 'bg-card text-foreground border-border' };
       case 'tsv':
-        return { label: 'Tab Separated (TSV)', color: 'bg-success/10 text-success border-success/20' };
+        return { label: 'Tab Separated (TSV)', color: 'bg-card text-foreground border-border' };
       case 'pptx':
-        return { label: 'PowerPoint Presentation (PPTX)', color: 'bg-warning/10 text-warning border-warning/20' };
+        return { label: 'PowerPoint Presentation (PPTX)', color: 'bg-card text-foreground border-border' };
       case 'markdown':
-        return { label: 'Markdown Document (MD)', color: 'bg-primary/10 text-primary border-primary/20' };
+        return { label: 'Markdown Document (MD)', color: 'bg-card text-foreground border-border' };
       case 'text':
-        return { label: 'Plain Text (TXT)', color: 'bg-muted text-muted-foreground border-border' };
+        return { label: 'Plain Text (TXT)', color: 'bg-card text-muted-foreground border-border' };
       case 'code':
       case 'json':
-        return { label: 'Code / Data', color: 'bg-primary/10 text-primary border-primary/20' };
+        return { label: 'Code / Data', color: 'bg-card text-foreground border-border' };
       default:
-        return { label: 'Supported Document', color: 'bg-primary/10 text-primary border-primary/20' };
+        return { label: 'Supported Document', color: 'bg-card text-foreground border-border' };
     }
   }
 
@@ -109,14 +112,14 @@
   function getMargins() {
     switch (marginPreset) {
       case 'compact':
-        return { top: 36, right: 36, bottom: 36, left: 36 };
+        return { top: 28, right: 28, bottom: 28, left: 28 };
       case 'wide':
         return { top: 72, right: 72, bottom: 72, left: 72 };
       case 'none':
         return { top: 18, right: 18, bottom: 18, left: 18 };
       case 'normal':
       default:
-        return { top: 54, right: 54, bottom: 54, left: 54 };
+        return { top: 36, right: 36, bottom: 36, left: 36 };
     }
   }
 
@@ -130,6 +133,8 @@
       includePageNumbers,
       includeGridlines,
       alternateRowShading,
+      autoColumnWidths: true,
+      smartNumericAlignment: true,
     };
   }
 
@@ -230,30 +235,22 @@
 </script>
 
 <Dialog.Root open={store.showConvertDialog} onOpenChange={handleOpenChange}>
-  <Dialog.Content class="max-w-xl p-0 gap-0 overflow-hidden bg-background border-border shadow-2xl rounded-xl">
+  <Dialog.Content class="sm:max-w-[540px]">
     <!-- Header -->
-    <div class="px-6 pt-6 pb-4 border-b border-border bg-muted/20">
-      <div class="flex items-center justify-between">
-        <div class="flex items-center gap-2.5">
-          <div class="p-2 rounded-lg bg-primary/10 text-primary">
-            <Layers class="w-5 h-5" />
-          </div>
-          <div>
-            <Dialog.Title class="text-base font-semibold text-foreground">
-              Convert Document to PDF
-            </Dialog.Title>
-            <Dialog.Description class="text-xs text-muted-foreground mt-0.5">
-              Client-side vector conversion with full typography, table, and layout preservation.
-            </Dialog.Description>
-          </div>
-        </div>
-      </div>
-    </div>
+    <Dialog.Header class="pr-12">
+      <Dialog.Title>
+        <Layers class="w-4 h-4" />
+        Convert Document to PDF
+      </Dialog.Title>
+      <Dialog.Description>
+        Client-side vector conversion with full typography, table, and layout preservation.
+      </Dialog.Description>
+    </Dialog.Header>
 
     <!-- Body -->
-    <div class="p-6 space-y-5 max-h-[70vh] overflow-y-auto">
+    <div class="dialog-body">
       {#if conversionError}
-        <div class="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-start gap-2 text-xs text-destructive">
+        <div role="alert" class="dialog-error">
           <AlertCircle class="w-4 h-4 mt-0.5 shrink-0" />
           <div class="flex-1 leading-relaxed">{conversionError}</div>
         </div>
@@ -262,7 +259,7 @@
       <!-- Dropzone / Selected File Card -->
       {#if !selectedFile}
         <label
-          class="border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center gap-3 cursor-pointer transition-colors {isDraggingFile ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50 hover:bg-muted/30'}"
+          class="border border-dashed rounded-[var(--radius-card)] p-6 flex flex-col items-center justify-center gap-2.5 cursor-pointer transition-colors {isDraggingFile ? 'border-ring bg-secondary/50' : 'border-border hover:border-ring/50 hover:bg-secondary/30'}"
           ondragover={(e) => { e.preventDefault(); isDraggingFile = true; }}
           ondragleave={() => { isDraggingFile = false; }}
           ondrop={handleFileDrop}
@@ -273,36 +270,36 @@
             accept=".docx,.xlsx,.xls,.csv,.tsv,.pptx,.txt,.md,.markdown,.json,.xml,.html,.rtf,.yaml,.yml,.log"
             onchange={handleFileInputChange}
           />
-          <div class="p-3 rounded-full bg-primary/10 text-primary">
-            <Upload class="w-6 h-6" />
+          <div class="p-2.5 rounded-full bg-card text-foreground border border-border">
+            <Upload class="w-5 h-5" />
           </div>
           <div class="text-center">
             <p class="text-xs font-medium text-foreground">
               Choose a document file or drag it here
             </p>
             <p class="text-[11px] text-muted-foreground mt-1">
-              Supports Word (.docx), Excel (.xlsx), CSV, PowerPoint (.pptx), Markdown, Text & Code
+              Supports Word (.docx), Excel (.xlsx), CSV, PowerPoint (.pptx), Markdown, Text &amp; Code
             </p>
           </div>
         </label>
       {:else}
         {@const badge = getFormatBadgeInfo(detectedFormat)}
-        <div class="p-4 rounded-xl border border-border bg-card flex items-center justify-between">
+        <div class="dialog-card flex-row items-center justify-between">
           <div class="flex items-center gap-3 min-w-0">
-            <div class="p-2.5 rounded-lg bg-muted shrink-0 text-foreground">
+            <div class="p-2 rounded-[var(--radius-card-inner)] bg-secondary shrink-0 text-foreground">
               {#if isSpreadsheet}
-                <FileSpreadsheet class="w-5 h-5 text-success" />
+                <FileSpreadsheet class="w-4 h-4" />
               {:else if isPresentation}
-                <Presentation class="w-5 h-5 text-warning" />
+                <Presentation class="w-4 h-4 text-warning" />
               {:else if isTextOrCode}
-                <FileCode class="w-5 h-5 text-primary" />
+                <FileCode class="w-4 h-4" />
               {:else}
-                <FileText class="w-5 h-5 text-info" />
+                <FileText class="w-4 h-4 text-info" />
               {/if}
             </div>
             <div class="min-w-0">
-              <p class="text-xs font-semibold text-foreground truncate">{selectedFile.name}</p>
-              <div class="flex items-center gap-2 mt-1">
+              <p class="text-xs font-semibold text-foreground truncate" title={selectedFile.name}>{selectedFile.name}</p>
+              <div class="flex items-center gap-2 mt-0.5">
                 <Badge variant="outline" class="text-[10px] px-1.5 py-0 {badge.color}">
                   {badge.label}
                 </Badge>
@@ -311,9 +308,9 @@
             </div>
           </div>
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
-            class="text-xs text-muted-foreground hover:text-foreground"
+            class="h-8 text-xs shrink-0"
             onclick={() => { selectedFile = null; conversionError = null; }}
           >
             Change File
@@ -321,22 +318,24 @@
         </div>
 
         <!-- Format Specific Options -->
-        <div class="space-y-4 pt-2">
-          <div class="flex items-center gap-2 text-xs font-semibold text-foreground">
-            <SlidersHorizontal class="w-3.5 h-3.5 text-primary" />
-            <span>Conversion Settings</span>
+        <div class="space-y-3 pt-1">
+          <div class="dialog-section-header">
+            <span class="flex items-center gap-1.5">
+              <SlidersHorizontal class="w-3.5 h-3.5 text-muted-foreground" />
+              <span>Conversion Settings</span>
+            </span>
           </div>
 
           <!-- Page Geometry Controls -->
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <Label class="text-[11px] text-muted-foreground">Page Size</Label>
+          <div class="field-grid-2">
+            <div class="field-group">
+              <Label class="field-label">Page Size</Label>
               <Select.Root
                 type="single"
                 value={pageSize}
                 onValueChange={(val) => { if (val) pageSize = val as PageSizePreset; }}
               >
-                <Select.Trigger class="w-full mt-1.5 h-8 text-xs">
+                <Select.Trigger class="w-full h-8 text-xs">
                   {pageSize === "a4" ? "A4 Standard (210 x 297 mm)" : pageSize === "letter" ? "US Letter (8.5 x 11 in)" : pageSize === "legal" ? "US Legal (8.5 x 14 in)" : pageSize === "slide_16_9" ? "16:9 Widescreen Slide" : pageSize === "slide_4_3" ? "4:3 Standard Slide" : pageSize}
                 </Select.Trigger>
                 <Select.Content>
@@ -349,53 +348,65 @@
               </Select.Root>
             </div>
 
-            <div>
-              <Label class="text-[11px] text-muted-foreground">Orientation</Label>
-              <Select.Root
-                type="single"
-                value={orientation}
-                onValueChange={(val) => { if (val) orientation = val as PageOrientation; }}
-              >
-                <Select.Trigger class="w-full mt-1.5 h-8 text-xs">
-                  {orientation === "auto" ? "Auto (Smart Match)" : orientation === "portrait" ? "Portrait" : "Landscape"}
-                </Select.Trigger>
-                <Select.Content>
-                  <Select.Item value="auto" label="Auto (Smart Match)">Auto (Smart Match)</Select.Item>
-                  <Select.Item value="portrait" label="Portrait">Portrait</Select.Item>
-                  <Select.Item value="landscape" label="Landscape">Landscape</Select.Item>
-                </Select.Content>
-              </Select.Root>
+            <div class="field-group">
+              <Label class="field-label">Orientation</Label>
+              <ButtonGroup variant="outline" size="sm" class="w-full h-8">
+                <Button
+                  type="button"
+                  variant={orientation === 'auto' ? 'secondary' : 'outline'}
+                  class="flex-1 text-xs"
+                  onclick={() => (orientation = 'auto')}
+                >
+                  Auto
+                </Button>
+                <Button
+                  type="button"
+                  variant={orientation === 'portrait' ? 'secondary' : 'outline'}
+                  class="flex-1 text-xs"
+                  onclick={() => (orientation = 'portrait')}
+                >
+                  Portrait
+                </Button>
+                <Button
+                  type="button"
+                  variant={orientation === 'landscape' ? 'secondary' : 'outline'}
+                  class="flex-1 text-xs"
+                  onclick={() => (orientation = 'landscape')}
+                >
+                  Landscape
+                </Button>
+              </ButtonGroup>
             </div>
           </div>
 
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <Label class="text-[11px] text-muted-foreground">Page Margins</Label>
+          <div class="field-grid-2">
+            <div class="field-group">
+              <Label class="field-label">Page Margins</Label>
               <Select.Root
                 type="single"
                 value={marginPreset}
                 onValueChange={(val) => { if (val) marginPreset = val as typeof marginPreset; }}
               >
-                <Select.Trigger class="w-full mt-1.5 h-8 text-xs">
-                  {marginPreset === "normal" ? "Normal (0.75 in / 54 pt)" : marginPreset === "compact" ? "Compact (0.50 in / 36 pt)" : marginPreset === "wide" ? "Wide (1.00 in / 72 pt)" : "Minimum (0.25 in / 18 pt)"}
+                <Select.Trigger class="w-full h-8 text-xs">
+                  {marginPreset === "normal" ? "Normal (0.50 in / 36 pt)" : marginPreset === "compact" ? "Compact (0.40 in / 28 pt)" : marginPreset === "wide" ? "Wide (1.00 in / 72 pt)" : "Minimum (0.25 in / 18 pt)"}
                 </Select.Trigger>
                 <Select.Content>
-                  <Select.Item value="normal" label="Normal (0.75 in / 54 pt)">Normal (0.75 in / 54 pt)</Select.Item>
-                  <Select.Item value="compact" label="Compact (0.50 in / 36 pt)">Compact (0.50 in / 36 pt)</Select.Item>
+                  <Select.Item value="normal" label="Normal (0.50 in / 36 pt)">Normal (0.50 in / 36 pt)</Select.Item>
+                  <Select.Item value="compact" label="Compact (0.40 in / 28 pt)">Compact (0.40 in / 28 pt)</Select.Item>
                   <Select.Item value="wide" label="Wide (1.00 in / 72 pt)">Wide (1.00 in / 72 pt)</Select.Item>
                   <Select.Item value="none" label="Minimum (0.25 in / 18 pt)">Minimum (0.25 in / 18 pt)</Select.Item>
                 </Select.Content>
               </Select.Root>
             </div>
 
-            <div>
-              <Label class="text-[11px] text-muted-foreground">Font Family</Label>
+            <div class="field-group">
+              <Label class="field-label">Font Family</Label>
               <Select.Root
                 type="single"
                 value={fontFamily}
                 onValueChange={(val) => { if (val) fontFamily = val as typeof fontFamily; }}
               >
-                <Select.Trigger class="w-full mt-1.5 h-8 text-xs">
+                <Select.Trigger class="w-full h-8 text-xs">
                   {fontFamily === "helvetica" ? "Helvetica (Clean Sans)" : fontFamily === "times" ? "Times New Roman (Serif)" : "Courier (Monospace)"}
                 </Select.Trigger>
                 <Select.Content>
@@ -409,35 +420,33 @@
 
           {#if isSpreadsheet}
             <!-- Spreadsheet Options -->
-            <div class="p-3 rounded-lg bg-muted/40 border border-border space-y-2">
+            <div class="dialog-card">
               <div class="flex items-center gap-1.5 text-xs font-medium text-foreground">
-                <Table class="w-3.5 h-3.5 text-success" />
+                <Table class="w-3.5 h-3.5" />
                 <span>Spreadsheet Table Formatting</span>
               </div>
-              <div class="flex items-center justify-between text-xs pt-1">
-                <span class="text-muted-foreground">Include cell gridlines</span>
-                <Checkbox bind:checked={includeGridlines} />
-              </div>
-              <div class="flex items-center justify-between text-xs">
-                <span class="text-muted-foreground">Alternating row shading (zebra)</span>
-                <Checkbox bind:checked={alternateRowShading} />
+              <div class="grid grid-cols-2 gap-2">
+                <ControlRow label="Include cell gridlines" for="conv-gridlines" size="compact">
+                  <Switch id="conv-gridlines" bind:checked={includeGridlines} />
+                </ControlRow>
+                <ControlRow label="Alternating row shading" for="conv-row-shading" size="compact">
+                  <Switch id="conv-row-shading" bind:checked={alternateRowShading} />
+                </ControlRow>
               </div>
             </div>
           {/if}
 
           {#if isTextOrCode}
             <!-- Typography & Font Size Slider -->
-            <div class="space-y-2 pt-1">
-              <div class="flex justify-between items-center text-xs">
-                <span class="text-muted-foreground">Base Font Size</span>
-                <span class="font-sans text-foreground">{fontSize} pt</span>
-              </div>
+            <div class="field-group">
+              <Label class="field-label">Base Font Size</Label>
               <Slider
                 type="single"
                 value={fontSize}
                 min={8}
                 max={16}
                 step={0.5}
+                unit=" pt"
                 onValueChange={(val: number) => {
                   fontSize = val;
                 }}
@@ -445,21 +454,22 @@
             </div>
           {/if}
 
-          <div class="flex items-center justify-between text-xs pt-1">
-            <span class="text-muted-foreground">Include running "Page X of Y" numbers</span>
-            <Checkbox bind:checked={includePageNumbers} />
-          </div>
+          {#if featureFlags.isEnabled('conversion.page-numbers')}
+            <ControlRow label="Include running &quot;Page X of Y&quot; numbers" for="conv-page-numbers" size="sm">
+              <Switch id="conv-page-numbers" bind:checked={includePageNumbers} />
+            </ControlRow>
+          {/if}
         </div>
       {/if}
     </div>
 
     <!-- Footer Actions -->
-    <Dialog.Footer class="px-6 py-4 border-t border-border bg-muted/20 flex flex-row items-center justify-between gap-2 sm:justify-between">
+    <Dialog.Footer class="justify-between">
       <Button
-        variant="ghost"
+        variant="outline"
         size="sm"
         onclick={() => handleOpenChange(false)}
-        class="text-xs"
+        class="h-8 text-xs"
         disabled={isConverting}
       >
         Cancel
@@ -471,11 +481,11 @@
             <Button
               variant="outline"
               size="sm"
-              class="text-xs gap-1.5"
+              class="h-8 text-xs gap-1.5"
               onclick={handleAddToWorkspace}
               disabled={isConverting}
             >
-              <PlusCircle class="w-3.5 h-3.5 text-primary" />
+              <PlusCircle class="w-3.5 h-3.5" />
               Add to Workspace
             </Button>
           {/if}
@@ -483,17 +493,18 @@
           <Button
             variant="outline"
             size="sm"
-            class="text-xs gap-1.5"
+            class="h-8 text-xs gap-1.5"
             onclick={handleConvertAndDownload}
             disabled={isConverting}
           >
-            <Download class="w-3.5 h-3.5 text-primary" />
+            <Download class="w-3.5 h-3.5" />
             Download PDF
           </Button>
 
           <Button
+            variant="secondary"
             size="sm"
-            class="text-xs gap-1.5"
+            class="h-8 text-xs gap-1.5"
             onclick={handleConvertAndOpen}
             disabled={isConverting}
           >
@@ -502,7 +513,7 @@
               Converting...
             {:else}
               <CheckCircle2 class="w-3.5 h-3.5" />
-              Convert & Open
+              Convert &amp; Open
             {/if}
           </Button>
         {/if}
