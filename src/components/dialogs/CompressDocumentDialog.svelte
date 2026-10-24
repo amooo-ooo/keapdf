@@ -2,10 +2,12 @@
   import { untrack } from 'svelte';
   import { useEditorStore } from '../../stores/editor.svelte';
   import { useEditorActions } from '../../stores/editor-actions';
+  import { useFeatureFlagStore } from '../../core/feature-flags';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { Button, ButtonGroup } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
-  import { Checkbox } from '$lib/components/ui/checkbox/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
+  import { ControlRow } from '$lib/components/ui/control-row/index.js';
   import { Slider } from '$lib/components/ui/slider/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import type {
@@ -14,6 +16,10 @@
     CompressSummary,
     CompressionInspection,
   } from '../../core/types';
+  import {
+    estimatePdfCompression,
+    estimateAllPresets,
+  } from '../../services/pdf/operations/compress-estimate';
   import {
     FileDown,
     Sparkles,
@@ -32,6 +38,19 @@
 
   const store = useEditorStore();
   const actions = useEditorActions();
+
+  function resolveFeatureFlags() {
+    try {
+      return useFeatureFlagStore();
+    } catch {
+      return null;
+    }
+  }
+
+  const featureFlags = resolveFeatureFlags();
+  const canShowEstimate = $derived(
+    !featureFlags || featureFlags.isEnabled('compression.estimate')
+  );
 
   let activePreset = $state<CompressionLevel>(store.compressInitialPreset || 'recommended');
   let isProcessing = $state(false);
@@ -72,6 +91,13 @@
     }
     return { level: activePreset };
   }
+
+  const currentEstimate = $derived(
+    inspection && canShowEstimate ? estimatePdfCompression(inspection, getEffectiveOptions()) : null
+  );
+  const presetEstimates = $derived(
+    inspection && canShowEstimate ? estimateAllPresets(inspection) : null
+  );
 
   async function runInspection(): Promise<void> {
     isInspecting = true;
@@ -160,315 +186,377 @@
 </script>
 
 <Dialog.Root open={store.showCompressDialog} onOpenChange={handleOpenChange}>
-  <Dialog.Content class="sm:max-w-[580px] max-h-[92vh] flex flex-col p-0 gap-0 overflow-hidden font-sans">
-      <!-- Header -->
-      <Dialog.Header class="p-4 pb-3 border-b bg-card">
-        <div class="flex items-center gap-2">
-          <div class="p-1.5 rounded-md bg-primary/10 text-primary">
-            <FileDown class="h-4 w-4" />
-          </div>
-          <div>
-            <Dialog.Title class="text-sm font-semibold">Compress PDF</Dialog.Title>
-            <Dialog.Description class="text-xs text-muted-foreground">
-              Reduce file size with lossless structural packing, balanced lossy, or full-page flat rasterization.
-            </Dialog.Description>
-          </div>
-        </div>
-      </Dialog.Header>
+  <Dialog.Content class="sm:max-w-[580px] font-sans">
+    <!-- Header -->
+    <Dialog.Header class="pr-12">
+      <Dialog.Title>
+        <FileDown class="h-4 w-4" />
+        Compress PDF
+      </Dialog.Title>
+      <Dialog.Description>
+        Reduce file size with lossless structural packing, balanced lossy, or full-page flat rasterisation.
+      </Dialog.Description>
+    </Dialog.Header>
 
-      <!-- Main Body -->
-      <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4 text-xs">
-        <!-- Live Inspection Stats Card -->
-        <div class="rounded-lg border bg-muted/30 p-3 flex flex-col gap-2">
-          <div class="flex items-center justify-between">
-            <span class="font-medium text-foreground flex items-center gap-1.5">
-              <Sparkles class="h-3.5 w-3.5 text-primary" />
-              Document Analysis
+    <!-- Main Body -->
+    <div class="dialog-body">
+      <!-- Live Inspection Stats Card -->
+      <div class="dialog-card">
+        <div class="flex items-center justify-between">
+          <span class="font-medium text-foreground flex items-center gap-1.5">
+            <Sparkles class="h-3.5 w-3.5" />
+            Document Analysis
+          </span>
+          {#if isInspecting}
+            <span class="text-[11px] text-muted-foreground flex items-center gap-1">
+              <Loader2 class="h-3 w-3 animate-spin" /> Analysing PDF...
             </span>
-            {#if isInspecting}
-              <span class="text-[11px] text-muted-foreground flex items-center gap-1">
-                <Loader2 class="h-3 w-3 animate-spin" /> Analyzing PDF...
-              </span>
-            {:else if inspection}
-              <Badge variant="outline" class="font-sans font-medium text-[11px]">
-                {formatBytes(inspection.originalSizeBytes)} &bull; {inspection.pageCount} page{inspection.pageCount !== 1 ? 's' : ''}
-              </Badge>
-            {/if}
-          </div>
-
-          {#if inspection}
-            <div class="grid grid-cols-3 gap-2 pt-1 border-t border-border/50 text-[11px]">
-              <div class="flex items-center gap-1.5 text-muted-foreground">
-                <ImageIcon class="h-3.5 w-3.5 text-info" />
-                <span>{inspection.imageCount} image{inspection.imageCount !== 1 ? 's' : ''} ({formatBytes(inspection.totalImageBytes)})</span>
-              </div>
-              <div class="flex items-center gap-1.5 text-muted-foreground">
-                <Layers class="h-3.5 w-3.5 text-warning" />
-                <span>{inspection.thumbnailCount} thumbnail{inspection.thumbnailCount !== 1 ? 's' : ''}</span>
-              </div>
-              <div class="flex items-center gap-1.5 text-muted-foreground">
-                <FileText class="h-3.5 w-3.5 text-success" />
-                <span>{inspection.hasPieceInfo ? 'App Cache Present' : 'Clean App Cache'}</span>
-              </div>
-            </div>
+          {:else if inspection}
+            <Badge variant="outline" class="font-sans font-medium text-[11px]">
+              {formatBytes(inspection.originalSizeBytes)} &bull; {inspection.pageCount} page{inspection.pageCount !== 1 ? 's' : ''}
+            </Badge>
           {/if}
         </div>
 
-        <!-- Presets Grid -->
-        <div class="flex flex-col gap-1.5">
-          <Label class="text-xs font-semibold text-foreground">Compression Level</Label>
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <!-- Recommended -->
-            <button
-              type="button"
-              class="flex flex-col items-start p-2.5 rounded-lg border text-left transition-colors relative {activePreset === 'recommended' ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'border-border bg-card hover:bg-muted/50'}"
-              onclick={() => { activePreset = 'recommended'; }}
-            >
-              <div class="flex items-center justify-between w-full mb-1">
-                <span class="font-medium text-xs text-foreground flex items-center gap-1">
-                  <Zap class="h-3 w-3 text-warning" /> Balanced
-                </span>
-                <Badge variant="secondary" class="text-[9px] px-1 py-0 h-4">Best</Badge>
-              </div>
-              <p class="text-[11px] text-muted-foreground leading-snug">
-                150 DPI JPEG, keeps text & vectors sharp.
-              </p>
-            </button>
-
-            <!-- Lossless -->
-            <button
-              type="button"
-              class="flex flex-col items-start p-2.5 rounded-lg border text-left transition-colors relative {activePreset === 'lossless' ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'border-border bg-card hover:bg-muted/50'}"
-              onclick={() => { activePreset = 'lossless'; }}
-            >
-              <div class="flex items-center justify-between w-full mb-1">
-                <span class="font-medium text-xs text-foreground flex items-center gap-1">
-                  <ShieldAlert class="h-3 w-3 text-success" /> Lossless
-                </span>
-              </div>
-              <p class="text-[11px] text-muted-foreground leading-snug">
-                100% visual fidelity, object streams packing.
-              </p>
-            </button>
-
-            <!-- Strong -->
-            <button
-              type="button"
-              class="flex flex-col items-start p-2.5 rounded-lg border text-left transition-colors relative {activePreset === 'strong' ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'border-border bg-card hover:bg-muted/50'}"
-              onclick={() => { activePreset = 'strong'; }}
-            >
-              <div class="flex items-center justify-between w-full mb-1">
-                <span class="font-medium text-xs text-foreground flex items-center gap-1">
-                  <FileDown class="h-3 w-3 text-info" /> Strong
-                </span>
-              </div>
-              <p class="text-[11px] text-muted-foreground leading-snug">
-                96 DPI, 50% JPEG, smallest structured size.
-              </p>
-            </button>
-
-            <!-- Flat Image -->
-            <button
-              type="button"
-              class="flex flex-col items-start p-2.5 rounded-lg border text-left transition-colors relative {activePreset === 'flat_image' ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'border-border bg-card hover:bg-muted/50'}"
-              onclick={() => { activePreset = 'flat_image'; }}
-            >
-              <div class="flex items-center justify-between w-full mb-1">
-                <span class="font-medium text-xs text-foreground flex items-center gap-1">
-                  <Layers class="h-3 w-3 text-primary" /> Flat Image
-                </span>
-              </div>
-              <p class="text-[11px] text-muted-foreground leading-snug">
-                Full page rasterization, removes vector bloat.
-              </p>
-            </button>
-          </div>
-        </div>
-
-        <!-- Custom Mode Accordion / Panel -->
-        <div class="border rounded-lg p-3 bg-card flex flex-col gap-3">
-          <div class="flex items-center justify-between">
-            <button
-              type="button"
-              class="font-medium text-xs text-foreground flex items-center gap-1.5 hover:text-primary transition-colors text-left"
-              onclick={() => { activePreset = 'custom'; }}
-            >
-              <SlidersHorizontal class="h-3.5 w-3.5 text-muted-foreground" />
-              <span>Advanced Parameters {activePreset === 'custom' ? '(Active)' : ''}</span>
-            </button>
-            {#if activePreset === 'custom'}
-              <Badge variant="default" class="text-[10px] px-1.5 py-0 h-4">Custom Active</Badge>
-            {/if}
-          </div>
-
-          <div class="flex flex-col gap-3 pt-1 border-t border-border/50">
-            <!-- JPEG Quality Slider -->
-            <div class="flex flex-col gap-1.5">
-              <div class="flex justify-between items-center text-[11px]">
-                <span class="text-muted-foreground">JPEG Quality</span>
-                <span class="font-sans font-medium text-foreground">{customQuality}%</span>
-              </div>
-              <Slider
-                type="single"
-                value={customQuality}
-                min={10}
-                max={100}
-                step={5}
-                onValueChange={(val) => {
-                  customQuality = Array.isArray(val) ? val[0] : val;
-                  activePreset = 'custom';
-                }}
-              />
+        {#if inspection}
+          <div class="grid grid-cols-3 gap-2 pt-1.5 border-t border-border/50 text-[11px]">
+            <div class="flex items-center gap-1.5 text-muted-foreground">
+              <ImageIcon class="h-3.5 w-3.5 text-info" />
+              <span><span>{inspection.imageCount}</span> image{inspection.imageCount !== 1 ? 's' : ''} (<span>{formatBytes(inspection.totalImageBytes)}</span>)</span>
             </div>
-
-            <!-- Max DPI Selection -->
-            <div class="flex items-center justify-between text-[11px]">
-              <span class="text-muted-foreground">Max Image Resolution</span>
-              <ButtonGroup variant="outline" size="xs">
-                {#each [72, 96, 150, 200, 300] as dpi}
-                  <Button
-                    variant={customMaxDpi === dpi ? 'default' : 'outline'}
-                    size="xs"
-                    class="h-6 px-2 text-[10px]"
-                    onclick={() => { customMaxDpi = dpi; activePreset = 'custom'; }}
-                  >
-                    {dpi} DPI
-                  </Button>
-                {/each}
-              </ButtonGroup>
+            <div class="flex items-center gap-1.5 text-muted-foreground">
+              <Layers class="h-3.5 w-3.5 text-warning" />
+              <span><span>{inspection.thumbnailCount}</span> thumbnail{inspection.thumbnailCount !== 1 ? 's' : ''}</span>
             </div>
-
-            <!-- Fine-Tuning Toggles -->
-            <div class="grid grid-cols-2 gap-2 text-[11px] pt-1">
-              <label class="flex items-center gap-2 cursor-pointer select-none">
-                <Checkbox
-                  checked={customUseObjectStreams}
-                  onCheckedChange={(checked) => {
-                    customUseObjectStreams = checked;
-                    activePreset = 'custom';
-                  }}
-                />
-                <span class="text-muted-foreground">Object Streams Packing</span>
-              </label>
-
-              <label class="flex items-center gap-2 cursor-pointer select-none">
-                <Checkbox
-                  checked={customRemoveThumbnails}
-                  onCheckedChange={(checked) => {
-                    customRemoveThumbnails = checked;
-                    activePreset = 'custom';
-                  }}
-                />
-                <span class="text-muted-foreground">Strip Embedded Thumbnails</span>
-              </label>
-
-              <label class="flex items-center gap-2 cursor-pointer select-none">
-                <Checkbox
-                  checked={customRemoveMetadata}
-                  onCheckedChange={(checked) => {
-                    customRemoveMetadata = checked;
-                    activePreset = 'custom';
-                  }}
-                />
-                <span class="text-muted-foreground">Strip XMP & DocInfo</span>
-              </label>
-
-              <label class="flex items-center gap-2 cursor-pointer select-none">
-                <Checkbox
-                  checked={customRemovePieceInfo}
-                  onCheckedChange={(checked) => {
-                    customRemovePieceInfo = checked;
-                    activePreset = 'custom';
-                  }}
-                />
-                <span class="text-muted-foreground">Strip App Cache (PieceInfo)</span>
-              </label>
+            <div class="flex items-center gap-1.5 text-muted-foreground">
+              <FileText class="h-3.5 w-3.5" />
+              <span>{inspection.hasPieceInfo ? 'App Cache Present' : 'Clean App Cache'}</span>
             </div>
-          </div>
-        </div>
-
-        <!-- Success Summary Badge Card -->
-        {#if summary}
-          <div class="rounded-lg border border-success/30 bg-success/10 p-3 flex flex-col gap-2">
-            <div class="flex items-center justify-between">
-              <span class="font-medium text-success flex items-center gap-1.5">
-                <CheckCircle2 class="h-4 w-4" />
-                Compression Complete
-              </span>
-              <Badge variant="success" class="font-sans text-xs">
-                -{summary.savingsPercentage}%
-              </Badge>
-            </div>
-            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-muted-foreground pt-1 border-t border-success/20 font-sans">
-              <div>Original: <strong class="text-foreground">{formatBytes(summary.originalSizeBytes)}</strong></div>
-              <div>Compressed: <strong class="text-foreground">{formatBytes(summary.compressedSizeBytes)}</strong></div>
-              <div>Saved: <strong class="text-foreground">{formatBytes(summary.savingsBytes)}</strong></div>
-              <div>Recompressed: <strong class="text-foreground">{summary.imagesCompressed} imgs</strong></div>
-            </div>
-          </div>
-        {/if}
-
-        <!-- Error Message -->
-        {#if errorMessage}
-          <div class="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-destructive text-xs">
-            {errorMessage}
           </div>
         {/if}
       </div>
 
-      <!-- Footer Actions -->
-      <Dialog.Footer class="p-4 pt-3 border-t bg-card flex items-center justify-between sm:justify-between w-full">
-        <Button variant="ghost" size="sm" onclick={handleClose} disabled={isProcessing}>
-          Close
+      <!-- Presets Grid -->
+      <div class="field-group">
+        <Label class="field-label">Compression Level</Label>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <!-- Recommended -->
+          <button
+            type="button"
+            class="flex flex-col items-start p-2.5 rounded-[var(--radius-card)] border text-left transition-colors relative {activePreset === 'recommended' ? 'border-foreground/40 bg-card ring-1 ring-ring' : 'border-border bg-card hover:bg-muted/50'}"
+            onclick={() => { activePreset = 'recommended'; }}
+          >
+            <div class="flex items-center justify-between w-full mb-1">
+              <span class="font-medium text-xs text-foreground flex items-center gap-1">
+                <Zap class="h-3 w-3 text-warning" /> Balanced
+              </span>
+              <Badge variant="secondary" class="text-[9px] px-1 py-0 h-4">Best</Badge>
+            </div>
+            <p class="text-[11px] text-muted-foreground leading-snug">
+              150 DPI JPEG, keeps text &amp; vectors sharp.
+            </p>
+            {#if presetEstimates?.recommended}
+              <div class="mt-1.5 text-[10px] text-muted-foreground">
+                ~{formatBytes(presetEstimates.recommended.estimatedSizeBytes)} (-{presetEstimates.recommended.estimatedSavingsPercentage}%)
+              </div>
+            {/if}
+          </button>
+
+          <!-- Lossless -->
+          <button
+            type="button"
+            class="flex flex-col items-start p-2.5 rounded-[var(--radius-card)] border text-left transition-colors relative {activePreset === 'lossless' ? 'border-foreground/40 bg-card ring-1 ring-ring' : 'border-border bg-card hover:bg-muted/50'}"
+            onclick={() => { activePreset = 'lossless'; }}
+          >
+            <div class="flex items-center justify-between w-full mb-1">
+              <span class="font-medium text-xs text-foreground flex items-center gap-1">
+                <ShieldAlert class="h-3 w-3" /> Lossless
+              </span>
+            </div>
+            <p class="text-[11px] text-muted-foreground leading-snug">
+              100% visual fidelity, object streams packing.
+            </p>
+            {#if presetEstimates?.lossless}
+              <div class="mt-1.5 text-[10px] text-muted-foreground">
+                ~{formatBytes(presetEstimates.lossless.estimatedSizeBytes)} (-{presetEstimates.lossless.estimatedSavingsPercentage}%)
+              </div>
+            {/if}
+          </button>
+
+          <!-- Strong -->
+          <button
+            type="button"
+            class="flex flex-col items-start p-2.5 rounded-[var(--radius-card)] border text-left transition-colors relative {activePreset === 'strong' ? 'border-foreground/40 bg-card ring-1 ring-ring' : 'border-border bg-card hover:bg-muted/50'}"
+            onclick={() => { activePreset = 'strong'; }}
+          >
+            <div class="flex items-center justify-between w-full mb-1">
+              <span class="font-medium text-xs text-foreground flex items-center gap-1">
+                <FileDown class="h-3 w-3 text-info" /> Strong
+              </span>
+            </div>
+            <p class="text-[11px] text-muted-foreground leading-snug">
+              96 DPI, 50% JPEG, smallest structured size.
+            </p>
+            {#if presetEstimates?.strong}
+              <div class="mt-1.5 text-[10px] text-muted-foreground">
+                ~{formatBytes(presetEstimates.strong.estimatedSizeBytes)} (-{presetEstimates.strong.estimatedSavingsPercentage}%)
+              </div>
+            {/if}
+          </button>
+
+          <!-- Flat Image -->
+          <button
+            type="button"
+            class="flex flex-col items-start p-2.5 rounded-[var(--radius-card)] border text-left transition-colors relative {activePreset === 'flat_image' ? 'border-foreground/40 bg-card ring-1 ring-ring' : 'border-border bg-card hover:bg-muted/50'}"
+            onclick={() => { activePreset = 'flat_image'; }}
+          >
+            <div class="flex items-center justify-between w-full mb-1">
+              <span class="font-medium text-xs text-foreground flex items-center gap-1">
+                <Layers class="h-3 w-3 text-muted-foreground" /> Flat Image
+              </span>
+            </div>
+            <p class="text-[11px] text-muted-foreground leading-snug">
+              Full page rasterisation, removes vector bloat.
+            </p>
+            {#if presetEstimates?.flat_image}
+              <div class="mt-1.5 text-[10px] text-muted-foreground">
+                ~{formatBytes(presetEstimates.flat_image.estimatedSizeBytes)} (-{presetEstimates.flat_image.estimatedSavingsPercentage}%)
+              </div>
+            {/if}
+          </button>
+        </div>
+      </div>
+
+      <!-- Custom Mode Accordion / Panel -->
+      <div class="dialog-card">
+        <div class="flex items-center justify-between">
+          <button
+            type="button"
+            class="font-medium text-xs text-foreground flex items-center gap-1.5 hover:text-foreground transition-colors text-left"
+            onclick={() => { activePreset = 'custom'; }}
+          >
+            <SlidersHorizontal class="h-3.5 w-3.5 text-muted-foreground" />
+            <span>Advanced Parameters {activePreset === 'custom' ? '(Active)' : ''}</span>
+          </button>
+          {#if activePreset === 'custom'}
+            <Badge variant="secondary" class="text-[10px] px-1.5 py-0 h-4">Custom Active</Badge>
+          {/if}
+        </div>
+
+        <div class="flex flex-col gap-3 pt-2 border-t border-border/50">
+          <!-- JPEG Quality Slider -->
+          <div class="field-group">
+            <Label class="field-label">JPEG Quality</Label>
+            <Slider
+              type="single"
+              value={customQuality}
+              min={10}
+              max={100}
+              step={5}
+              unit="%"
+              onValueChange={(val) => {
+                customQuality = Array.isArray(val) ? val[0] : val;
+                activePreset = 'custom';
+              }}
+            />
+          </div>
+
+          <!-- Max DPI Selection -->
+          <div class="field-group">
+            <Label class="field-label">Max Image Resolution</Label>
+            <ButtonGroup variant="outline" size="sm" class="h-8 w-full">
+              {#each [72, 96, 150, 200, 300] as dpi}
+                <Button
+                  type="button"
+                  variant={customMaxDpi === dpi ? 'secondary' : 'outline'}
+                  class="flex-1 text-xs"
+                  onclick={() => { customMaxDpi = dpi; activePreset = 'custom'; }}
+                >
+                  {dpi} DPI
+                </Button>
+              {/each}
+            </ButtonGroup>
+          </div>
+
+          <!-- Fine-Tuning Toggles -->
+          <div class="grid grid-cols-2 gap-1.5 pt-0.5">
+            <ControlRow label="Object Streams Packing" variant="card" size="compact">
+              <Switch
+                checked={customUseObjectStreams}
+                onCheckedChange={(checked) => {
+                  customUseObjectStreams = checked;
+                  activePreset = 'custom';
+                }}
+                aria-label="Object Streams Packing"
+              />
+            </ControlRow>
+
+            <ControlRow label="Strip Thumbnails" variant="card" size="compact">
+              <Switch
+                checked={customRemoveThumbnails}
+                onCheckedChange={(checked) => {
+                  customRemoveThumbnails = checked;
+                  activePreset = 'custom';
+                }}
+                aria-label="Strip Embedded Thumbnails"
+              />
+            </ControlRow>
+
+            <ControlRow label="Strip XMP &amp; DocInfo" variant="card" size="compact">
+              <Switch
+                checked={customRemoveMetadata}
+                onCheckedChange={(checked) => {
+                  customRemoveMetadata = checked;
+                  activePreset = 'custom';
+                }}
+                aria-label="Strip XMP and DocInfo"
+              />
+            </ControlRow>
+
+            <ControlRow label="Strip App Cache" variant="card" size="compact">
+              <Switch
+                checked={customRemovePieceInfo}
+                onCheckedChange={(checked) => {
+                  customRemovePieceInfo = checked;
+                  activePreset = 'custom';
+                }}
+                aria-label="Strip App Cache (PieceInfo)"
+              />
+            </ControlRow>
+          </div>
+        </div>
+      </div>
+
+      <!-- Estimated Result Preview Card -->
+      {#if canShowEstimate && currentEstimate && inspection && !summary}
+        <div class="dialog-card">
+          <div class="flex items-center justify-between">
+            <span class="font-medium text-foreground flex items-center gap-1.5">
+              <Zap class="h-3.5 w-3.5 text-muted-foreground" />
+              Estimated Result
+            </span>
+            <Badge variant="secondary" class="font-sans text-xs">
+              ~{formatBytes(currentEstimate.estimatedSizeBytes)}
+              <span class="text-muted-foreground ml-1">(-{currentEstimate.estimatedSavingsPercentage}%)</span>
+            </Badge>
+          </div>
+
+          <div class="grid grid-cols-3 gap-2 pt-1.5 border-t border-border/50 text-[11px] text-muted-foreground font-sans">
+            <div>Current: <strong class="text-foreground">{formatBytes(inspection.originalSizeBytes)}</strong></div>
+            <div>Estimated: <strong class="text-foreground">~{formatBytes(currentEstimate.estimatedSizeBytes)}</strong></div>
+            <div>Savings: <strong class="text-foreground">~{formatBytes(currentEstimate.estimatedSavingsBytes)}</strong></div>
+          </div>
+
+          {#if currentEstimate.isMonotonicallyClamped && currentEstimate.estimatedSavingsBytes === 0}
+            <p class="text-[11px] text-muted-foreground leading-snug">
+              Document is already optimised. Monotonic safeguard preserves original size.
+            </p>
+          {:else if activePreset === 'lossless'}
+            <p class="text-[11px] text-muted-foreground leading-snug">
+              Lossless packing with object streams. Preserves 100% visual fidelity and font definitions.
+            </p>
+          {:else if activePreset === 'recommended'}
+            <p class="text-[11px] text-muted-foreground leading-snug">
+              Balanced 150 DPI JPEG downsampling. Text, vector drawings, and fonts remain sharp.
+            </p>
+          {:else if activePreset === 'strong'}
+            <p class="text-[11px] text-muted-foreground leading-snug">
+              Aggressive 96 DPI JPEG downsampling for compact email distribution and fast transfer.
+            </p>
+          {:else if activePreset === 'flat_image'}
+            <p class="text-[11px] text-muted-foreground leading-snug">
+              Full page rasterisation into JPEG images, discarding vector layers and embedded font bloat.
+            </p>
+          {:else}
+            <p class="text-[11px] text-muted-foreground leading-snug">
+              Custom parameters applied with selective stream packing and resolution limits.
+            </p>
+          {/if}
+        </div>
+      {/if}
+
+      <!-- Success Summary Badge Card -->
+      {#if summary}
+        <div role="status" class="dialog-card">
+          <div class="flex items-center justify-between">
+            <span class="font-medium text-foreground flex items-center gap-1.5">
+              <CheckCircle2 class="h-4 w-4" />
+              Compression Complete
+            </span>
+            <Badge variant="secondary" class="font-sans text-xs">
+              -{summary.savingsPercentage}%
+            </Badge>
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-muted-foreground pt-1.5 border-t border-border font-sans">
+            <div>Original: <strong class="text-foreground">{formatBytes(summary.originalSizeBytes)}</strong></div>
+            <div>Compressed: <strong class="text-foreground">{formatBytes(summary.compressedSizeBytes)}</strong></div>
+            <div>Saved: <strong class="text-foreground">{formatBytes(summary.savingsBytes)}</strong></div>
+            <div>Recompressed: <strong class="text-foreground">{summary.imagesCompressed} imgs</strong></div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Error Message -->
+      {#if errorMessage}
+        <div role="alert" class="dialog-error">
+          {errorMessage}
+        </div>
+      {/if}
+    </div>
+
+    <!-- Footer Actions -->
+    <Dialog.Footer class="justify-between">
+      <Button variant="outline" size="sm" class="h-8 text-xs" onclick={handleClose} disabled={isProcessing}>
+        Close
+      </Button>
+
+      <div class="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          class="h-8 text-xs"
+          onclick={handleCompressAsCopy}
+          disabled={isProcessing || !store.isDocumentLoaded}
+        >
+          {#if isProcessing}
+            <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" />
+          {:else}
+            <PlusCircle class="h-3.5 w-3.5 mr-1.5" />
+          {/if}
+          Add to Workspace
         </Button>
 
-        <div class="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            class="text-xs"
-            onclick={handleCompressAsCopy}
-            disabled={isProcessing || !store.isDocumentLoaded}
-          >
-            {#if isProcessing}
-              <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" />
-            {:else}
-              <PlusCircle class="h-3.5 w-3.5 mr-1.5" />
-            {/if}
-            Add to Workspace
-          </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          class="h-8 text-xs"
+          onclick={handleCompressInPlace}
+          disabled={isProcessing || !store.isDocumentLoaded}
+        >
+          {#if isProcessing}
+            <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" />
+          {:else}
+            <RefreshCw class="h-3.5 w-3.5 mr-1.5" />
+          {/if}
+          Replace Active
+        </Button>
 
-          <Button
-            variant="outline"
-            size="sm"
-            class="text-xs"
-            onclick={handleCompressInPlace}
-            disabled={isProcessing || !store.isDocumentLoaded}
-          >
-            {#if isProcessing}
-              <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" />
-            {:else}
-              <RefreshCw class="h-3.5 w-3.5 mr-1.5" />
-            {/if}
-            Replace Active
-          </Button>
-
-          <Button
-            variant="default"
-            size="sm"
-            class="text-xs font-medium"
-            onclick={handleCompressAndDownload}
-            disabled={isProcessing || !store.isDocumentLoaded}
-          >
-            {#if isProcessing}
-              <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" />
-              Compressing...
-            {:else}
-              <Download class="h-3.5 w-3.5 mr-1.5" />
-              Download
-            {/if}
-          </Button>
-        </div>
-      </Dialog.Footer>
-    </Dialog.Content>
-  </Dialog.Root>
+        <Button
+          variant="secondary"
+          size="sm"
+          class="h-8 text-xs font-medium"
+          onclick={handleCompressAndDownload}
+          disabled={isProcessing || !store.isDocumentLoaded}
+        >
+          {#if isProcessing}
+            <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" />
+            Compressing...
+          {:else}
+            <Download class="h-3.5 w-3.5 mr-1.5" />
+            Download
+          {/if}
+        </Button>
+      </div>
+    </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
