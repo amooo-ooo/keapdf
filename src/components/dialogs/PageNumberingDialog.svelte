@@ -532,3 +532,541 @@
                   />
                 </div>
 
+                <div class="field-group">
+                  <Label for="bates-digits" class="field-label">Digits (Padding)</Label>
+                  <Input
+                    id="bates-digits"
+                    type="number"
+                    min={1}
+                    max={16}
+                    bind:value={batesDigits}
+                    class="field-input"
+                  />
+                </div>
+
+                <div class="field-group">
+                  <Label for="bates-increment" class="field-label">Increment Step</Label>
+                  <Input
+                    id="bates-increment"
+                    type="number"
+                    min={1}
+                    max={1000}
+                    bind:value={batesIncrement}
+                    class="field-input"
+                  />
+                </div>
+              </div>
+
+              <div class="field-group">
+                <Label for="bates-template" class="field-label">Stamp Template</Label>
+                <Input
+                  id="bates-template"
+                  type="text"
+                  bind:value={batesTemplate}
+                  placeholder="&#123;bates&#125;"
+                  class="field-input"
+                />
+                <div class="flex flex-wrap items-center gap-1 pt-1">
+                  <span class="text-[11px] text-muted-foreground mr-1 whitespace-nowrap">Insert token:</span>
+                  {#each BATES_TOKENS as item (item.token)}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      class="h-8 px-2 text-xs"
+                      onclick={() => appendToken(item.token)}
+                    >
+                      {item.label}
+                    </Button>
+                  {/each}
+                </div>
+              </div>
+            </div>
+          {:else}
+            <!-- note: running header and footer text template -->
+            <div class="dialog-section">
+              <span class="dialog-section-title">Header &amp; Footer Template</span>
+
+              <div class="field-group">
+                <Label for="hf-template" class="field-label">Running Text</Label>
+                <Input
+                  id="hf-template"
+                  type="text"
+                  bind:value={headerFooterTemplate}
+                  placeholder="&#123;file&#125; - Page &#123;page&#125; of &#123;total&#125;"
+                  class="field-input"
+                />
+                <div class="flex flex-wrap items-center gap-1 pt-1">
+                  <span class="text-[11px] text-muted-foreground mr-1 whitespace-nowrap">Insert token:</span>
+                  {#each PAGE_TOKENS as item (item.token)}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      class="h-8 px-2 text-xs"
+                      onclick={() => appendToken(item.token)}
+                    >
+                      {item.label}
+                    </Button>
+                  {/each}
+                </div>
+              </div>
+            </div>
+          {/if}
+
+          <!-- note: position and margin offsets -->
+          <div class="dialog-section">
+            <span class="dialog-section-title">Position &amp; Margins</span>
+
+            <div class="field-group">
+              <Label class="field-label">Page Anchor Position</Label>
+              <div class="grid grid-cols-3 gap-1.5">
+                {#each POSITION_GRID as pos (pos.value)}
+                  <Button
+                    type="button"
+                    variant={position === pos.value ? 'secondary' : 'outline'}
+                    size="sm"
+                    class="h-8 text-xs"
+                    onclick={() => (position = pos.value)}
+                  >
+                    {pos.label}
+                  </Button>
+                {/each}
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 pt-1">
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <Label class="field-label">Horizontal Margin</Label>
+                </div>
+                <Slider
+                  type="single"
+                  min={8}
+                  max={144}
+                  step={2}
+                  bind:value={marginHorizontalPts}
+                  unit="pt"
+                />
+              </div>
+
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <Label class="field-label">Vertical Margin</Label>
+                </div>
+                <Slider
+                  type="single"
+                  min={8}
+                  max={144}
+                  step={2}
+                  bind:value={marginVerticalPts}
+                  unit="pt"
+                />
+              </div>
+            </div>
+          </div>
+
+          <!-- note: typography and colour appearance -->
+          <div class="dialog-section">
+            <span class="dialog-section-title">Typography &amp; Appearance</span>
+
+            <div class="grid grid-cols-12 gap-2 items-end">
+              <div class="col-span-6 field-group">
+                <Label class="field-label">Font Family</Label>
+                <Select.Root
+                  type="single"
+                  value={fontFamily}
+                  onValueChange={(val) => {
+                    if (val) fontFamily = val;
+                  }}
+                >
+                  <Select.Trigger class="h-8 text-xs w-full">
+                    {FONT_OPTIONS.find((f) => f.value === fontFamily)?.label ?? fontFamily}
+                  </Select.Trigger>
+                  <Select.Content>
+                    {#each FONT_OPTIONS as f (f.value)}
+                      <Select.Item value={f.value} label={f.label}>
+                        {f.label}
+                      </Select.Item>
+                    {/each}
+                  </Select.Content>
+                </Select.Root>
+              </div>
+
+              <div class="col-span-4 field-group">
+                <Label class="field-label">Formatting</Label>
+                <ButtonGroup variant="outline" size="sm" class="w-full h-8">
+                  <Button
+                    type="button"
+                    variant={fontWeight === 'bold' ? 'secondary' : 'outline'}
+                    size="sm"
+                    class="flex-1 h-8 text-xs"
+                    title="Bold"
+                    onclick={() => (fontWeight = fontWeight === 'bold' ? 'normal' : 'bold')}
+                  >
+                    <Bold class="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={fontStyle === 'italic' ? 'secondary' : 'outline'}
+                    size="sm"
+                    class="flex-1 h-8 text-xs"
+                    title="Italic"
+                    onclick={() => (fontStyle = fontStyle === 'italic' ? 'normal' : 'italic')}
+                  >
+                    <Italic class="h-3.5 w-3.5" />
+                  </Button>
+                </ButtonGroup>
+              </div>
+
+              <div class="col-span-2 field-group">
+                <Label class="field-label">Colour</Label>
+                <div class="h-8 flex items-center">
+                  <ColorPicker bind:value={color} />
+                </div>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 pt-1">
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <Label class="field-label">Font Size</Label>
+                </div>
+                <Slider
+                  type="single"
+                  min={6}
+                  max={36}
+                  step={1}
+                  bind:value={fontSize}
+                  unit="pt"
+                />
+              </div>
+
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <Label class="field-label">Opacity</Label>
+                </div>
+                <Slider
+                  type="single"
+                  min={10}
+                  max={100}
+                  step={5}
+                  bind:value={opacity}
+                  unit="%"
+                />
+              </div>
+            </div>
+          </div>
+
+          <!-- note: target page scope and filtering -->
+          <div class="dialog-section">
+            <span class="dialog-section-title">Target Pages &amp; Filtering</span>
+
+            <ButtonGroup variant="outline" size="sm" class="w-full h-8">
+              <Button
+                type="button"
+                variant={scope === 'all' ? 'secondary' : 'outline'}
+                size="sm"
+                class="flex-1 h-8 text-xs"
+                onclick={() => {
+                  scope = 'all';
+                  errorMessage = null;
+                }}
+              >
+                All ({store.pageCount})
+              </Button>
+              <Button
+                type="button"
+                variant={scope === 'current' ? 'secondary' : 'outline'}
+                size="sm"
+                class="flex-1 h-8 text-xs"
+                onclick={() => {
+                  scope = 'current';
+                  errorMessage = null;
+                }}
+              >
+                Current ({store.currentPageIndex + 1})
+              </Button>
+              {#if selectedPageIndices.length > 0}
+                <Button
+                  type="button"
+                  variant={scope === 'selected' ? 'secondary' : 'outline'}
+                  size="sm"
+                  class="flex-1 h-8 text-xs"
+                  onclick={() => {
+                    scope = 'selected';
+                    errorMessage = null;
+                  }}
+                >
+                  Selected ({selectedPageIndices.length})
+                </Button>
+              {/if}
+              <Button
+                type="button"
+                variant={scope === 'custom' ? 'secondary' : 'outline'}
+                size="sm"
+                class="flex-1 h-8 text-xs"
+                onclick={() => {
+                  scope = 'custom';
+                  errorMessage = null;
+                }}
+              >
+                Range
+              </Button>
+            </ButtonGroup>
+
+            {#if scope === 'custom'}
+              <div class="field-group pt-1">
+                <Label for="page-num-range" class="field-label">Page Range</Label>
+                <Input
+                  id="page-num-range"
+                  type="text"
+                  bind:value={customRange}
+                  oninput={() => (errorMessage = null)}
+                  onkeydown={(e: KeyboardEvent) => {
+                    if (e.key === 'Enter' && !isProcessing) void handleApply();
+                  }}
+                  placeholder="e.g. 1-5, 8, 11-13"
+                  class="field-input"
+                />
+              </div>
+            {/if}
+
+            <div class="field-group pt-1">
+              <Label class="field-label">Page Parity Filter</Label>
+              <ButtonGroup variant="outline" size="sm" class="w-full h-8">
+                <Button
+                  type="button"
+                  variant={parity === 'all' ? 'secondary' : 'outline'}
+                  size="sm"
+                  class="flex-1 h-8 text-xs"
+                  onclick={() => (parity = 'all')}
+                >
+                  All Pages
+                </Button>
+                <Button
+                  type="button"
+                  variant={parity === 'odd' ? 'secondary' : 'outline'}
+                  size="sm"
+                  class="flex-1 h-8 text-xs"
+                  onclick={() => (parity = 'odd')}
+                >
+                  Odd Only
+                </Button>
+                <Button
+                  type="button"
+                  variant={parity === 'even' ? 'secondary' : 'outline'}
+                  size="sm"
+                  class="flex-1 h-8 text-xs"
+                  onclick={() => (parity = 'even')}
+                >
+                  Even Only
+                </Button>
+              </ButtonGroup>
+            </div>
+
+            <div class="dialog-card space-y-2">
+              <ControlRow
+                label="Skip Cover / First Page"
+                description="Omit numbering stamp on Page 1 of the document."
+              >
+                {#snippet children()}
+                  <Switch bind:checked={skipFirstPage} />
+                {/snippet}
+              </ControlRow>
+
+              <ControlRow
+                label="Count Skipped Pages in Sequence"
+                description="Advance sequence number by physical page index rather than stamped count."
+              >
+                {#snippet children()}
+                  <Switch bind:checked={countSkippedPages} />
+                {/snippet}
+              </ControlRow>
+            </div>
+          </div>
+        </div>
+
+        <!-- note: right live preview column -->
+        <div class="md:col-span-5 flex flex-col gap-3">
+          <div class="dialog-card flex-1 flex flex-col justify-between p-3 bg-muted/20">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-medium text-foreground whitespace-nowrap">Live Stamp Preview</span>
+              <div class="flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  class="h-8 w-8 p-0"
+                  onclick={prevPreviewPage}
+                  disabled={previewPageIndex <= 0}
+                  title="Previous Page"
+                >
+                  <ChevronLeft class="h-3.5 w-3.5" />
+                </Button>
+                <span class="text-[11px] text-muted-foreground whitespace-nowrap px-1">
+                  Page {previewStampInfo.pageIndex + 1} of {Math.max(1, store.pageCount)}
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  class="h-8 w-8 p-0"
+                  onclick={nextPreviewPage}
+                  disabled={previewPageIndex >= Math.max(0, store.pageCount - 1)}
+                  title="Next Page"
+                >
+                  <ChevronRight class="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+
+            <!-- note: schematic page sheet preview -->
+            <div class="my-3 flex items-center justify-center flex-1">
+              <div
+                class="relative w-full max-w-[230px] aspect-[1/1.414] bg-background border border-border rounded-[var(--radius-card-inner)] shadow-sm overflow-hidden flex flex-col justify-between p-4"
+              >
+                <!-- note: simulated document body lines -->
+                <div class="my-auto space-y-2 px-3 opacity-25 pointer-events-none">
+                  <div class="h-2 w-2/3 rounded bg-muted-foreground/40"></div>
+                  <div class="h-1.5 w-full rounded bg-muted-foreground/30"></div>
+                  <div class="h-1.5 w-11/12 rounded bg-muted-foreground/30"></div>
+                  <div class="h-1.5 w-4/5 rounded bg-muted-foreground/30"></div>
+                  <div class="h-1.5 w-full rounded bg-muted-foreground/30"></div>
+                  <div class="h-1.5 w-3/4 rounded bg-muted-foreground/30"></div>
+                </div>
+
+                <!-- note: active stamp overlay inside schematic sheet -->
+                {#if previewStampInfo.isTargeted}
+                  <div
+                    class="absolute pointer-events-none px-1 py-0.5 rounded bg-selection/10 border border-selection/30 max-w-[90%] truncate"
+                    title={previewStampInfo.text}
+                    style:top={position.startsWith('top-')
+                      ? `${Math.min(35, Math.max(4, Math.round((marginVerticalPts / 792) * 100)))}%`
+                      : undefined}
+                    style:bottom={position.startsWith('bottom-')
+                      ? `${Math.min(35, Math.max(4, Math.round((marginVerticalPts / 792) * 100)))}%`
+                      : undefined}
+                    style:left={position.endsWith('-left')
+                      ? `${Math.min(35, Math.max(4, Math.round((marginHorizontalPts / 612) * 100)))}%`
+                      : position.endsWith('-center')
+                        ? '50%'
+                        : undefined}
+                    style:right={position.endsWith('-right')
+                      ? `${Math.min(35, Math.max(4, Math.round((marginHorizontalPts / 612) * 100)))}%`
+                      : undefined}
+                    style:transform={position.endsWith('-center') ? 'translateX(-50%)' : undefined}
+                    style:font-family={fontFamily === 'Courier'
+                      ? 'Courier, monospace'
+                      : fontFamily === 'Times-Roman'
+                        ? 'Times New Roman, serif'
+                        : 'Inter, Helvetica, sans-serif'}
+                    style:font-size={`${Math.max(8, Math.min(18, Math.round(fontSize * 0.95)))}px`}
+                    style:font-weight={fontWeight}
+                    style:font-style={fontStyle}
+                    style:color={color}
+                    style:opacity={opacity / 100}
+                  >
+                    {previewStampInfo.text || ' '}
+                  </div>
+                {:else}
+                  <div
+                    class="absolute inset-x-4 bottom-3 text-center text-[10px] text-muted-foreground bg-muted/60 rounded py-1 px-2"
+                  >
+                    Page skipped by current filter
+                  </div>
+                {/if}
+              </div>
+            </div>
+
+            <!-- note: stamp summary metadata card -->
+            <div class="space-y-1.5 border-t border-border pt-2.5 text-[11px]">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-muted-foreground whitespace-nowrap">Preview Output:</span>
+                <span
+                  class="font-medium text-foreground truncate"
+                  title={previewStampInfo.isTargeted ? previewStampInfo.text : 'Skipped'}
+                >
+                  {previewStampInfo.isTargeted ? previewStampInfo.text : 'Skipped on this page'}
+                </span>
+              </div>
+
+              {#if batesRangeSummary}
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-muted-foreground whitespace-nowrap">Bates Range:</span>
+                  <span
+                    class="font-medium text-foreground truncate"
+                    title="{batesRangeSummary.firstLabel} to {batesRangeSummary.lastLabel}"
+                  >
+                    {batesRangeSummary.firstLabel} to {batesRangeSummary.lastLabel}
+                  </span>
+                </div>
+              {/if}
+
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-muted-foreground whitespace-nowrap">Pages to Stamp:</span>
+                <Badge variant="outline" class="text-[10px] whitespace-nowrap">
+                  {targetPageResolution.indices.length} of {store.pageCount} pages
+                </Badge>
+              </div>
+            </div>
+          </div>
+
+          <div class="dialog-callout text-[11px] text-muted-foreground">
+            Stamps are burned directly into the PDF content stream and support full Undo and Redo history.
+          </div>
+        </div>
+      </div>
+
+      {#if errorMessage}
+        <div class="dialog-error mt-3" role="alert">
+          {errorMessage}
+        </div>
+      {/if}
+    </div>
+
+    <Dialog.Footer class="justify-between">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        class="h-8 text-xs gap-1.5"
+        onclick={() => resetToDefaults()}
+        disabled={isProcessing}
+      >
+        <RotateCcw class="h-3.5 w-3.5" />
+        Reset
+      </Button>
+
+      <div class="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          class="h-8 text-xs"
+          onclick={() => actions.closePageNumberingDialog()}
+          disabled={isProcessing}
+        >
+          Cancel
+        </Button>
+
+        <Button
+          type="button"
+          variant="default"
+          size="sm"
+          class="h-8 text-xs gap-1.5"
+          onclick={handleApply}
+          disabled={isProcessing || !store.isDocumentLoaded}
+        >
+          {#if isProcessing}
+            <Loader2 class="h-3.5 w-3.5 animate-spin" />
+            Applying...
+          {:else}
+            <Check class="h-3.5 w-3.5" />
+            Apply to {targetPageResolution.indices.length} {targetPageResolution.indices.length === 1 ? 'Page' : 'Pages'}
+          {/if}
+        </Button>
+      </div>
+    </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
