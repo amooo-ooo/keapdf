@@ -1,212 +1,166 @@
-# Kea PDF
+# KeaPDF
 
 [![Licence: AGPL v3](https://img.shields.io/badge/Licence-AGPL%20v3-blue.svg)](LICENSE)
 [![Built with Svelte 5](https://img.shields.io/badge/Svelte-5-orange.svg)](https://svelte.dev/)
 [![Engine: PDFium WASM](https://img.shields.io/badge/Engine-PDFium%20WASM-green.svg)](https://pdfium.googlesource.com/pdfium/)
 [![Runtime: Bun](https://img.shields.io/badge/Runtime-Bun-f472b6.svg)](https://bun.sh/)
 
-A high-performance, browser-native PDF editor built with Svelte 5, TypeScript, Tailwind CSS v4, and Google PDFium compiled to WebAssembly. All parsing, rendering, text editing, drawing, layout imposition, cryptographic signing, and document mutations execute entirely client-side with zero server round-trips.
+A client-side PDF editor built with Svelte 5, TypeScript, Tailwind CSS v4, and PDFium WebAssembly. All document processing runs locally in the browser.
 
-For the exhaustive 600-line architecture manual and technical specification, see [CONTEXT.md](CONTEXT.md). For the complete catalogue of low-level PDF operations and interactive canvas tools, see [TOOLS.md](TOOLS.md).
+> [!NOTE]
+> KeaPDF is in early beta.
 
 ## Features
 
-- **In-Place Native Text Editing**: Edit existing PDF text directly while preserving embedded font subsets, layout metrics, and character styling.
-- **4-Pass Spatial Paragraph Detector**: Clusters raw PDF glyphs into semantic paragraphs with orientation normalisation, word assembly, line assembly, and block clustering.
-- **Typographic Advance Tolerance Reflow**: Line breaks use an advance width buffer (`Math.max(4, fontSize * 0.35)`) to prevent premature line wrapping on trailing words, with automatic vertical shifting of downstream content.
-- **Interactive Canvas Overlays**: Extensible element registry system supporting rich text, images, vector shapes, AcroForm fields, freehand ink paths, and sticky notes.
-- **Direct Manipulation Controls**: 8-handle directional scaling with unrotated vector projection, aspect ratio locks, centre-origin polar rotation with 5-degree magnetic snapping, and horizontal/vertical mirroring.
-- **Canvas-to-PDF Baking**: The burn pipeline serialises overlay elements directly into PDFium content streams as native vector paths, bitmap objects, and standard PDF annotations.
-- **Layout Imposition Engine**: Client-side multi-page N-up printing, saddle-stitch booklet folding with mathematical folio pairing, continuous single-page canvas, posterise multi-sheet tiling, and cut-and-stack imposition.
-- **Cryptographic Digital Signatures**: ISO 32000 Section 12.8 detached PKCS#7 signing, SHA-256 byte-range calculation, client-side RSA 2048/4096-bit self-signed certificate generation, PKCS#12 bundle support, and signature verification with tamper detection.
-- **E-Signature Studio**: Create signatures via canvas drawing with quadratic Bezier curve smoothing, cursive keyboard entry (6 handwriting fonts), or image upload with dynamic background luminance thresholding.
-- **Document Sanitisation**: Scrub 11 sensitive object categories: Info metadata, XMP streams, file attachments, JavaScript actions, form fields, outlines, annotations, external hyperlinks, PieceInfo private data, thumbnails, and structural tag trees.
-- **Autonomous AI Agent Interface (W3C WebMCP)**: Implements the W3C Web Model Context Protocol draft specification with a Semantic Document Graph (SDG), stable session IDs, NFC normalisation, byte-level anchor verification, single-writer write lock (`SdgLock`), sliding-window rate limiter (30 mutations/min), staged proposal store, and 53 atomic tools under the `pdf.*` namespace.
-- **Invertible Command Architecture**: Undo and redo history with 1000ms continuous merge coalescing, transactional compound rollback, and per-document history stacks.
-- **Multi-File Workspace**: Tabbed multi-document management with unproxied binary buffer storage (`fileBufferStore`), full-screen page organiser grid, and split/extract tools.
-- **Modular Exporters**: Dynamically registered export targets for standard PDF, flattened PDF (`FPDFPage_Flatten`), high-DPI raster images (PNG/JPEG with ZIP export), and plain text extraction.
-- **Extensible Plugin System**: Layer 5 public API (`api.elements`, `api.tools`, `api.panels`, `api.exporters`, `api.commands`, `api.events`) with scoped lifecycle management and automatic resource teardown.
+- **In-Place Text Editing**: Edit PDF text directly while preserving embedded fonts and styling, with automatic paragraph detection, word wrapping, and table cell isolation.
+- **Canvas Overlays and Annotations**: Add and burn rich text, text highlights, vector shapes, lines and arrows with endpoint snapping, freehand ink, images, comments, and barcodes into PDF content streams, or remove items with the cross-layer eraser.
+- **Forms, Signatures, and Redaction**: Fill, extract, and create AcroForm fields. Sign documents with PKCS#7 / PAdES-B-LT digital certificates, RFC 3161 timestamps, incremental multi-signature revisions, signature verification, or drawn and typed e-signatures. Permanently redact text and images or sanitise document metadata.
+- **Page Layout, Outlines, and Imposition**: Merge, split, reorder, rotate, crop, and scale pages. Manage PDF bookmark outlines and document metadata, add page numbers, Bates numbering, headers, and footers, or generate N-up, booklet, poster, and cut-and-stack layouts.
+- **Conversion and Export**: Convert GFM Markdown (with Mermaid diagrams and LaTeX maths), HTML, DOCX, PPTX, and spreadsheets (XLSX, CSV, TSV) to PDF. Export PDFs to Word, PowerPoint, Excel, CSV, HTML, Markdown, plain text, images (PNG/JPEG), and flattened or compressed PDFs.
+- **OCR and Colour Adjustments**: Run Tesseract OCR in Web Workers to add searchable text layers to scanned pages, and adjust page colour, contrast, greyscale, and monochrome levels.
+- **Multi-Document Workspace and Plugins**: Manage multiple open documents with isolated undo/redo history stacks, a plugin API, and W3C WebMCP tools.
 
-## URL Parameter Routing & Industry Benchmark Suites
+## Technology Stack
 
-The editor supports direct document loading via URL query parameters and hash fragments. It connects to real-world benchmark PDF documents used by major engines (Mozilla PDF.js, Adobe Acrobat, Hopding pdf-lib) to capture parser, AcroForm, typography, vector, and memory errors across complex edge cases.
+| Layer | Technology | Role |
+|:---|:---|:---|
+| **Runtime & Package Manager** | [Bun](https://bun.sh/) | Package management (`bun.lock`), script runner, and test execution |
+| **Framework** | [Svelte 5](https://svelte.dev/) | Reactive UI using Runes (`$state`, `$derived`, `$props`, `$effect`) and Snippets |
+| **Language** | [TypeScript](https://www.typescriptlang.org/) | Static typing (`ES2022` target) |
+| **Styling & UI** | [Tailwind CSS v4](https://tailwindcss.com/) + `bits-ui` | OKLCH design tokens, `paneforge` split panes, and `lucide-svelte` icons |
+| **PDF Engine** | `@embedpdf/pdfium` + `pdf-lib` | WebAssembly PDFium rendering/FFI operations and AcroForm/revision serialisation |
+| **Cryptography & OCR** | `node-forge` + `tesseract.js` | PKCS#7 signing, RC4/AES encryption preservation, and Web Worker OCR |
+| **Deployment** | [Cloudflare Workers](https://workers.cloudflare.com/) | Static asset hosting via Wrangler (`wrangler.toml`) and PWA service worker caching |
 
-To eliminate frontend bundle bloat, zero test PDF binaries are packaged in the client distribution. Documents stream on demand from verified, CORS-permissive repositories with automatic fallbacks to client-side procedural generators when offline.
-
-### Supported Parameters
-
-| Parameter | Syntax Example | Description |
-|---|---|---|
-| `demo` | `?demo=forms` or `?demo=160f` | Opens a curated industry benchmark suite or preset by ID or alias |
-| `demo` (direct) | `?demo=https://example.com/doc.pdf` | Streams an external PDF URL directly via the demo parameter |
-| `url` | `?url=https://example.com/doc.pdf` | Fetches and opens a public PDF from a CORS-enabled HTTPS endpoint |
-| `pdf` | `?pdf=https://example.com/doc.pdf` | Alias for `url` parameter |
-| `file` | `?file=https://example.com/doc.pdf` | Alias for `url` parameter |
-| Hash fragment | `#demo=tracemonkey` or `#url=https://...` | Hash-based routing for static single-page application hosts |
-
-### Curated Benchmark Document Presets
-
-| Preset ID | Aliases | Origin Suite | Benchmark Document | Technical Focus & Capabilities |
-|---|---|---|---|---|
-| `iso-32000-forms` | `forms`, `160f`, `acroform`, `dod` | Mozilla PDF.js / Arizona | `160F-2019.pdf` (328 kB) | 30+ interactive AcroForm widgets, comb boxes, calculation grids, checkmarks, appearance streams |
-| `typography-stress` | `typography`, `tracemonkey`, `pldi`, `fonts` | Mozilla PDF.js (PLDI '09) | `compressed.tracemonkey-pldi-09.pdf` (1.01 MB) | 14 pages of dense 2-column text, Type 1/TrueType subset fonts, math symbols, superscripts, footnotes |
-| `vector-graphics` | `vector`, `alphatrans`, `shapes`, `graphics` | Mozilla PDF.js Vector Suite | `alphatrans.pdf` (16.9 kB) | PDF graphics state, alpha transparency channels, soft masks, composite paths, blend modes |
-| `linearized-multipage` | `multipage`, `freeculture`, `book` | Lawrence Lessig / PDF.js | `freeculture.pdf` (2.59 MB) | Full 270+ page book: large document virtualization, LRU memory eviction, multi-page layout caching |
-| `pdfa-signatures` | `signatures`, `with_signature`, `pdfa` | Hopding pdf-lib / Acrobat | `with_signature.pdf` (12.1 kB) | Cryptographic digital signature dictionary (/Sig), signed visual appearance, byte range hashes |
-| `annotations-redaction` | `annotations`, `comments`, `notes` | Mozilla PDF.js Annotations | `comments.pdf` (1.06 MB) | Native annotations: popup comment threads, sticky notes, freehand ink lines, highlights, strikeout markups |
-| `sample` | `demo`, `template`, `default` | Native Showcase Template | `sample.pdf` (3 pages) | Multi-page showcase with canvas overlays, editable text, shapes, arrows, ink, image scaling |
-
-### URL Usage Examples
-
-```bash
-# Open interactive Arizona tax schedule (AcroForms benchmark)
-http://localhost:3000/?demo=forms
-http://localhost:3000/?demo=160f
-
-# Open 14-page TraceMonkey PLDI paper (Typography & reflow benchmark)
-http://localhost:3000/?demo=typography
-http://localhost:3000/?demo=tracemonkey
-
-# Open alpha transparency & vector graphics benchmark
-http://localhost:3000/?demo=vector
-http://localhost:3000/?demo=alphatrans
-
-# Open 270-page Free Culture book (Large publication & LRU cache benchmark)
-http://localhost:3000/?demo=multipage
-http://localhost:3000/?demo=freeculture
-
-# Open cryptographic digital signature benchmark
-http://localhost:3000/?demo=signatures
-http://localhost:3000/?demo=with_signature
-
-# Open native annotations and comment threads benchmark
-http://localhost:3000/?demo=annotations
-http://localhost:3000/?demo=comments
-
-# Open any external CORS-permissive PDF by URL
-http://localhost:3000/?url=https://raw.githubusercontent.com/Hopding/pdf-lib/master/assets/pdfs/dod_character.pdf
-
-# Open via SPA hash fragment
-http://localhost:3000/#demo=forms
-```
-
-### Security and Edge Case Guarantees
-
-- **Protocol Whitelist**: Only `http:`, `https:`, and application-relative paths are accepted. Dangerous schemes (`javascript:`, `data:text/html`, `file:`, `ftp:`) and path traversal sequences (`../..`) are rejected immediately.
-- **Magic Byte Verification**: Per ISO 32000-1 Clause 7.5.2, byte streams are validated for the `%PDF-` signature within the first 1024 bytes before PDFium allocation, rejecting HTML error pages and corrupt downloads.
-- **Network Timeout**: 15-second AbortController timeout prevents stalled requests on slow or unresponsive networks.
-- **CORS Diagnostics**: Detailed error messages provide clear remediation guidance if a remote server restricts cross-origin resource sharing.
-- **Offline Fallback**: Transparently switches to in-memory procedural generators if network access is unavailable, ensuring zero downtime.
-
-## Quick Start
+## Getting Started
 
 ### Prerequisites
 
-- [Bun](https://bun.sh/) (version 1.0 or later). Never use npm, yarn, or pnpm.
+- [Bun](https://bun.sh/) v1.0 or later.
 
-### Setup and Development
-
-Clone the repository and start the local development server:
+### Installation
 
 ```bash
-git clone https://github.com/amooo-ooo/kea-pdf.git
-cd kea-pdf
+git clone https://github.com/amooo-ooo/pdf-editor.git
+cd pdf-editor
 bun install
 bun run dev
 ```
 
-The Vite dev server starts at `http://localhost:3000` and opens automatically in your browser.
+The development server starts at `http://localhost:3000`.
 
 ### Available Scripts
 
 | Command | Description |
-|---|---|
-| `bun install` | Installs project dependencies using bun.lock |
-| `bun run dev` | Starts Vite development server on port 3000 |
-| `bun test` | Runs unit and integration test suites with Bun test runner |
-| `bun run build` | Runs svelte-check diagnostics, then compiles production bundle |
-| `bun run preview` | Serves compiled production build locally for verification |
-| `bun run deploy` | Compiles application and deploys to Cloudflare Pages via Wrangler |
-| `bunx svelte-check` | Runs standalone TypeScript and Svelte diagnostics |
+|:---|:---|
+| `bun install` | Install dependencies using `bun.lock` |
+| `bun run dev` | Start the Vite development server on port 3000 |
+| `bun test` | Run the test suite via the Bun test runner |
+| `bunx svelte-check` | Run Svelte 5 and TypeScript diagnostics |
+| `bun run build` | Run type-checks and build the production bundle into `dist/` |
+| `bun run preview` | Preview the production build locally |
+| `bun run deploy` | Build and deploy to Cloudflare Workers via Wrangler |
+| `bun run find-style <query>` | Scan stylesheets and components for CSS tokens, classes, and variants |
 
-## Architecture at a Glance
+## Architecture
 
-Dependencies flow strictly downward across five decoupled layers:
+Dependencies flow from the UI shell and extension registries through reactive rune stores and domain services to the WebAssembly runtime:
 
+```mermaid
+flowchart LR
+    subgraph UI["Presentation & Extensions"]
+        Components["UI Shell, Canvas & Dialogs (src/components/, src/lib/)"]
+        Registries["Elements, Tools, Panels & Plugins (src/elements/, src/tools/, src/panels/, src/plugins/)"]
+        WebMCP["WebMCP Agent Runtime (src/core/webmcp/)"]
+    end
+
+    subgraph State["State, Actions & History"]
+        Stores["Svelte 5 Rune Stores (EditorStore, CanvasStore, HistoryStore)"]
+        Actions["Action Orchestrators (EditorActions, CanvasActions)"]
+        Commands["Invertible Commands & Optimistic Queue (src/commands/, optimistic-actions.ts)"]
+    end
+
+    subgraph Domain["Domain Services (src/services/)"]
+        Facade["PDF Facades (PdfEditorService, PdfDocument, PdfPage)"]
+        Ops["PDF Operations & Encryption (pdf/operations/, pdf/encryption/)"]
+        Pipelines["Conversion, Export & OCR (conversion/, export/, ocr/)"]
+    end
+
+    subgraph Engine["Core Engine & Runtimes (src/core/)"]
+        Pdfium["PdfiumEngine Singleton & RAII Helpers (pdfium-engine.ts, pdfium-helpers.ts)"]
+        Libs["WASM & Crypto Runtimes (@embedpdf/pdfium, pdf-lib, node-forge, tesseract.js)"]
+    end
+
+    Components --> Stores
+    Components --> Actions
+    Registries --> Actions
+    WebMCP --> Actions
+    Actions --> Commands
+    Commands --> Stores
+    Actions --> Facade
+    Actions --> Pipelines
+    Facade --> Ops
+    Pipelines --> Facade
+    Ops --> Pdfium
+    Ops --> Libs
+    Pipelines --> Libs
+    Pdfium --> Libs
 ```
-+-------------------------------------------------------------+
-| Layer 1: Components (src/components/)                       |
-|   Canvas, Layout, Panels, Dialogs, Renderers, UI Primitives |
-+-------------------------------------------------------------+
-                              |
-                              v
-+-------------------------------------------------------------+
-| Layer 2: State Management (src/stores/)                     |
-|   EditorStore, CanvasStore, HistoryStore, SelectionStore    |
-|   EditorActions, CanvasActions, WebMcpStore                 |
-+-------------------------------------------------------------+
-                              |
-                              v
-+-------------------------------------------------------------+
-| Layer 3: Services (src/services/)                           |
-|   PdfEditorService, FontLoader, SignatureStorage            |
-|   PdfDocument Facade, PdfPage Facade, Operations Modules    |
-+-------------------------------------------------------------+
-                              |
-                              v
-+-------------------------------------------------------------+
-| Layer 4: Core Engine and Registries (src/core/)             |
-|   PdfiumEngine (WASM), Helpers, Command Pattern, Registries |
-|   WebMCP Coordinator, SDG Builder, Safety Guards            |
-+-------------------------------------------------------------+
-                              |
-                              v
-+-------------------------------------------------------------+
-| Layer 5: Extensibility (src/plugins/)                       |
-|   PluginManager, Sandboxed PluginAPI, Extension Modules     |
-+-------------------------------------------------------------+
+
+### Project Structure
+
+```text
+src/
+├── commands/       # Invertible Command classes for undo/redo history and coalescing
+├── components/     # Svelte 5 UI shell, canvas viewport, dialogs, and inspector panels
+├── core/           # PDFium WASM singleton, RAII helpers, registries, feature flags, and WebMCP
+├── elements/       # Canvas overlay element definitions and Svelte 5 renderers
+├── lib/            # Shared UI primitives (shadcn-svelte) and interaction hooks
+├── panels/         # Built-in sidebar panel registrations
+├── plugins/        # Built-in plugins consuming the Plugin API
+├── services/       # PDF facades, FFI operations, encryption, conversion, export, and OCR
+├── stores/         # Svelte 5 rune stores (*.svelte.ts) and async actions (*-actions.ts)
+├── styles/         # Component and layout stylesheets
+├── tools/          # Interactive canvas tools (Select, Hand, Text, Highlight, Pen, Redact, Note, Eraser)
+├── types/          # Shared TypeScript interfaces
+└── utils/          # Geometry, snapping, keyboard shortcuts, and file utilities
 ```
 
-### Engineering Invariants
+### Core Design Principles
 
-- **Process-Wide WASM Singleton**: `PdfiumEngine` manages a single instance of the 4.6 MB PDFium WebAssembly runtime with explicit heap allocation via `malloc` and `free`.
-- **RAII Resource Management**: Helper functions `withPageHandle` and `withTextPageHandle` wrap handles in `try...finally` blocks to guarantee `FPDF_ClosePage` execution.
-- **LRU Page Cache**: `PdfDocument` limits active WASM page handles to 10 (`MAX_CACHED_PAGES`), committing content and closing handles on eviction.
-- **Unproxied Binary Storage**: Large PDF `ArrayBuffer` payloads reside in an unproxied JavaScript `Map` outside Svelte reactive state, eliminating deep-proxy overhead.
-- **Memory Safety Cap**: Canvas rendering clamps total pixel area to 4,000,000 pixels to prevent GPU out-of-memory errors on high-DPI screens.
+- **Process-Wide WASM Singleton**: `PdfiumEngine` (`src/core/pdfium-engine.ts`) manages a single PDFium WebAssembly instance with explicit heap allocation and deallocation.
+- **RAII Handle Management**: `withPageHandle` and `withTextPageHandle` (`src/core/pdfium-helpers.ts`) wrap native handles in `try...finally` blocks to ensure deterministic cleanup.
+- **Optimistic Mutation Queue**: Page edits and rotations update visual state synchronously while queuing background WASM mutations and coalescing rapid bursts (`src/core/optimistic-actions.ts`).
+- **Unproxied Binary Buffers**: Raw PDF `ArrayBuffer` payloads and in-memory encryption credentials are stored in plain JavaScript `Map` structures outside Svelte `$state` proxies (`src/stores/editor.svelte.ts`).
+- **Invertible Command History**: Mutations dispatch `Command` objects with symmetric `execute()` and `undo()` methods and a 1000ms coalescing window for continuous interactions (`src/core/command.ts`).
 
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
-|---|---|
-| `Ctrl+O` | Open PDF file from disk |
-| `Ctrl+S` | Export current PDF document |
-| `Ctrl+Z` | Undo last action |
+|:---|:---|
+| `Ctrl+O` / `Cmd+O` | Open document |
+| `Ctrl+S` / `Cmd+S` | Export PDF document |
+| `Ctrl+Z` / `Cmd+Z` | Undo last action |
 | `Ctrl+Shift+Z` / `Ctrl+Y` | Redo last undone action |
-| `Ctrl+=` / `Ctrl++` | Zoom in |
-| `Ctrl+-` | Zoom out |
-| `Ctrl+0` | Reset zoom to 100 percent |
-| `Escape` | Cancel inline edit or clear selection |
+| `Ctrl+D` / `Cmd+D` | Duplicate selected element or text span |
+| `Ctrl+]` / `Ctrl+[` | Bring selected element forward / send backward |
+| `Ctrl+Shift+]` / `Ctrl+Shift+[` | Bring selected element to front / send to back |
+| `Ctrl+=` / `Ctrl+-` | Zoom in / zoom out |
+| `Ctrl+0` | Reset zoom to 100% |
+| `V` | Activate Select tool |
+| `Space + Drag` | Pan canvas viewport |
+| `Enter` | Apply active crop or clear selection |
+| `Escape` | Cancel active crop, inline edit, or clear selection |
 | `Delete` / `Backspace` | Delete selected element or text span |
-| `PageUp` / `PageDown` | Navigate pages |
-| `V` | Select Tool |
-| `H` | Hand (Pan) Tool |
-| `T` | Text Tool |
-| `Shift+H` | Highlight Tool |
-| `P` | Pen Tool |
-| `R` | Redact Tool |
-| `N` | Sticky Note Tool |
+| `PageUp` / `PageDown` | Navigate between pages |
 
-## Documentation Reference
+## Security
 
-- **[CONTEXT.md](CONTEXT.md)**: Deep technical architecture manual covering the 4-pass paragraph detector, in-place font subset preservation, layout imposition formulas, ISO 32000 detached PKCS#7 signing, and full WebMCP specification alignment.
-- **[TOOLS.md](TOOLS.md)**: Complete inventory of all 53 WebMCP atomic tools, low-level PDF operations, interactive canvas tools, and property subpanels.
-- **[AGENTS.md](AGENTS.md)**: Engineering guidelines, coding conventions, testing protocols, and design patterns for contributors and AI agents.
-- **[webmcp-pdf-editor-spec.md](webmcp-pdf-editor-spec.md)**: W3C Web Model Context Protocol specification for autonomous agent integration.
-- **[STORY.md](STORY.md)**: Project story, architectural inspiration, Devpost hackathon submission narrative, and technical learnings.
-- **[KEA_STORY.md](KEA_STORY.md)**: Comprehensive Devpost hackathon submission story, answering all four required questions with KaTeX math and architecture breakdown.
-- **[HACKATHON_REPORT.md](HACKATHON_REPORT.md)**: In-depth WebMCP hackathon evaluation report, judge profiles, benchmark winner analysis, and competition cross-reference matrix.
-- **[DEMO_WORKFLOW_AND_SCRIPT.md](DEMO_WORKFLOW_AND_SCRIPT.md)**: 3-prompt incremental agentic workflow and under-3-minute video demonstration script.
+- **Local Execution**: Document rendering, editing, conversion, OCR, and signing run in browser memory.
+- **Encryption Preservation**: Password-protected PDFs (ISO 32000 revisions 2 to 6: RC4, AES-128, and AES-256) retain their encryption parameters and permissions across edits (`src/services/pdf/encryption/`).
+- **Signature Integrity**: Signed documents emit unmodified bytes verbatim and append subsequent signatures as ISO 32000-1 incremental updates (`src/services/pdf/operations/signature-revision-ops.ts`).
+- **Content Redaction**: Permanently strips underlying text glyphs and wipes raster image pixels within redaction bounds before burning vector masks (`src/tools/redact-tool.ts`, `src/services/pdf/operations/text-edit-ops.ts`).
+- **Document Sanitisation**: Strips metadata, XMP streams, embedded attachments, JavaScript actions, hidden layers, and private application data (`src/services/pdf/operations/sanitize-ops.ts`).
 
 ## Licence
 
