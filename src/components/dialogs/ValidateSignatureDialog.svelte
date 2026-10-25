@@ -50,38 +50,38 @@
 </script>
 
 <Dialog.Root open={store.showValidateSignaturesDialog} onOpenChange={(open) => { if (!open) handleClose(); }}>
-  <Dialog.Content class="sm:max-w-[620px] max-h-[85vh] flex flex-col p-0 overflow-hidden">
-    <Dialog.Header class="px-6 pt-5 pb-3 border-b border-border bg-card pr-12">
+  <Dialog.Content class="sm:max-w-[600px]">
+    <Dialog.Header class="pr-12">
       <div class="flex items-center justify-between">
-        <Dialog.Title class="flex items-center gap-2 text-base font-semibold">
-          <ShieldCheck class="h-4 w-4 text-primary" />
+        <Dialog.Title>
+          <ShieldCheck class="h-4 w-4" />
           Digital Signature Verification (ISO 32000)
         </Dialog.Title>
-        <Button size="sm" variant="ghost" class="h-7 text-xs px-2" onclick={runValidation} disabled={isValidating}>
+        <Button size="sm" variant="outline" class="h-8 text-xs px-2.5" onclick={runValidation} disabled={isValidating}>
           <RefreshCw class="h-3 w-3 mr-1 {isValidating ? 'animate-spin' : ''}" />
           Refresh
         </Button>
       </div>
-      <Dialog.Description class="text-xs text-muted-foreground">
+      <Dialog.Description>
         Cryptographic integrity checks and certificate validity analysis for embedded PDF signatures.
       </Dialog.Description>
     </Dialog.Header>
 
-    <div class="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+    <div class="dialog-body">
       {#if isValidating}
         <div class="py-12 flex flex-col items-center justify-center text-center space-y-2">
-          <RefreshCw class="h-6 w-6 animate-spin text-primary" />
+          <RefreshCw class="h-6 w-6 animate-spin text-muted-foreground" />
           <p class="text-xs text-muted-foreground">Checking ByteRanges and verifying cryptographic signatures...</p>
         </div>
       {:else if results.length === 0}
-        <div class="py-10 border border-dashed border-border rounded-lg text-center flex flex-col items-center justify-center gap-2">
+        <div class="py-10 border border-dashed border-border rounded-[var(--radius-card)] text-center flex flex-col items-center justify-center gap-2">
           <FileCheck class="h-8 w-8 text-muted-foreground stroke-1" />
           <div class="text-xs font-semibold">No Digital Signatures Found</div>
           <p class="text-[11px] text-muted-foreground max-w-[340px]">
             This document does not contain any embedded PDF ISO 32000 digital signature dictionaries or AcroForm signature fields.
           </p>
-          <Button size="sm" variant="outline" class="mt-2 text-xs" onclick={() => { handleClose(); actions.openCertSignDialog(); }}>
-            <KeyRound class="h-3.5 w-3.5 mr-1.5 text-primary" /> Add Digital Certificate Signature
+          <Button size="sm" variant="outline" class="mt-2 h-8 text-xs" onclick={() => { handleClose(); actions.openCertSignDialog(); }}>
+            <KeyRound class="h-3.5 w-3.5 mr-1.5" /> Add Digital Certificate Signature
           </Button>
         </div>
       {:else}
@@ -91,14 +91,14 @@
 
         <div class="space-y-3">
           {#each results as sig (sig.signatureId)}
-            <div class="border rounded-lg overflow-hidden bg-card transition-all {sig.status === 'valid' ? 'border-success/40 shadow-xs' : 'border-destructive/40'}">
-              <div class="p-3.5 flex items-start justify-between border-b border-border/60 bg-muted/20">
+            <div class="border rounded-[var(--radius-card)] overflow-hidden bg-card transition-[border-color] duration-200 {sig.status === 'valid' ? 'border-border' : 'border-destructive/40'}">
+              <div class="p-3 flex items-start justify-between border-b border-border/60 bg-card">
                 <div class="space-y-1">
                   <div class="flex items-center gap-2">
                     <span class="font-semibold text-xs text-foreground">{sig.signerName}</span>
                     {#if sig.status === 'valid'}
                       <Badge variant="success" class="text-[10px] flex items-center gap-1">
-                        <CheckCircle2 class="h-3 w-3" /> Valid & Untampered
+                        <CheckCircle2 class="h-3 w-3" /> Valid &amp; Untampered
                       </Badge>
                     {:else if sig.status === 'tampered'}
                       <Badge variant="destructive" class="text-[10px] flex items-center gap-1">
@@ -111,6 +111,12 @@
                     {:else}
                       <Badge variant="destructive" class="text-[10px] flex items-center gap-1">
                         <XCircle class="h-3 w-3" /> Invalid Signature
+                      </Badge>
+                    {/if}
+
+                    {#if sig.isCertificationSignature}
+                      <Badge variant="outline" class="text-[10px] border-border font-sans">
+                        Certified{sig.docMdpPermissionLevel ? ` (DocMDP P=${sig.docMdpPermissionLevel})` : ''}
                       </Badge>
                     {/if}
 
@@ -127,7 +133,7 @@
                         PAdES B-B (Baseline)
                       </Badge>
                     {:else}
-                      <Badge variant="outline" class="text-[10px] bg-muted/60 text-muted-foreground border-border font-sans">
+                      <Badge variant="outline" class="text-[10px] text-muted-foreground border-border font-sans">
                         Legacy PKCS#7
                       </Badge>
                     {/if}
@@ -142,7 +148,7 @@
                 </div>
               </div>
 
-              <div class="p-3.5 space-y-2 text-xs">
+              <div class="p-3 space-y-2 text-xs">
                 {#if sig.reason}
                   <div class="flex justify-between">
                     <span class="text-muted-foreground">Reason:</span>
@@ -158,28 +164,40 @@
                 {/if}
 
                 <!-- Standards & Cryptographic Verification Audit Matrix -->
-                <div class="pt-2 border-t border-border/50 bg-muted/10 rounded p-2 text-[11px] space-y-1 font-sans">
+                <div class="pt-2 border-t border-border/50 bg-card rounded p-2 text-[11px] space-y-1 font-sans">
+                  <div class="flex justify-between">
+                    <span class="text-muted-foreground">Digest Algorithm:</span>
+                    <span class="text-foreground font-medium">{sig.digestAlgorithm}</span>
+                  </div>
+                  {#if sig.transformMethod}
+                    <div class="flex justify-between">
+                      <span class="text-muted-foreground">Transform Method:</span>
+                      <span class="text-foreground font-medium">
+                        {sig.transformMethod}{sig.docMdpPermissionLevel ? ` (Access Level P=${sig.docMdpPermissionLevel})` : ''}
+                      </span>
+                    </div>
+                  {/if}
                   <div class="flex justify-between">
                     <span class="text-muted-foreground">CAdES signingCertificateV2:</span>
-                    <span class={sig.hasSigningCertificateV2 ? 'text-success font-medium' : 'text-muted-foreground'}>
+                    <span class={sig.hasSigningCertificateV2 ? 'text-foreground font-medium' : 'text-muted-foreground'}>
                       {sig.hasSigningCertificateV2 ? 'Bound (RFC 5035 ESSCertIDv2)' : 'Not Bound (Legacy)'}
                     </span>
                   </div>
                   <div class="flex justify-between">
                     <span class="text-muted-foreground">RFC 3161 Qualified Timestamp:</span>
-                    <span class={sig.hasTimestampToken ? 'text-success font-medium' : 'text-muted-foreground'}>
+                    <span class={sig.hasTimestampToken ? 'text-foreground font-medium' : 'text-muted-foreground'}>
                       {sig.hasTimestampToken ? (sig.timestampTime ? `Present (${sig.timestampTime})` : 'Present') : 'None'}
                     </span>
                   </div>
                   <div class="flex justify-between">
                     <span class="text-muted-foreground">Certificate Legitimacy:</span>
-                    <span class={sig.hasIllegalTimeStampingUsage ? 'text-destructive font-semibold' : 'text-success'}>
+                    <span class={sig.hasIllegalTimeStampingUsage ? 'text-destructive font-semibold' : 'text-foreground'}>
                       {sig.hasIllegalTimeStampingUsage ? 'Illegal (timeStamping EKU Conflict)' : 'Legitimate Document Signer'}
                     </span>
                   </div>
                   <div class="flex justify-between">
                     <span class="text-muted-foreground">Document Security Store (/DSS):</span>
-                    <span class={sig.hasDss ? 'text-success font-medium' : 'text-muted-foreground'}>
+                    <span class={sig.hasDss ? 'text-foreground font-medium' : 'text-muted-foreground'}>
                       {sig.hasDss ? 'Present (Long Term Validation)' : 'Not Present'}
                     </span>
                   </div>
@@ -215,8 +233,8 @@
                     </ul>
                   </div>
                 {:else}
-                  <div class="p-2 bg-success/10 border border-success/20 rounded text-[11px] text-success flex items-center gap-1.5 font-medium">
-                    <CheckCircle2 class="h-3.5 w-3.5 text-success shrink-0" />
+                  <div class="p-2 bg-card border border-border rounded text-[11px] text-foreground flex items-center gap-1.5 font-medium">
+                    <CheckCircle2 class="h-3.5 w-3.5 shrink-0" />
                     Compliant with Swiss ESigA / ZertES and ETSI EN 319 142 PAdES requirements.
                   </div>
                 {/if}
@@ -257,11 +275,11 @@
       {/if}
     </div>
 
-    <Dialog.Footer class="px-6 py-3 border-t border-border bg-card flex justify-between items-center">
+    <Dialog.Footer class="justify-between">
       <div class="text-[11px] text-muted-foreground flex items-center gap-1">
-        <Lock class="h-3 w-3 text-success" /> Verified using detached PKCS#7 SHA-256 digests.
+        <Lock class="h-3 w-3" /> Verified using detached PKCS#7 SHA-256 digests.
       </div>
-      <Button variant="outline" size="sm" class="text-xs" onclick={handleClose}>
+      <Button variant="outline" size="sm" class="h-8 text-xs" onclick={handleClose}>
         Close
       </Button>
     </Dialog.Footer>
