@@ -29,7 +29,6 @@
   import CompressDocumentDialog from './components/dialogs/CompressDocumentDialog.svelte';
   import SanitizeDocumentDialog from './components/dialogs/SanitizeDocumentDialog.svelte';
   import ImpositionDialog from './components/dialogs/ImpositionDialog.svelte';
-  import DocumentInfoDialog from './components/dialogs/DocumentInfoDialog.svelte';
   import ToolMockupDialog from './components/dialogs/ToolMockupDialog.svelte';
   import EsignDialog from './components/dialogs/EsignDialog.svelte';
   import CertSignDialog from './components/dialogs/CertSignDialog.svelte';
@@ -43,6 +42,8 @@
   import PermissionsDialog from './components/dialogs/PermissionsDialog.svelte';
   import QrBarcodeModal from './components/dialogs/QrBarcodeModal.svelte';
   import ComponentGalleryDialog from './components/dialogs/ComponentGalleryDialog.svelte';
+  import AdjustColorsDialog from './components/dialogs/AdjustColorsDialog.svelte';
+  import PageNumberingDialog from './components/dialogs/PageNumberingDialog.svelte';
   import { inspectFileInfo } from './utils/file-type-detector';
   import { WebMcpStore, provideWebMcpStore } from './stores/webmcp.svelte';
   import { PwaStore, providePwaStore } from './stores/pwa.svelte';
@@ -87,6 +88,7 @@
   void registerBuiltinPlugins(pluginManager);
 
   const featureFlags = new FeatureFlagStore();
+  actions.setFeatureFlags(featureFlags);
 
   const webMcpStore = new WebMcpStore();
   provideWebMcpStore(webMcpStore);
@@ -146,6 +148,8 @@
     const cleanupUrl = listenToUrlChanges(async (req) => {
       if (req.kind === 'preset') {
         await actions.loadDemoDocument(req.presetId);
+      } else if (req.kind === 'presets') {
+        await actions.loadDemoDocuments(req.presetIds);
       } else if (req.kind === 'url') {
         await actions.loadDocumentFromUrl(req.url);
       }
@@ -169,6 +173,8 @@
       void actions.initializeEngine().then(async () => {
         if (req.kind === 'preset') {
           await actions.loadDemoDocument(req.presetId);
+        } else if (req.kind === 'presets') {
+          await actions.loadDemoDocuments(req.presetIds);
         } else if (req.kind === 'url') {
           await actions.loadDocumentFromUrl(req.url);
         }
@@ -333,7 +339,7 @@
   bind:this={fileInputEl}
   type="file"
   multiple
-  accept=".pdf,application/pdf,image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.svg,.docx,.xlsx,.xls,.csv,.tsv,.pptx,.ppt,.txt,.md,.markdown,.json,.xml,.html,.rtf,.yaml,.yml,.log"
+  accept=".pdf,application/pdf,image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.svg,.docx,.xlsx,.xls,.csv,.tsv,.pptx,.ppt,.txt,.md,.markdown,.json,.xml,.html,.htm,.rtf,.yaml,.yml,.log"
   onchange={handleFileSelected}
   class="hidden"
 />
@@ -420,6 +426,12 @@
 />
 
 <TooltipProvider>
+  <a
+    href="#main-canvas-viewport"
+    class="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
+  >
+    Skip to main content
+  </a>
   <EditorShell>
     {#snippet navRail()}
       <NavRail />
@@ -456,6 +468,12 @@
 {#if featureFlags.isEnabled('ocr')}
   <OcrDialog />
 {/if}
+{#if featureFlags.isEnabled('redaction.colors')}
+  <AdjustColorsDialog />
+{/if}
+{#if featureFlags.isEnabled('page-numbers')}
+  <PageNumberingDialog />
+{/if}
 
 {#if featureFlags.isEnabled('imposition') && store.showImpositionDialog}
   <ImpositionDialog
@@ -463,10 +481,6 @@
     onClose={() => (store.showImpositionDialog = false)}
     initialMode={store.impositionInitialMode}
   />
-{/if}
-
-{#if featureFlags.isEnabled('document-info')}
-  <DocumentInfoDialog />
 {/if}
 
 <ToolMockupDialog />
