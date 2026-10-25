@@ -675,7 +675,8 @@
     </DropdownMenu.Root>
     {/if}
 
-    {#if featureFlags.isEnabled('annotations.eraser')}
+    <!-- note: history undo and redo buttons moved to the right after zoom without ButtonGroup -->
+    {#if featureFlags.isEnabled('history')}
     <Tooltip.Root>
       <Tooltip.Trigger>
         {#snippet child({ props })}
@@ -683,21 +684,18 @@
             {...props}
             variant="ghost"
             size="icon"
-            class="h-7 w-7 {store.activeTool === 'eraser' ? 'bg-accent text-accent-foreground shadow-2xs' : 'text-muted-foreground hover:text-foreground'}"
-            onclick={() => selectTool('eraser')}
-            disabled={!store.isDocumentLoaded || !canAnnotate || isSuggesting}
-            aria-label="Eraser tool"
-            aria-pressed={store.activeTool === 'eraser'}
+            aria-label="Undo"
+            class="h-7 w-7 text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:pointer-events-none"
+            disabled={store.isReadOnly || !historyStore.canUndo}
+            onclick={() => actions.undo()}
           >
-            <Eraser class="w-3.5 h-3.5 text-destructive" />
+            <Undo2 class="w-3.5 h-3.5" />
           </Button>
         {/snippet}
       </Tooltip.Trigger>
-      <Tooltip.Content side="bottom">Eraser (E)</Tooltip.Content>
+      <Tooltip.Content side="bottom">Undo (Ctrl+Z)</Tooltip.Content>
     </Tooltip.Root>
-    {/if}
 
-    {#if featureFlags.isEnabled('annotations.note')}
     <Tooltip.Root>
       <Tooltip.Trigger>
         {#snippet child({ props })}
@@ -705,119 +703,182 @@
             {...props}
             variant="ghost"
             size="icon"
-            class="h-7 w-7 {store.activeTool === 'note' ? 'bg-accent text-accent-foreground shadow-2xs' : 'text-muted-foreground hover:text-foreground'}"
-            onclick={() => selectTool('note')}
-            disabled={!store.isDocumentLoaded || !canAnnotate}
-            aria-label="Sticky note comment"
-            aria-pressed={store.activeTool === 'note'}
+            aria-label="Redo"
+            class="h-7 w-7 text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:pointer-events-none"
+            disabled={store.isReadOnly || !historyStore.canRedo}
+            onclick={() => actions.redo()}
           >
-            <StickyNote class="w-3.5 h-3.5 text-warning" />
+            <Redo2 class="w-3.5 h-3.5" />
           </Button>
         {/snippet}
       </Tooltip.Trigger>
-      <Tooltip.Content side="bottom">Sticky Note (N)</Tooltip.Content>
+      <Tooltip.Content side="bottom">Redo (Ctrl+Y)</Tooltip.Content>
     </Tooltip.Root>
     {/if}
-  </div>
 
-  <!-- note: colour palette presets and stroke width controls -->
-  {#if featureFlags.isEnabled('annotations.colors')}
-  <div class="flex items-center gap-2 shrink-0">
-    <div class="flex items-center gap-1.5">
-      <button
-        type="button"
-        class="w-4.5 h-4.5 rounded-full bg-yellow-300 border border-yellow-400 focus:ring-1 focus:ring-primary {store.annotateColor === '#fde047' ? 'ring-2 ring-primary ring-offset-1' : ''} cursor-pointer transition-transform hover:scale-110 active:scale-95 disabled:opacity-50 disabled:pointer-events-none"
-        onclick={() => applyColor('#fde047')}
-        disabled={!store.isDocumentLoaded || !canAnnotate}
-        title="Yellow"
-        aria-label="Yellow"
-        aria-pressed={store.annotateColor === '#fde047'}
-      ></button>
-      <button
-        type="button"
-        class="w-4.5 h-4.5 rounded-full bg-green-300 border border-green-400 focus:ring-1 focus:ring-primary {store.annotateColor === '#86efac' ? 'ring-2 ring-primary ring-offset-1' : ''} cursor-pointer transition-transform hover:scale-110 active:scale-95 disabled:opacity-50 disabled:pointer-events-none"
-        onclick={() => applyColor('#86efac')}
-        disabled={!store.isDocumentLoaded || !canAnnotate}
-        title="Green"
-        aria-label="Green"
-        aria-pressed={store.annotateColor === '#86efac'}
-      ></button>
-      <button
-        type="button"
-        class="w-4.5 h-4.5 rounded-full bg-sky-300 border border-sky-400 focus:ring-1 focus:ring-primary {store.annotateColor === '#7dd3fc' ? 'ring-2 ring-primary ring-offset-1' : ''} cursor-pointer transition-transform hover:scale-110 active:scale-95 disabled:opacity-50 disabled:pointer-events-none"
-        onclick={() => applyColor('#7dd3fc')}
-        disabled={!store.isDocumentLoaded || !canAnnotate}
-        title="Blue"
-        aria-label="Blue"
-        aria-pressed={store.annotateColor === '#7dd3fc'}
-      ></button>
-      <button
-        type="button"
-        class="w-4.5 h-4.5 rounded-full bg-pink-300 border border-pink-400 focus:ring-1 focus:ring-primary {store.annotateColor === '#f472b6' ? 'ring-2 ring-primary ring-offset-1' : ''} cursor-pointer transition-transform hover:scale-110 active:scale-95 disabled:opacity-50 disabled:pointer-events-none"
-        onclick={() => applyColor('#f472b6')}
-        disabled={!store.isDocumentLoaded || !canAnnotate}
-        title="Pink"
-        aria-label="Pink"
-        aria-pressed={store.annotateColor === '#f472b6'}
-      ></button>
-      <button
-        type="button"
-        class="w-4.5 h-4.5 rounded-full bg-orange-300 border border-orange-400 focus:ring-1 focus:ring-primary {store.annotateColor === '#fdba74' ? 'ring-2 ring-primary ring-offset-1' : ''} cursor-pointer transition-transform hover:scale-110 active:scale-95 disabled:opacity-50 disabled:pointer-events-none"
-        onclick={() => applyColor('#fdba74')}
-        disabled={!store.isDocumentLoaded || !canAnnotate}
-        title="Orange"
-        aria-label="Orange"
-        aria-pressed={store.annotateColor === '#fdba74'}
-      ></button>
-      <ColorPicker
-        variant="circle"
-        value={store.annotateColor}
-        disabled={!store.isDocumentLoaded || !canAnnotate}
-        onValueChange={applyColor}
-        label="Custom Colour"
-        class="size-4.5 {isCustomAnnotateColor ? 'ring-2 ring-primary ring-offset-1' : ''}"
-      />
-    </div>
+    {#if showShiftedControls}
+      <!-- note: shifted viewing mode selector from collapsed right panel -->
+      {#if featureFlags.isEnabled('view-mode')}
+      <DropdownMenu.Root>
+        <DropdownButton
+          variant="default"
+          size="sm"
+          class="text-muted-foreground hover:text-foreground"
+          disabled={!store.isDocumentLoaded}
+          aria-label="Viewing mode"
+          text={store.viewMode === 'editing' ? 'Editing' : store.viewMode === 'viewing' ? 'View' : 'Suggesting'}
+        />
+        <DropdownMenu.Content align="end" class="w-52">
+          <DropdownMenu.Item
+            class="flex flex-col items-start gap-0.5 py-1.5 cursor-pointer"
+            onclick={() => store.setViewMode('editing')}
+          >
+            <div class="flex items-center justify-between w-full">
+              <div class="flex items-center gap-2">
+                <Pencil class="w-3.5 h-3.5 text-muted-foreground mt-0.5 shrink-0" />
+                <span class="font-medium text-foreground text-xs">Editing</span>
+              </div>
+              {#if store.viewMode === 'editing'}
+                <Check class="w-3 h-3 text-foreground shrink-0" />
+              {/if}
+            </div>
+            <span class="text-xs text-muted-foreground leading-snug">Edit document directly</span>
+          </DropdownMenu.Item>
+          <DropdownMenu.Item
+            class="flex flex-col items-start gap-0.5 py-1.5 cursor-pointer"
+            onclick={() => store.setViewMode('suggesting')}
+          >
+            <div class="flex items-center justify-between w-full">
+              <div class="flex items-center gap-2">
+                <MessageSquare class="w-3.5 h-3.5 text-warning mt-0.5 shrink-0" />
+                <span class="font-medium text-foreground text-xs">Suggesting</span>
+              </div>
+              {#if store.viewMode === 'suggesting'}
+                <Check class="w-3 h-3 text-foreground shrink-0" />
+              {/if}
+            </div>
+            <span class="text-xs text-muted-foreground leading-snug">Edits become suggestions</span>
+          </DropdownMenu.Item>
+          <DropdownMenu.Item
+            class="flex flex-col items-start gap-0.5 py-1.5 cursor-pointer"
+            onclick={() => store.setViewMode('viewing')}
+          >
+            <div class="flex items-center justify-between w-full">
+              <div class="flex items-center gap-2">
+                <Eye class="w-3.5 h-3.5 text-muted-foreground mt-0.5 shrink-0" />
+                <span class="font-medium text-foreground text-xs">View</span>
+              </div>
+              {#if store.viewMode === 'viewing'}
+                <Check class="w-3 h-3 text-foreground shrink-0" />
+              {/if}
+            </div>
+            <span class="text-xs text-muted-foreground leading-snug">Read-only view without changes</span>
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+      {/if}
 
-    <!-- note: stroke width buttons when pen tool is active -->
-    {#if store.activeTool === 'pen'}
-      <div class="h-3.5 w-px bg-border/60 mx-0.5 shrink-0" role="separator" aria-orientation="vertical"></div>
-      <ButtonGroup variant="outline" size="sm" class="h-6" aria-label="Stroke width">
-        <Button
-          variant={store.annotateStrokeWidth === 1 ? 'default' : 'outline'}
-          class="px-1.5 text-[10px] h-6"
-          onclick={() => { store.annotateStrokeWidth = 1; }}
-          disabled={!store.isDocumentLoaded || !canAnnotate}
-          aria-label="1 point stroke width"
-          aria-pressed={store.annotateStrokeWidth === 1}
-        >1pt</Button>
-        <Button
-          variant={store.annotateStrokeWidth === 2 ? 'default' : 'outline'}
-          class="px-1.5 text-[10px] h-6"
-          onclick={() => { store.annotateStrokeWidth = 2; }}
-          disabled={!store.isDocumentLoaded || !canAnnotate}
-          aria-label="2 point stroke width"
-          aria-pressed={store.annotateStrokeWidth === 2}
-        >2pt</Button>
-        <Button
-          variant={store.annotateStrokeWidth === 4 ? 'default' : 'outline'}
-          class="px-1.5 text-[10px] h-6"
-          onclick={() => { store.annotateStrokeWidth = 4; }}
-          disabled={!store.isDocumentLoaded || !canAnnotate}
-          aria-label="4 point stroke width"
-          aria-pressed={store.annotateStrokeWidth === 4}
-        >4pt</Button>
-        <Button
-          variant={store.annotateStrokeWidth === 6 ? 'default' : 'outline'}
-          class="px-1.5 text-[10px] h-6"
-          onclick={() => { store.annotateStrokeWidth = 6; }}
-          disabled={!store.isDocumentLoaded || !canAnnotate}
-          aria-label="6 point stroke width"
-          aria-pressed={store.annotateStrokeWidth === 6}
-        >6pt</Button>
-      </ButtonGroup>
+      <!-- note: shifted export dropdown from collapsed right panel -->
+      {#if featureFlags.isEnabled('export')}
+      {#snippet topbarExportMenuItem(exporter: ExportDefinition)}
+        <DropdownMenu.Item
+          class="text-xs"
+          onclick={() => exporter.export({
+            editorStore: store,
+            canvasStore,
+            actions,
+            service: actions.service,
+            canvasElements: canvasStore.elements,
+            pageTransforms: store.pageTransforms,
+          })}
+        >
+          {#if exporter.icon}
+            {@const IconComp = exporter.icon as Component<{ class?: string }>}
+            <IconComp class="w-3 h-3 mr-2" />
+          {/if}
+          <span>{exporter.label}</span>
+          {#if getExportShortcutLabel(exporter)}
+            <DropdownMenu.Shortcut class="tracking-normal">{getExportShortcutLabel(exporter)}</DropdownMenu.Shortcut>
+          {/if}
+        </DropdownMenu.Item>
+      {/snippet}
+      <DropdownMenu.Root>
+        <DropdownButton
+          variant="filled-bordered"
+          fillColor="primary"
+          size="sm"
+          aria-label="Export document"
+          disabled={!store.isDocumentLoaded}
+          text="Export"
+        />
+        <DropdownMenu.Content align="end" class="w-48">
+          {#each groupedExporters.pdfItems as exporter (exporter.id)}
+            {@render topbarExportMenuItem(exporter)}
+          {/each}
+
+          {#if groupedExporters.pdfItems.length > 0 && groupedExporters.submenus.length > 0}
+            <DropdownMenu.Separator />
+          {/if}
+
+          {#each groupedExporters.submenus as submenu (submenu.category)}
+            <DropdownMenu.Sub>
+              <DropdownMenu.SubTrigger class="text-xs">
+                <span>{submenu.label}</span>
+              </DropdownMenu.SubTrigger>
+              <DropdownMenu.SubContent class="w-48">
+                {#each submenu.items as exporter (exporter.id)}
+                  {@render topbarExportMenuItem(exporter)}
+                {/each}
+              </DropdownMenu.SubContent>
+            </DropdownMenu.Sub>
+          {/each}
+
+          {#if (groupedExporters.pdfItems.length > 0 || groupedExporters.submenus.length > 0) && groupedExporters.trailingItems.length > 0}
+            <DropdownMenu.Separator />
+          {/if}
+
+          {#each groupedExporters.trailingItems as exporter (exporter.id)}
+            {@render topbarExportMenuItem(exporter)}
+          {/each}
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+      {/if}
+
+      <!-- note: shifted expand/collapse panel toggle from collapsed right panel commented out -->
+      <!--
+      {#if featureFlags.isEnabled('view-mode.viewing.collapse-sidebar')}
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="ghost"
+              size="icon"
+              aria-label={isRightPanelCollapsed ? "Expand properties panel" : "Collapse panel"}
+              class="h-7 w-7 text-muted-foreground hover:text-foreground shrink-0"
+              onclick={() => {
+                if (isRightPanelCollapsed) {
+                  store.rightPanelCollapsed = false;
+                } else {
+                  store.rightPanelCollapsed = true;
+                }
+              }}
+            >
+              {#if isRightPanelCollapsed}
+                <PanelRightOpen class="w-3.5 h-3.5" />
+              {:else}
+                <PanelRightClose class="w-3.5 h-3.5" />
+              {/if}
+            </Button>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content side="bottom">
+          {isRightPanelCollapsed ? 'Expand Panel' : 'Collapse Panel'}
+        </Tooltip.Content>
+      </Tooltip.Root>
+      {/if}
+      -->
     {/if}
   </div>
-  {/if}
 </header>
 {/if}
