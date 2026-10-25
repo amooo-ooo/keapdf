@@ -14,7 +14,7 @@
     clearDragOverState,
   } from '../common/DraggableListItem.svelte';
   import { formatPageRange } from '../../utils/page-range';
-  import { useSelection } from '../../stores/selection.svelte';
+  import { useSelection, type WorkspaceSection } from '../../stores/selection.svelte';
   import { usePanelRegistry } from '../../core/panel-registry';
   import { useFeatureFlagStore } from '../../core/feature-flags';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -28,11 +28,9 @@
     Heading5,
     Heading6,
     Heading,
-    PanelLeftClose,
     FileText,
+    Bookmark,
   } from 'lucide-svelte';
-
-  import { onDestroy } from 'svelte';
 
   const store = useEditorStore();
   const actions = useEditorActions();
@@ -40,15 +38,23 @@
   const panelRegistry = usePanelRegistry();
   const featureFlags = useFeatureFlagStore();
 
-  onDestroy(() => {
-    stopPagesResize();
-    stopFilesResize();
+  $effect(() => {
+    return () => {
+      stopPagesResize();
+      stopFilesResize();
+    };
   });
+
+  const isPanelCollapsed = $derived(
+    (!store.isDocumentLoaded && featureFlags.isEnabled('panels.collapse-empty')) ||
+    store.leftPanelCollapsed
+  );
 
   const currentPanel = $derived(panelRegistry.get(store.leftPanelMode));
 
   let outline = $state<OutlineNode[]>([]);
   const flatOutline = $derived<OutlineItemFlat[]>(flattenOutlineTree(outline));
+  const hasOutline = $derived(featureFlags.isEnabled('outline'));
 
   // Split pane height percentages
   let filesPercent = $state(20);
@@ -57,6 +63,10 @@
   let isDraggingFilesDivider = $state(false);
   let mainContainerEl: HTMLElement | null = $state(null);
   let filesContainerEl: HTMLElement | null = $state(null);
+  let filesSectionEl: HTMLElement | null = $state(null);
+  let pagesSectionEl: HTMLElement | null = $state(null);
+  let outlineSectionEl: HTMLElement | null = $state(null);
+  let latestPressedSection = $state<WorkspaceSection | null>(null);
 
   $effect(() => {
     if (store.isDocumentLoaded) {
@@ -137,12 +147,14 @@
       const offsetY = clientY - rect.top;
       
       const newFilesPercent = (offsetY / rect.height) * 100;
-      const currentBottom = filesPercent + pagesPercent;
+      const currentBottom = hasOutline ? filesPercent + pagesPercent : 100;
       
       const boundedFilesPercent = Math.max(10, Math.min(currentBottom - 10, newFilesPercent));
       
       filesPercent = boundedFilesPercent;
-      pagesPercent = currentBottom - filesPercent;
+      if (hasOutline) {
+        pagesPercent = currentBottom - filesPercent;
+      }
     });
   }
 
@@ -266,59 +278,135 @@
       }
     }
   }
+
+  function setLatestSection(section: WorkspaceSection): void {
+    latestPressedSection = section;
+    selection.setActiveSection(section);
+  }
+
+  function getTargetSection(): WorkspaceSection {
+    if (typeof document !== 'undefined' && document.activeElement) {
+      const active = document.activeElement;
+      if (filesSectionEl && (filesSectionEl === active || filesSectionEl.contains(active))) {
+        return 'files';
+      }
+      if (pagesSectionEl && (pagesSectionEl === active || pagesSectionEl.contains(active))) {
+        return 'pages';
+      }
+      if (outlineSectionEl && (outlineSectionEl === active || outlineSectionEl.contains(active))) {
+        return 'outline';
+      }
+    }
+
+    if (latestPressedSection) {
+      if (latestPressedSection === 'files' && store.workspaceFiles.length > 0 && featureFlags.isEnabled('workspace.files')) {
+        return 'files';
+      }
+      if (latestPressedSection === 'pages' && featureFlags.isEnabled('workspace.pages')) {
+        return 'pages';
+      }
+      if (latestPressedSection === 'outline' && hasOutline) {
+        return 'outline';
+      }
+    }
+
+    if (selection.activeSection) {
+      if (selection.activeSection === 'files' && store.workspaceFiles.length > 0 && featureFlags.isEnabled('workspace.files')) {
+        return 'files';
+      }
+      if (selection.activeSection === 'pages' && featureFlags.isEnabled('workspace.pages')) {
+        return 'pages';
+      }
+      if (selection.activeSection === 'outline' && hasOutline) {
+        return 'outline';
+      }
+    }
+
+    if (selection.lastSelectedId) {
+      if (selection.lastSelectedId.startsWith('file_') && store.workspaceFiles.length > 0 && featureFlags.isEnabled('workspace.files')) {
+        return 'files';
+      }
+      if (selection.lastSelectedId.startsWith('page_') && featureFlags.isEnabled('workspace.pages')) {
+        return 'pages';
+      }
+      if (selection.lastSelectedId.startsWith('outline_') && hasOutline) {
+        return 'outline';
+      }
+    }
+
+    if (featureFlags.isEnabled('workspace.pages')) {
+      return 'pages';
+    }
+    if (featureFlags.isEnabled('workspace.files') && store.workspaceFiles.length > 0) {
+      return 'files';
+    }
+    return 'outline';
+  }
+
+  function handleKeyDown(e: KeyboardEvent): void {
+    const isCtrlOrCmd = (e.ctrlKey || e.metaKey) && !e.altKey;
+    if (!isCtrlOrCmd || e.key.toLowerCase() !== 'a') return;
+
+    const target = e.target as HTMLElement | null;
+    const isTyping =
+      target !== null &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable ||
+        Boolean(target.closest('[contenteditable="true"]')));
+    if (isTyping) return;
+
+    e.preventDefault();
+    actions.selectAllInWorkspaceSection(getTargetSection());
+  }
 </script>
 
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <aside
   aria-label="Workspace sidebar"
   class="h-full flex flex-col overflow-hidden select-none w-full bg-card"
-  style={store.leftPanelCollapsed ? 'width: 0px; padding: 0;' : ''}
+  style={isPanelCollapsed ? 'width: 0px; padding: 0;' : ''}
+  onkeydown={handleKeyDown}
 >
-  {#if !store.leftPanelCollapsed}
-    <div class="panel-container rounded-none border-0 shadow-none bg-card">
+  {#if !isPanelCollapsed}
+    <div class="h-full w-full flex flex-col overflow-hidden bg-card">
       <!-- Top Header: Document Title & Main Action -->
       <div class="panel-header">
-      <div class="flex items-start justify-between">
+      <div class="flex items-center justify-between">
         <div class="flex flex-col min-w-0 pr-1">
           {#if currentPanel && currentPanel.id !== 'workspace'}
             <span class="panel-title">{currentPanel.label}</span>
+            <!-- note: panel description subtitle commented out so only tab title is displayed -->
+            <!--
             {#if currentPanel.subtitle}
               <span class="panel-subtitle">{currentPanel.subtitle}</span>
             {/if}
+            -->
           {:else}
             <button
               type="button"
-              class="flex items-center gap-1 panel-title hover:text-primary truncate text-left group"
+              class="flex items-center gap-1 panel-title hover:text-foreground truncate text-left group"
               title={store.fileName}
               onclick={() => {
-                if (store.isDocumentLoaded && featureFlags.isEnabled('document-info')) {
-                  store.showDocumentInfoDialog = true;
+                if (store.isDocumentLoaded) {
+                  store.leftPanelMode = 'settings';
                 }
               }}
             >
               <span class="truncate">{store.fileName}</span>
               <ChevronDown class="h-3.5 w-3.5 text-muted-foreground group-hover:text-foreground shrink-0" />
             </button>
-            <span class="panel-subtitle tabular-nums">
+            <!-- note: workspace page count description subtitle commented out -->
+            <!--
+            <span class="panel-subtitle">
               {store.isDocumentLoaded ? `${store.pageCount} ${store.pageCount === 1 ? 'page' : 'pages'}` : 'PDF Document'}
             </span>
+            -->
           {/if}
         </div>
 
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-7 w-7 text-muted-foreground hover:text-foreground shrink-0"
-          onclick={() => {
-            store.leftPanelCollapsed = true;
-          }}
-          title="Collapse Left Sidebar"
-          aria-label="Collapse Left Sidebar"
-        >
-          <PanelLeftClose class="h-4 w-4" />
-        </Button>
+        <!-- note: left panel collapse button moved to bottom left toolbar (NavRail) -->
       </div>
-
-
     </div>
 
     <!-- Body Panel Container -->
@@ -331,11 +419,16 @@
       <!-- Resizable Split View Container (Files, Pages, Outline) -->
       <div
         bind:this={mainContainerEl}
-        class="flex-1 flex flex-col min-h-0 overflow-hidden relative py-1"
+        class="flex-1 flex flex-col min-h-0 overflow-hidden relative"
       >
         {#if featureFlags.isEnabled('workspace.files') && store.workspaceFiles.length > 0}
           <!-- Files container -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
           <section
+            bind:this={filesSectionEl}
+            data-workspace-section="files"
+            onpointerdown={() => setLatestSection('files')}
+            onfocusin={() => setLatestSection('files')}
             class="sidebar-section min-h-0 shrink-0"
             style="height: {filesPercent}%;"
           >
@@ -346,7 +439,7 @@
                 <Button
                   variant="ghost"
                   size="icon"
-                  class="h-6 w-6 text-muted-foreground hover:text-foreground"
+                  class="h-6 w-6 -mr-1.5 text-muted-foreground hover:text-foreground"
                   onclick={() => actions.triggerFileOpen(true)}
                   title="Add PDF to workspace"
                   aria-label="Add PDF to workspace"
@@ -359,7 +452,7 @@
             
             <div
               bind:this={filesContainerEl}
-              class="flex flex-col gap-0.5 px-2.5 pb-2.5 overflow-y-auto flex-1"
+              class="flex flex-col gap-1 px-2 overflow-y-auto flex-1"
               ondragover={handleFilesContainerDragOver}
               ondragleave={handleFilesContainerDragLeave}
               ondrop={handleFilesContainerDrop}
@@ -374,7 +467,14 @@
                   acceptGroups={['pages']}
                   canDrop={canDropPageInFiles}
                   onDropFromGroup={handleDropFromGroupInFiles}
-                  class="group flex items-center gap-2.5 p-1.5 rounded-md cursor-pointer transition-colors text-left text-xs [&>*]:pointer-events-none {selection.isSelected(`file_${file.id}`) || store.activeWorkspaceFileId === file.id ? 'bg-primary/10 text-foreground font-medium' : 'hover:bg-muted/60 text-foreground font-normal'}"
+                  role="button"
+                  tabindex={0}
+                  class="group flex items-center gap-2.5 p-1.5 rounded-md cursor-pointer transition-colors text-left text-xs [&>*]:pointer-events-none outline-none focus-visible:ring-1.5 focus-visible:ring-ring {selection.isSelected(`file_${file.id}`) || store.activeWorkspaceFileId === file.id ? 'bg-secondary text-foreground font-medium' : 'hover:bg-muted/60 text-foreground font-normal'}"
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      actions.switchWorkspaceFile(file.id);
+                    }
+                  }}
                   getDragIndices={() => {
                     const ids = new Set(
                       Array.from(selection.selectedIds)
@@ -431,16 +531,16 @@
                 >
                   <div class="w-7 h-8.5 flex items-center justify-center shrink-0">
                     {#if store.activeWorkspaceFileId === file.id && store.isDocumentLoaded}
-                      <PageThumbnailImage pageIndex={0} scale={0.2} class="max-w-full max-h-full w-auto h-auto object-contain rounded border border-border/50 bg-white shadow-2xs" />
+                      <PageThumbnailImage pageIndex={0} scale={0.2} class="max-w-full max-h-full w-auto h-auto object-contain rounded border border-border/50 bg-white" />
                     {:else if file.thumbnail}
-                      <img src={file.thumbnail} alt={file.fileName} class="max-w-full max-h-full w-auto h-auto object-contain rounded border border-border/50 bg-white shadow-2xs" />
+                      <img src={file.thumbnail} alt={file.fileName} class="max-w-full max-h-full w-auto h-auto object-contain rounded border border-border/50 bg-white" />
                     {:else}
                       <div class="w-6 h-7.5 bg-muted/40 rounded border border-border/40 flex items-center justify-center">
                         <FileText class="w-3.5 h-3.5 text-muted-foreground/70" />
                       </div>
                     {/if}
                   </div>
-                  <span class="truncate flex-1 text-xs">{file.fileName}</span>
+                  <span class="truncate flex-1 text-xs" title={file.fileName}>{file.fileName}</span>
                 </DraggableListItem>
               {/each}
             </div>
@@ -460,9 +560,14 @@
 
         {#if featureFlags.isEnabled('workspace.pages')}
         <!-- Pages container -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <section
+          bind:this={pagesSectionEl}
+          data-workspace-section="pages"
+          onpointerdown={() => setLatestSection('pages')}
+          onfocusin={() => setLatestSection('pages')}
           class="sidebar-section min-h-0 shrink-0"
-          style="height: {featureFlags.isEnabled('outline') ? pagesPercent : (store.workspaceFiles.length > 0 && featureFlags.isEnabled('workspace.files') ? 100 - filesPercent : 100)}%;"
+          style="height: {hasOutline ? pagesPercent : (store.workspaceFiles.length > 0 && featureFlags.isEnabled('workspace.files') ? 100 - filesPercent : 100)}%;"
         >
           <div class="sidebar-section-header">
             <span class="sidebar-section-title">Pages</span>
@@ -471,7 +576,7 @@
               <Button
                 variant="ghost"
                 size="icon"
-                class="h-6 w-6 text-muted-foreground hover:text-foreground"
+                class="h-6 w-6 -mr-1.5 text-muted-foreground hover:text-foreground"
                 disabled={!store.isDocumentLoaded || store.isReadOnly}
                 onclick={() => actions.addBlankPage(store.currentPageIndex)}
                 title="Add blank page"
@@ -483,14 +588,23 @@
             {/if}
           </div>
 
-          <div class="flex-1 overflow-y-auto px-2.5 pb-2.5 relative">
+          <div class="flex-1 overflow-y-auto px-2 relative">
             {#if store.isDocumentLoaded}
               <PageThumbnailStrip />
+            {:else}
+              <div class="h-full flex flex-col items-center justify-center p-4 text-center">
+                <FileText class="h-8 w-8 text-muted-foreground/40 mb-2" />
+                <p class="text-xs font-medium text-foreground">No document open</p>
+                <p class="text-[11px] text-muted-foreground mt-0.5 max-w-[180px]">Open a PDF file to view and organise pages</p>
+                <Button size="xs" variant="outline" class="mt-2.5 text-xs" onclick={() => actions.triggerFileOpen()}>
+                  Open PDF
+                </Button>
+              </div>
             {/if}
           </div>
         </section>
 
-        {#if featureFlags.isEnabled('outline')}
+        {#if hasOutline}
         <!-- Resizable Horizontal Divider (Pages <-> Outline) -->
         <div
           class="relative !cursor-row-resize shrink-0 z-10"
@@ -504,9 +618,14 @@
         {/if}
         {/if}
 
-        {#if featureFlags.isEnabled('outline')}
+        {#if hasOutline}
         <!-- Outline container -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <section
+          bind:this={outlineSectionEl}
+          data-workspace-section="outline"
+          onpointerdown={() => setLatestSection('outline')}
+          onfocusin={() => setLatestSection('outline')}
           class="sidebar-section min-h-0 flex-1"
           style="height: {store.workspaceFiles.length > 0 && featureFlags.isEnabled('workspace.files') ? 100 - filesPercent - pagesPercent : 100 - pagesPercent}%;"
         >
@@ -516,7 +635,7 @@
               <Button
                 variant="ghost"
                 size="icon"
-                class="h-6 w-6 text-muted-foreground hover:text-foreground"
+                class="h-6 w-6 -mr-1.5 text-muted-foreground hover:text-foreground"
                 disabled={!store.isDocumentLoaded || store.isReadOnly}
                 onclick={() => actions.addTextToOutline()}
                 title="Add current selection or page to outline"
@@ -527,16 +646,33 @@
             </div>
           </div>
 
-          <div class="flex-1 overflow-y-auto px-2.5 pb-2.5">
-            {#if flatOutline.length > 0}
-              <div class="flex flex-col gap-0.5">
+          <div class="flex-1 overflow-y-auto px-2">
+            {#if flatOutline.length === 0}
+              <div class="h-full flex flex-col items-center justify-center p-4 text-center">
+                <Bookmark class="h-8 w-8 text-muted-foreground/40 mb-2" />
+                <p class="text-xs font-medium text-foreground">No outline in document</p>
+                <p class="text-[11px] text-muted-foreground mt-0.5 max-w-[180px]">Add headings or bookmarks to navigate this document</p>
+                {#if featureFlags.isEnabled('outline')}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="mt-2.5 h-7 text-xs px-2.5"
+                    disabled={!store.isDocumentLoaded || store.isReadOnly}
+                    onclick={() => actions.generateAutomaticOutline()}
+                  >
+                    Auto-generate Outline
+                  </Button>
+                {/if}
+              </div>
+            {:else}
+              <div class="flex flex-col gap-1">
                 {#each flatOutline as item, itemIndex}
                   {@const isSelected = selection.isSelected(`outline_${item.title}_${itemIndex}`)}
                   <DraggableListItem
                     id={`outline_${item.title}_${itemIndex}`}
                     index={itemIndex}
                     group="outline"
-                    class="group flex items-center gap-1.5 p-1.5 rounded-md cursor-pointer text-xs transition-colors {isSelected ? 'bg-primary/10 text-foreground font-medium' : 'hover:bg-muted/60 text-foreground font-normal'}"
+                    class="group flex items-center gap-1.5 p-1.5 rounded-md cursor-pointer text-xs transition-colors outline-none focus-visible:ring-1.5 focus-visible:ring-ring {isSelected ? 'bg-secondary text-foreground font-medium' : 'hover:bg-muted/60 text-foreground font-normal'}"
                     style="padding-left: {(item.level - 1) * 12 + 6}px"
                     getDragIndices={() => {
                       const ids = Array.from(selection.selectedIds);
