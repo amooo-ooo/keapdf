@@ -7,8 +7,9 @@
   import { Label } from '$lib/components/ui/label/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Checkbox } from '$lib/components/ui/checkbox/index.js';
+  import { ControlRow } from '$lib/components/ui/control-row/index.js';
   import { parsePageRangeStrict } from '../../utils/page-range';
-  import { Loader2 } from 'lucide-svelte';
+  import { Loader2, Scissors } from 'lucide-svelte';
 
   interface Props {
     mode: 'split' | 'extract';
@@ -73,23 +74,28 @@
 </script>
 
 <Dialog.Root open={true} onOpenChange={handleOpenChange}>
-  <Dialog.Content class="sm:max-w-[425px]">
-    <Dialog.Header>
-      <Dialog.Title>{mode === 'split' ? 'Split Pages' : 'Extract Pages'}</Dialog.Title>
+  <Dialog.Content class="sm:max-w-[420px]">
+    <Dialog.Header class="pr-12">
+      <Dialog.Title>
+        <Scissors class="h-4 w-4" />
+        {mode === 'split' ? 'Split Pages' : 'Extract Pages'}
+      </Dialog.Title>
       <Dialog.Description>
         Specify page numbers or page ranges to {mode === 'split' ? 'split and remove from the current document' : 'extract into a new PDF document'}.
       </Dialog.Description>
     </Dialog.Header>
 
-    <div class="grid gap-4 py-4">
-      <div class="grid gap-2">
-        <Label for="range-input">Page ranges (e.g. "1-3, 5, 7")</Label>
+    <div class="dialog-body">
+      <div class="field-group">
+        <Label for="range-input" class="field-label">Page ranges (e.g. "1-3, 5, 7")</Label>
         <Input
           id="range-input"
           type="text"
+          aria-invalid={Boolean(errorMessage)}
           bind:value={rangeInput}
           placeholder="1-3, 5"
           disabled={isProcessing}
+          class="field-input"
           onkeydown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault();
@@ -99,29 +105,26 @@
         />
       </div>
 
-      <div class="flex items-center space-x-2">
+      <ControlRow label="Download extracted PDF file immediately" for="auto-download" size="sm">
         <Checkbox id="auto-download" bind:checked={autoDownload} />
-        <Label for="auto-download" class="text-xs font-normal cursor-pointer">
-          Download extracted PDF file immediately
-        </Label>
-      </div>
+      </ControlRow>
 
       {#if errorMessage}
-        <div class="rounded bg-destructive/10 p-2 text-xs font-medium text-destructive">
+        <div role="alert" class="dialog-error">
           {errorMessage}
         </div>
       {/if}
 
-      <div class="text-xs text-muted-foreground">
+      <div class="text-[11px] text-muted-foreground">
         Total pages available in document: {store.pageCount}
       </div>
     </div>
 
     <Dialog.Footer>
-      <Button variant="outline" disabled={isProcessing} onclick={onClose}>
+      <Button variant="outline" size="sm" class="h-8 text-xs" disabled={isProcessing} onclick={onClose}>
         Cancel
       </Button>
-      <Button disabled={isProcessing} onclick={handleSplit}>
+      <Button variant="secondary" size="sm" class="h-8 text-xs" disabled={isProcessing} onclick={handleSplit}>
         {#if isProcessing}
           <Loader2 class="h-3.5 w-3.5 mr-1.5 animate-spin" />
           Processing...
